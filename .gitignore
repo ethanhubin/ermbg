@@ -36,3 +36,4 @@ samples/outputs/
 .cache/
 hf_cache/
 .claude/settings.local.json
+out/
