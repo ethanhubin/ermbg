@@ -155,6 +155,7 @@ def merge_alpha_components(
     max_component_area_ratio: float = 0.5,
     matting_present_coverage: float = 0.30,
     fg_threshold: float = 0.5,
+    feather_radius: int = 1,
 ) -> tuple[np.ndarray, dict]:
     """Patch missing subjects from key α back into matting α.
 
@@ -166,13 +167,14 @@ def merge_alpha_components(
          Below ``matting_present_coverage`` (default 30%) we treat matting as
          having missed it and patch it in.
       3. Patched components keep the chromatic α via ``maximum``, so we never
-         decrease an existing α.
-      4. The matting α elsewhere is left unchanged so we don't lose its better
-         edge feathering.
-
-    The 'coverage' rule (rather than 'any pixel above ε') matters on white
-    backgrounds: there, a missed small subject can pick up tiny BiRefNet halo
-    leak (α≈0.05), and an 'any' check would falsely conclude matting saw it.
+         decrease an existing α. The chromatic α is feathered by a small
+         Gaussian (``feather_radius``) before merging — the chromatic key
+         produces a hard 0→1 step (typical soft-edge fraction <1%), and
+         dropping that into the matting α as-is creates visible aliasing on
+         the patched component vs the AA edges everywhere else. A 1px
+         Gaussian gives back roughly the AA the matting net would have
+         produced if it had seen the subject.
+      4. The matting α elsewhere is left unchanged.
 
     Returns:
       merged_alpha: float32 H×W in [0, 1]
@@ -190,6 +192,18 @@ def merge_alpha_components(
     patched: list[int] = []
     areas: list[int] = []
 
+    # Pre-soften the chromatic α once. Cheap (single Gaussian) and only
+    # consumed inside the per-component path.
+    if feather_radius > 0:
+        ksize = 2 * feather_radius + 1
+        chrom_soft = cv2.GaussianBlur(
+            chromatic_alpha.astype(np.float32),
+            (ksize, ksize),
+            sigmaX=float(feather_radius),
+        )
+    else:
+        chrom_soft = chromatic_alpha.astype(np.float32)
+
     for i in range(1, n_labels):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_area or area > max_area:
@@ -199,8 +213,29 @@ def merge_alpha_components(
         coverage = float((matting_alpha[comp_mask] >= fg_threshold).mean())
         if coverage >= matting_present_coverage:
             continue
-        # Patch in the chromatic α for this component.
-        merged[comp_mask] = np.maximum(merged[comp_mask], chromatic_alpha[comp_mask])
+        # Patch the feathered chromatic α into the merged map. Use the
+        # component's bounding box so we also pick up the feather "bleed"
+        # one pixel outside the strict component mask.
+        x, y, ww, hh = (
+            stats[i, cv2.CC_STAT_LEFT],
+            stats[i, cv2.CC_STAT_TOP],
+            stats[i, cv2.CC_STAT_WIDTH],
+            stats[i, cv2.CC_STAT_HEIGHT],
+        )
+        # Expand bbox by feather radius and clamp
+        pad = feather_radius + 1
+        y0, y1 = max(0, y - pad), min(h, y + hh + pad)
+        x0, x1 = max(0, x - pad), min(w, x + ww + pad)
+        # Restrict the feathered region to a dilation of the component
+        # so we don't pull α from neighboring blobs.
+        comp_dil = cv2.dilate(
+            comp_mask[y0:y1, x0:x1].astype(np.uint8),
+            np.ones((3, 3), np.uint8),
+            iterations=feather_radius + 1,
+        ).astype(bool)
+        sub = chrom_soft[y0:y1, x0:x1].copy()
+        sub[~comp_dil] = 0.0
+        merged[y0:y1, x0:x1] = np.maximum(merged[y0:y1, x0:x1], sub)
         patched.append(i)
         areas.append(area)
 

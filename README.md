@@ -1,47 +1,191 @@
 # ERMBG
 
-基于纯色背景探针图的半透明抠图工程。设计思路见 [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md)。
+> 给 AI 出图配套的智能抠图工具:**指定背景色出图 → 自动选策略抠干净 → 输出可直接复用的 RGBA**。
 
-当前进度：**Phase 0 + Phase 1 (探针生成可行性验证)**。Phase 2+ 的解析式 matting 等 Phase 1 报告出来后再排。
+---
+
+## 设计理念
+
+抠图难,本质上是因为单张复杂背景图的边缘像素已经把前景、背景、模糊、压缩噪声全混在一起,信息论上不可逆。但**当下游用 AI 生图大模型出图时,你完全可以让背景在生成阶段就是已知纯色**(绿幕 / 白底 / 黑底)。这就把"反演混合"问题改写成了"已知 B 解 α、F"的可解问题。
+
+ERMBG 把这套链路拆成两段:
+
+```
+[ 第一段 ]  AI 生图模型   →  指定背景色出图 (默认绿幕 RGB(0,200,0))
+[ 第二段 ]  ERMBG 抠图  →  自动识别背景类型,选最优策略,输出 RGBA
+```
+
+第一段只是约定生图参数,第二段是这个仓库的工程实现。**用户不需要填任何参数**,系统自己判断每张图怎么抠。
+
+---
+
+## 关键特点
+
+### 1. 前端 router:看图选策略
+
+每张图先经过 [`classify_strategy`](ermbg/router.py),输出一份 `Strategy`,里面定好 keyer 模式 / despill 方法 / 是否补漏 / 是否压晕。决策表:
+
+| 情形 | 触发条件(自动检测) | keyer | despill | 备注 |
+|---|---|---|---|---|
+| 透明 PNG 且干净 | RGBA 通过 hygiene 检查 | — | none | 直接 pass-through |
+| 透明 PNG 但脏 | hygiene 检测到边缘 halo / 旧背景泄漏 / α 二值化 | 重抠 | 按背景再选 | **不让脏资产蒙混过关** |
+| 饱和底 (绿/品红/青...) | OKLab chroma ≥ 8 | chromatic | auto | 最佳工况 |
+| 白底 | L ≥ 85,chroma 低 | luminance | unmix | |
+| 黑底 | L ≤ 15,chroma 低 | luminance | unmix | |
+| 灰底 | 中亮度,chroma 低 | luminance(放宽阈值) | local_borrow | 信号弱,以网络 α 为主 |
+| 噪声底 | 角落 σ > 18 | none | local_borrow | 不是纯色底,降级 |
+
+`image_type`(graphic vs photo)进一步影响 keyer 阈值与 gate 是否启用:卡通 / logo 收紧并启用 gate(压去 BiRefNet 的羽化白晕),自然图放宽并保护软边(头发不被切硬)。
+
+### 2. 已知 B 时用闭式 unmix,不靠经验
+
+经典绿幕脚本用 `chroma_cap`(把 G 通道压到 max(R, B))这种启发式;但只要 B 已知,正解就是
+
+```
+F = (C − (1 − α) · B) / α
+```
+
+ERMBG 直接闭式解,低 α 区域用 KDTree 借色兜底。在饱和 B 上额外叠 chroma_cap 抹掉残余色边,综合最优。
+
+### 3. 智能脏度检测(无监督 / 无参数)
+
+如果你给的是已经抠过的 RGBA,系统不会盲目复用源 α,而是跑 [`assess_source_alpha`](ermbg/router.py) 三个无监督指标:
+
+- **fringe_dE**:在软边带把 RGB 按 straight/sRGB-premul/linear-premul 三种 α 包装解出 F,取最贴近 interior 的那个的 OKLab 距离 — 健壮地穿过所有 α 包装惯例,识别白边/黑边/绿边。
+- **low_alpha_residual**:α≈0 的像素 RGB 是否泄露 interior 色,或保留了原始底色。
+- **bimodal_fraction**:α 是否被硬阈值二值化,缺失 AA。
+
+任何一项不通过 → 自动重抠,把脏 RGBA 当原图处理。
+
+### 4. Keyer ↔ Matting 双向校准
+
+- **merge**:keyer 看到的小连通分量(BiRefNet 漏掉的小红点),按 coverage<30% 判定漏检,补回主 α(并加 1px feather 防止亮斑)。
+- **gate**(只对 graphic):keyer 高度自信"是背景"(ΔE 极小)的像素,把 matting 的羽化 α 压到 keyer α — 修掉 BiRefNet 在硬边图形上典型的白色光晕。
+- **fg protect**:matting α ≥ 0.85 的像素永不被 gate 拉低,保 photo 类的软边。
+
+### 5. 多背景 QA 自带 ground truth
+
+把 RGBA 合成到 black / white / grey / cyan / magenta / checker 6 张背景,每张配 lightwrap 变体,自动算 recomposition_error / edge_halo_score / alpha_noise / thin_structure_preservation。**不主观看图,用数字判通过**。
+
+---
 
 ## 安装
 
-需要 Python 3.11 或 3.12（PyTorch / diffusers 在 3.13/3.14 上 wheel 不全）。Mac 推荐用 pyenv：
+需要 Python 3.11 / 3.12(PyTorch wheel 不全)。Mac 推荐 uv:
 
 ```bash
-pyenv install 3.12.5
-pyenv local 3.12.5
-python -m venv .venv && source .venv/bin/activate
-
-# 基础依赖（不含 torch，可先跑 synthetic 探针 + validator）
-pip install -e ".[dev]"
-
-# 真要跑 SDXL inpainting / BiRefNet 才装：
-pip install -e ".[torch,dev]"
+git clone <this-repo>
+cd ERMBG
+uv venv && source .venv/bin/activate
+uv pip install -e ".[torch,dev]"
 ```
 
-模型权重首次会从 HuggingFace 下载，缓存到 `~/.cache/huggingface`。
+首次运行会从 HuggingFace 下载 BiRefNet-matting 权重(≈1 GB)到 `~/.cache/huggingface`。
 
-## CLI
+---
+
+## 使用
+
+### CLI
 
 ```bash
-ermbg --help
-ermbg segment <input>              # 跑粗分割，输出 mask + 粗 trimap
-ermbg probe <input> --color white  # 生成单张探针图
-ermbg validate --input samples/inputs --out samples/outputs/phase1
+# 端到端,自动选策略
+ermbg matte input.png
+
+# 仅看 router 决策(不跑抠图模型,秒回)
+ermbg diagnose input.png
+
+# 批量
+ermbg phase1 --input-dir samples/inputs --out-dir out/phase1
 ```
 
-## 目录结构
+输出:`*_rgba.png` / `*_alpha.png` / `*_foreground.png` / `*_trimap.png` / `*.report.json` / `*_qa/on_*.png`。
+
+### Python API
+
+```python
+from ermbg import matte_image, classify_image
+
+# 一行抠图
+r = matte_image("input.png", output_dir="out/", qa=True)
+r.rgba              # H×W×4 numpy uint8
+r.strategy_name     # 'saturated_bg' / 'white_bg' / 'rgba_passthrough' / ...
+r.report['qa']['edge_halo_score_mean']
+
+# 秒回预览(不跑 BiRefNet)
+s = classify_image("input.png")
+print(s.bg_type, s.image_type, s.notes)
+```
+
+支持 path / numpy uint8 (HxWx3 或 HxWx4) / PIL Image。完整示例见 [examples/quickstart.py](examples/quickstart.py)。
+
+### ComfyUI 节点
+
+`comfy_nodes/` 提供两个自定义节点:
+
+- **ERMBG AutoMatte**:接 IMAGE(+ 可选 MASK),自动路由,出 foreground / alpha / 调试 summary。
+- **ERMBG Classify (preview)**:只跑 router,秒回 bg_type / image_type / 完整策略 JSON,做工作流分支用。
+
+最简工作流:
 
 ```
-ermbg/        # 主包
-  probe/      # 探针生成（synthetic / SDXL inpaint）
-  ...
-tests/        # 单元测试
-scripts/      # 评测脚本
-samples/      # 输入与产物
+KSampler → VAEDecode → ERMBG AutoMatte → SaveImage(RGBA)
 ```
 
-## Phase 1 目标
+详见 [comfy_nodes/README.md](comfy_nodes/README.md)。
 
-跑出 5 类物体 × 多种背景色 × 多种生成器的探针图，用 ProbeValidator 度量主体保真度，给出后续 Phase 2 的决策依据。详见 [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md) 第 8 节。
+---
+
+## 项目结构
+
+```
+ermbg/
+  router.py        前端策略选择 + RGBA 卫生检测
+  keyer.py         chromatic / luminance keyer + merge / gate
+  segmenter.py     BiRefNet-matting / GrabCut 回退
+  diagnose.py      背景诊断 (B / σ / verdict)
+  despill.py       unmix / chroma_cap / local_borrow / closed_form
+  matting.py       端到端 matte() 主入口
+  api.py           matte_image / classify_image 高阶 API
+  qa.py            6 背景 QA + 多指标
+  cli.py           segment / diagnose / matte / phase1 / probe
+  lightwrap.py     Brinkmann 边缘光晕修正
+  metrics.py       OKLab 距离 / 背景采样 / IoU / Hausdorff
+  io.py / colorspace.py / types.py
+
+comfy_nodes/       ComfyUI 自定义节点
+examples/          quickstart 等示例
+tests/             81 项 pytest
+samples/inputs/    11 张测试图,涵盖各类背景
+```
+
+---
+
+## 目前的工况
+
+| 输入 | 路由 | 评价 |
+|---|---|---|
+| 绿底 / 品红 / 青底 (graphic) | saturated_bg + chromatic + auto + gate | 最佳,recomp_err ≈ 0.02 |
+| 白底 / 黑底 (graphic) | white_bg / black_bg + luminance + unmix + gate | 边缘干净,黑底无白晕 |
+| 灰底 photo | grey_bg + luminance(宽阈值)+ local_borrow | 软边保留 |
+| 自然底 photo | noisy_bg + local_borrow | 降级到只用网络 α |
+| 干净 RGBA | rgba_passthrough | 直接复用 |
+| 脏 RGBA | hygiene 拒绝 → 重抠 | 不让脏资产蒙混 |
+
+详细工程现状见 [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md)。
+
+---
+
+## 测试
+
+```bash
+.venv/bin/pytest -q
+```
+
+覆盖 router 决策表 / keyer / despill / 诊断 / hygiene / API / ComfyUI 节点 / 端到端 smoke,共 81 项。
+
+---
+
+## 开发反馈
+
+提 issue 时附上:输入图、`*.report.json`、对应 `*_qa/on_black.png`(白晕一眼可见)。
