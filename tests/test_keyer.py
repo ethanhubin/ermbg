@@ -58,6 +58,25 @@ def test_merge_does_not_override_main_subject():
     np.testing.assert_array_equal(merged, matting)
 
 
+def test_merge_patches_when_matting_only_has_halo_leak():
+    """A small subject the matting net misses, but where its α has a tiny
+    halo bleed into the region (e.g. α≈0.05 on a few pixels), should still
+    be patched. The 'coverage' rule looks at how much of the component
+    matting marks as foreground, not whether *any* pixel is non-zero."""
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[10:50, 10:50] = 1.0    # main blob, fully captured
+    matting[60:70, 60:70] = 0.05   # missed small subject, only halo leak
+
+    chrom = np.zeros((h, w), dtype=np.float32)
+    chrom[10:50, 10:50] = 1.0
+    chrom[60:70, 60:70] = 1.0      # keyer sees both
+
+    merged, info = merge_alpha_components(matting, chrom)
+    assert info["patched_components"] == 1
+    assert merged[60:70, 60:70].mean() > 0.5
+
+
 def test_luminance_key_white_bg_dark_subject():
     """Dark subject on white bg should get α≈1; pure white pixels α≈0."""
     img = np.full((32, 32, 3), 255, dtype=np.uint8)

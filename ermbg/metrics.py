@@ -70,13 +70,35 @@ def hausdorff_distance_px(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _bg_region(mask: np.ndarray, dilate_radius: int) -> np.ndarray:
-    """Pixels safely outside the subject. Dilates by ``dilate_radius`` (not
-    half) plus a small AA safety margin so anti-aliased edges don't pollute
-    the bg color/σ measurement."""
-    m = binarize(mask).astype(np.uint8) * 255
-    iters = max(2, dilate_radius) + 2
-    dil = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=iters)
-    return dil == 0
+    """Pixels safely outside the subject *and* its anti-aliased fringe.
+
+    Two adjustments vs. the obvious ``mask>=0.5 then dilate``:
+
+      1. Threshold the mask at 0.05 (not 0.5). Soft-edge pixels with α∈(0, 0.5)
+         have RGB that mixes subject color into the background — sampling them
+         inflates σ and shifts the median toward the subject. Counting any
+         pixel with α>5% as "subject domain" pushes the bg sample further
+         from contamination.
+
+      2. Dilate by a generous margin (≈ band_radius + 12 iterations). The
+         matting net's α can leak farther than the nominal band radius on
+         graphics with hard edges, so we widen unconditionally. If that
+         erases the entire bg region (small image, big subject), we fall
+         back to a smaller margin.
+    """
+    soft = mask.astype(np.float32)
+    if soft.max() > 1.5:
+        soft = soft / 255.0
+    m = (soft > 0.05).astype(np.uint8) * 255
+    kernel = np.ones((3, 3), np.uint8)
+    for iters in (max(16, dilate_radius) + 4, dilate_radius + 4, dilate_radius):
+        if iters < 1:
+            break
+        dil = cv2.dilate(m, kernel, iterations=iters)
+        region = dil == 0
+        if region.sum() >= 64:
+            return region
+    return region
 
 
 def background_purity_sigma(image: np.ndarray, mask: np.ndarray, dilate_radius: int = 16) -> float:

@@ -104,19 +104,26 @@ def merge_alpha_components(
     chromatic_alpha: np.ndarray,
     min_component_area_ratio: float = 0.0005,
     max_component_area_ratio: float = 0.5,
-    matting_present_threshold: float = 0.05,
+    matting_present_coverage: float = 0.30,
     fg_threshold: float = 0.5,
 ) -> tuple[np.ndarray, dict]:
-    """Patch missing subjects from chromatic α back into matting α.
+    """Patch missing subjects from key α back into matting α.
 
     Workflow:
       1. Binarize chromatic_alpha at ``fg_threshold`` and find connected components.
-      2. For each chromatic component, check whether matting_alpha already covers
-         it (any pixel inside with α > ``matting_present_threshold``).
-      3. If matting missed it AND the component is reasonably sized, copy the
-         chromatic α values into the merged map for that component.
-      4. The matting α elsewhere (especially on the main subject) is left
-         unchanged so we don't lose its better edge feathering.
+      2. For each chromatic component, decide whether matting_alpha already
+         represents it. We use *coverage*: what fraction of the component
+         pixels does matting_alpha consider foreground (α ≥ ``fg_threshold``)?
+         Below ``matting_present_coverage`` (default 30%) we treat matting as
+         having missed it and patch it in.
+      3. Patched components keep the chromatic α via ``maximum``, so we never
+         decrease an existing α.
+      4. The matting α elsewhere is left unchanged so we don't lose its better
+         edge feathering.
+
+    The 'coverage' rule (rather than 'any pixel above ε') matters on white
+    backgrounds: there, a missed small subject can pick up tiny BiRefNet halo
+    leak (α≈0.05), and an 'any' check would falsely conclude matting saw it.
 
     Returns:
       merged_alpha: float32 H×W in [0, 1]
@@ -139,8 +146,9 @@ def merge_alpha_components(
         if area < min_area or area > max_area:
             continue
         comp_mask = labels == i
-        # If matting already represents this region, skip it — its feathering is better.
-        if (matting_alpha[comp_mask] > matting_present_threshold).any():
+        # Fraction of the component that matting also considers foreground.
+        coverage = float((matting_alpha[comp_mask] >= fg_threshold).mean())
+        if coverage >= matting_present_coverage:
             continue
         # Patch in the chromatic α for this component.
         merged[comp_mask] = np.maximum(merged[comp_mask], chromatic_alpha[comp_mask])

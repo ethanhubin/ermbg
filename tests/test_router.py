@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import numpy as np
 
-from ermbg.router import classify_strategy
+from ermbg.router import assess_source_alpha, classify_strategy
 
 
 def _solid_with_subject(bg_color, fg_color=(220, 30, 30), h=128, w=128):
     img = np.broadcast_to(np.array(bg_color, dtype=np.uint8), (h, w, 3)).copy()
     img[40:90, 40:90] = fg_color
     return img
+
+
+def _make_clean_rgba(h=128, w=128):
+    """RGBA where opaque interior is uniform red, transparent regions are
+    premultiplied (RGB=0), and the soft edge is properly mixed."""
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cy, cx = h // 2, w // 2
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    a = np.clip((40.0 - r) / 4.0, 0.0, 1.0).astype(np.float32)
+    F = np.array([220, 30, 30], dtype=np.float32)
+    rgb = (a[..., None] * F).astype(np.uint8)
+    return rgb, a
 
 
 def test_classify_saturated_green():
@@ -44,12 +57,10 @@ def test_classify_grey_bg():
 
 
 def test_classify_passthrough_when_source_alpha_present():
-    """An input with a real alpha matte (not all-opaque) should route to passthrough."""
-    h, w = 64, 64
-    img = np.full((h, w, 3), 200, dtype=np.uint8)
-    alpha = np.zeros((h, w), dtype=np.float32)
-    alpha[16:48, 16:48] = 1.0  # center is opaque, 75% transparent
-    s = classify_strategy(img, source_alpha=alpha)
+    """An input with a real, *clean* alpha matte should route to passthrough.
+    Premultiplied RGB (zero in transparent regions) and soft edges are required."""
+    rgb, a = _make_clean_rgba()
+    s = classify_strategy(rgb, source_alpha=a)
     assert s.passthrough is True
     assert s.bg_type == "rgba_passthrough"
 
@@ -75,3 +86,49 @@ def test_classify_image_type_graphic_vs_photo():
     noisy = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)
     s_noisy = classify_strategy(noisy)
     assert s_noisy.image_type == "photo"
+
+
+# --- alpha hygiene -----------------------------------------------------------
+
+
+def _make_haloed_rgba(h=128, w=128):
+    """Same shape, but soft edge has a strong white halo as if a coarse
+    segmenter alpha-blended onto white."""
+    rgb, a = _make_clean_rgba(h, w)
+    # Pollute soft edge with white.
+    edge = (a > 0.05) & (a <= 0.6)
+    rgb_f = rgb.astype(np.float32)
+    rgb_f[edge] = 0.4 * rgb_f[edge] + 0.6 * np.array([255, 255, 255], dtype=np.float32)
+    return rgb_f.astype(np.uint8), a
+
+
+def test_hygiene_clean_passes():
+    rgb, a = _make_clean_rgba()
+    h = assess_source_alpha(rgb, a)
+    assert h.clean, f"expected clean, got reason={h.reason}"
+
+
+def test_hygiene_halo_rejected():
+    rgb, a = _make_haloed_rgba()
+    h = assess_source_alpha(rgb, a)
+    assert not h.clean, "halo-y matte should be rejected"
+    assert "fringe" in h.reason.lower() or "low-α" in h.reason.lower()
+
+
+def test_classify_dirty_rgba_routes_to_rematte():
+    """A dirty RGBA should NOT pass through; the strategy falls into normal
+    bg classification (here a dark rectangle on transparent → after the
+    RGB is passed in raw, the bg sampling sees premultiplied-zero corners
+    and routes to black_bg)."""
+    rgb, a = _make_haloed_rgba()
+    s = classify_strategy(rgb, source_alpha=a)
+    assert s.passthrough is False
+    assert s.bg_type != "rgba_passthrough"
+    assert "passthrough_rejected" in s.extras
+
+
+def test_classify_clean_rgba_passes_through():
+    rgb, a = _make_clean_rgba()
+    s = classify_strategy(rgb, source_alpha=a)
+    assert s.passthrough is True
+    assert s.bg_type == "rgba_passthrough"

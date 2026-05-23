@@ -33,7 +33,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .colorspace import srgb_to_oklab
+from .colorspace import oklab_distance, srgb_to_oklab
 from .keyer import KeyerThresholds
 
 
@@ -61,6 +61,188 @@ class Strategy:
     passthrough: bool = False    # if True, skip matting net entirely
     notes: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
+
+
+# Hygiene thresholds — when an input arrives with an alpha channel, we still
+# verify the matte is clean before deciding to pass it through. Otherwise we
+# silently propagate a bad asset (white edges, banded α, residual bg in RGB)
+# downstream. All thresholds in OKLab ΔE units.
+_HYGIENE_FRINGE_DE_MAX = 16.0       # edge-band ΔE vs interior subject
+_HYGIENE_LOW_ALPHA_RES_MAX = 14.0   # mean OKLab |C - F_interior| at α≈0
+_HYGIENE_BIMODAL_MAX = 0.985        # fraction of α exactly 0 or 1
+
+
+@dataclass(frozen=True)
+class AlphaHygiene:
+    """Quality scores for an existing source α matte.
+
+    All produced **without ground truth**: the only inputs are the RGBA itself.
+
+    Each score is "lower is cleaner" (except ``bimodal_fraction`` which is
+    direct: too high → matte is hard-binarized, no soft edges, RGBA likely
+    came from a coarse segmenter).
+
+    ``clean`` is the AND of three checks; if false, the router will re-matte
+    instead of passing the source α through.
+    """
+
+    fringe_dE: float
+    low_alpha_residual: float
+    bimodal_fraction: float
+    has_soft_edge: bool
+    clean: bool
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "fringe_dE": self.fringe_dE,
+            "low_alpha_residual": self.low_alpha_residual,
+            "bimodal_fraction": self.bimodal_fraction,
+            "has_soft_edge": self.has_soft_edge,
+            "clean": self.clean,
+            "reason": self.reason,
+        }
+
+
+def _interior_color(image_srgb: np.ndarray, alpha: np.ndarray) -> np.ndarray | None:
+    """Median OKLab color over fully-opaque interior pixels, eroded so edge
+    pollution doesn't bias the reference. Returns None when no usable
+    interior exists.
+
+    For premultiplied RGBA the opaque interior has α≈1 already, so RGB=F
+    directly. For straight RGBA same. Either way we read the median sRGB
+    color and convert to OKLab.
+    """
+    binary = (alpha >= 0.95).astype(np.uint8)
+    interior = cv2.erode(binary, np.ones((3, 3), np.uint8), iterations=4)
+    if interior.sum() < 16:
+        interior = binary
+        if interior.sum() < 8:
+            return None
+    pixels = image_srgb[interior > 0]
+    median = np.median(pixels, axis=0).astype(np.uint8)
+    return srgb_to_oklab(median.reshape(1, 1, 3)).reshape(3)
+
+
+def assess_source_alpha(image_srgb: np.ndarray, alpha: np.ndarray) -> AlphaHygiene:
+    """Decide whether a source RGBA's α is clean enough to pass through.
+
+    Three unsupervised checks:
+
+      1. Fringe ΔE — for pixels in α∈(0.05, 0.6] (the soft edge band), recover
+         the implied foreground color using both straight (F=C) and premultiplied
+         (F=C/α) interpretations and compare to the opaque interior color.
+         A clean matte yields one of the two interpretations close to interior;
+         a halo-y matte yields neither close, in OKLab.
+
+      2. Low-α residual — for α≈0 pixels, classify each pixel as either
+         "premultiplied (RGB≈0)" or "straight (RGB≈some constant bg)". A
+         leak of *interior* color into transparent regions is suspicious;
+         constant non-interior bg color also is (means the asset stored
+         the original bg). We measure the second case via std-dev of low-α
+         RGB minus distance-to-interior.
+
+      3. Bimodal fraction — how much of α is at the 0/1 extremes? If almost
+         everything is 0 or 1, the matte was hard-binarized — re-matting
+         can recover anti-aliasing.
+
+    Returns an ``AlphaHygiene`` with ``clean=True`` only if all checks pass.
+    """
+    from . import io as ermbg_io
+
+    h, w = alpha.shape
+    a = alpha.astype(np.float32)
+
+    # --- (3) bimodal fraction
+    extreme = ((a < 0.01) | (a > 0.99)).mean()
+    has_soft = bool(((a > 0.05) & (a < 0.95)).any())
+
+    interior_lab = _interior_color(image_srgb, a)
+    if interior_lab is None:
+        return AlphaHygiene(
+            fringe_dE=float("inf"),
+            low_alpha_residual=float("inf"),
+            bimodal_fraction=float(extreme),
+            has_soft_edge=has_soft,
+            clean=False,
+            reason="no usable opaque interior; cannot trust source α",
+        )
+
+    # --- (1) fringe ΔE on the soft edge band
+    soft_band = (a > 0.05) & (a <= 0.6)
+    if soft_band.sum() >= 32:
+        # Recover an implied F under three interpretations and take the closest
+        # to interior. This makes the check robust to sRGB-vs-linear premul
+        # conventions and to straight-α encoding:
+        #   straight:           F = C
+        #   sRGB premul:        F = C / α        (in sRGB byte values)
+        #   linear premul:      F = linearize(C)/α then back to sRGB
+        a_band = a[soft_band, None]
+        c_srgb = image_srgb[soft_band].astype(np.float32)
+        c_lin = ermbg_io.srgb_to_linear(image_srgb)[soft_band]
+        f_straight = c_srgb.astype(np.uint8)
+        f_premul_srgb = np.clip(c_srgb / np.maximum(a_band, 1e-3), 0, 255).astype(np.uint8)
+        f_premul_lin = ermbg_io.linear_to_srgb_u8(np.clip(c_lin / np.maximum(a_band, 1e-3), 0, 1))
+
+        d_s = oklab_distance(srgb_to_oklab(f_straight), interior_lab)
+        d_psrgb = oklab_distance(srgb_to_oklab(f_premul_srgb), interior_lab)
+        d_plin = oklab_distance(srgb_to_oklab(f_premul_lin), interior_lab)
+        # Per-pixel best of the three → mean.
+        fringe = float(np.mean(np.minimum(np.minimum(d_s, d_psrgb), d_plin)))
+    else:
+        fringe = 0.0
+
+    # --- (2) low-α residual
+    very_low = a < 0.05
+    if very_low.sum() >= 32:
+        from .colorspace import linear_rgb_to_oklab
+
+        low_rgb = ermbg_io.srgb_to_linear(image_srgb[very_low])
+        # Premultiplied: low_rgb ≈ 0; spread is tiny.
+        low_std = float(np.mean(np.std(low_rgb, axis=0)))
+        # Premultiplied check: nearly black?
+        low_mean_lab = linear_rgb_to_oklab(np.mean(low_rgb, axis=0).reshape(1, 1, 3)).reshape(3)
+        zero_lab = np.zeros(3, dtype=np.float32)
+        d_to_zero = float(np.sqrt(np.sum((low_mean_lab - zero_lab) ** 2))) * 100.0
+        d_to_interior = float(np.sqrt(np.sum((low_mean_lab - interior_lab) ** 2))) * 100.0
+        # If transparent pixels have any meaningful RGB (premul: should be 0),
+        # AND that color is closer to interior than to zero, it's leaky.
+        if d_to_zero > 8.0 and d_to_interior < d_to_zero:
+            low_res = d_to_interior
+        else:
+            low_res = 0.0
+        # Penalty for high spread (suggests transparent regions store the original bg
+        # without zeroing, e.g. white-bg PNG saved with mask=0 but RGB still white).
+        if low_std > 0.05:  # noisy → multiple bg colors leaked through
+            low_res = max(low_res, 100.0 * low_std)
+    else:
+        low_res = 0.0
+
+    fringe_ok = fringe <= _HYGIENE_FRINGE_DE_MAX
+    low_ok = low_res <= _HYGIENE_LOW_ALPHA_RES_MAX
+    bimodal_ok = extreme <= _HYGIENE_BIMODAL_MAX or has_soft
+
+    clean = bool(fringe_ok and low_ok and bimodal_ok)
+    if clean:
+        reason = ""
+    else:
+        bad = []
+        if not fringe_ok:
+            bad.append(f"fringe ΔE={fringe:.1f}>{_HYGIENE_FRINGE_DE_MAX}")
+        if not low_ok:
+            bad.append(f"low-α residual={low_res:.1f}>{_HYGIENE_LOW_ALPHA_RES_MAX}")
+        if not bimodal_ok:
+            bad.append(f"α binarized ({extreme*100:.1f}% at 0/1)")
+        reason = "; ".join(bad)
+
+    return AlphaHygiene(
+        fringe_dE=fringe,
+        low_alpha_residual=low_res,
+        bimodal_fraction=float(extreme),
+        has_soft_edge=has_soft,
+        clean=clean,
+        reason=reason,
+    )
 
 
 # --- classification helpers ------------------------------------------------
@@ -141,22 +323,37 @@ def classify_strategy(
 
     Returns:
         A frozen ``Strategy`` describing keyer mode / despill / passthrough flags.
+
+    RGBA inputs go through an unsupervised hygiene check before being passed
+    through. Only clean source α is reused; halo-y / banded / leaky α gets
+    re-matted (the strategy continues into normal saturated/white/black logic).
     """
+    extras: dict[str, Any] = {}
+
     if _is_passthrough(source_alpha):
-        return Strategy(
-            name="rgba_passthrough",
-            bg_type="rgba_passthrough",
-            image_type="any",
-            keyer_mode=None,
-            keyer_thresholds=None,
-            despill="none",
-            use_keyer_merge=False,
-            passthrough=True,
-            notes="Source already has alpha; copy through unchanged.",
-        )
+        hygiene = assess_source_alpha(image_srgb, source_alpha)
+        extras["hygiene"] = hygiene.to_dict()
+        if hygiene.clean:
+            return Strategy(
+                name="rgba_passthrough",
+                bg_type="rgba_passthrough",
+                image_type="any",
+                keyer_mode=None,
+                keyer_thresholds=None,
+                despill="none",
+                use_keyer_merge=False,
+                passthrough=True,
+                notes="Source α is clean; copy through unchanged.",
+                extras=extras,
+            )
+        # Source has α but it's dirty — fall through and re-matte. The
+        # source α is discarded; the caller is expected to re-composite
+        # the RGB onto a known background before invoking the matting net.
+        extras["passthrough_rejected"] = hygiene.reason
 
     L, C, sigma = _bg_lab_stats(image_srgb, source_alpha)
     image_type = _detect_image_type(image_srgb)
+    extras.update({"bg_L": L, "bg_C": C, "bg_sigma": sigma, "image_type": image_type})
 
     # Tight thresholds for graphics (hard edges, expected to be clean), wider
     # for photos (anti-aliased / hairy edges, allow more soft-edge slack).
@@ -175,7 +372,7 @@ def classify_strategy(
             despill="local_borrow",
             use_keyer_merge=False,
             notes=f"Background σ={sigma:.1f} too high for keying; fall back to net only.",
-            extras={"bg_L": L, "bg_C": C, "bg_sigma": sigma},
+            extras=extras,
         )
 
     if C >= _BG_CHROMA_SATURATED:
@@ -188,7 +385,7 @@ def classify_strategy(
             despill="auto",
             use_keyer_merge=True,
             notes=f"Saturated B (chroma={C:.1f}); chromatic key + unmix + chroma cap.",
-            extras={"bg_L": L, "bg_C": C, "bg_sigma": sigma},
+            extras=extras,
         )
 
     if L >= _BG_LIGHTNESS_WHITE:
@@ -201,7 +398,7 @@ def classify_strategy(
             despill="unmix",
             use_keyer_merge=True,
             notes=f"White-ish B (L={L:.1f}); luminance key + unmix (no chroma cap).",
-            extras={"bg_L": L, "bg_C": C, "bg_sigma": sigma},
+            extras=extras,
         )
 
     if L <= _BG_LIGHTNESS_BLACK:
@@ -214,7 +411,7 @@ def classify_strategy(
             despill="unmix",
             use_keyer_merge=True,
             notes=f"Black-ish B (L={L:.1f}); luminance key + unmix.",
-            extras={"bg_L": L, "bg_C": C, "bg_sigma": sigma},
+            extras=extras,
         )
 
     return Strategy(
@@ -226,8 +423,8 @@ def classify_strategy(
         despill="local_borrow",
         use_keyer_merge=False,
         notes=f"Mid-grey B (L={L:.1f}, C={C:.1f}); weak key signal, prefer net + local borrow.",
-        extras={"bg_L": L, "bg_C": C, "bg_sigma": sigma},
+        extras=extras,
     )
 
 
-__all__ = ["Strategy", "classify_strategy"]
+__all__ = ["Strategy", "AlphaHygiene", "classify_strategy", "assess_source_alpha"]
