@@ -132,7 +132,11 @@ print(s.bg_type, s.image_type, s.notes)
 KSampler → VAEDecode → ERMBG AutoMatte → SaveImage(RGBA)
 ```
 
-详见 [comfy_nodes/README.md](comfy_nodes/README.md)。
+详见 [comfy_nodes/README.md](comfy_nodes/README.md)。把节点装到局域网 ComfyUI 服务器的步骤见 [DEPLOY.md](DEPLOY.md)。
+
+### openclaw bot skill
+
+`integrations/openclaw/ermbg-matte/` 是给 [openclaw](https://github.com/anthropics/openclaw) bot 调用的 skill — 用户在 bot 里发"抠图"请求时,会自动通过远端 ComfyUI 跑 ERMBG 并返回 RGBA。详见 [integrations/openclaw/README.md](integrations/openclaw/README.md)。
 
 ---
 

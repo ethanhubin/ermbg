@@ -1,0 +1,4 @@
+interface:
+  display_name: "ERMBG AutoMatte"
+  short_description: "智能抠图,自动选策略输出干净 RGBA(适合 AI 生图资产)"
+  default_prompt: "Use $ermbg-matte to matte this image and return a clean transparent PNG."

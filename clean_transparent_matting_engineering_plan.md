@@ -233,8 +233,20 @@ tests/test_router.py       策略分类(saturated/white/black/grey/passthrough/g
 ## 11. 基础设施
 
 - **本地**:Mac,Python 3.12,uv 管理 `.venv/`。BiRefNet-matting 跑 MPS,~1 GB。SDXL 在 16 GB MPS OOM。
-- **ComfyUI 远端**:`http://192.168.0.8:8000`(Win + RTX 4090)。重生成/重 inference 都走它。客户端在 [ermbg/probe/comfyui.py](ermbg/probe/comfyui.py),工作流模板 `ermbg/probe/comfyui_*.json`。
+- **ComfyUI 远端**:`http://192.168.0.8:8000`(Win + RTX 4090,24 GB VRAM)。重生成 / 重 inference 都走它。客户端在 [ermbg/probe/comfyui.py](ermbg/probe/comfyui.py),工作流模板 `ermbg/probe/comfyui_*.json`。
 - **OpenAI**:`OPENAI_API_KEY` 在 `.env`,只在显式需要 `gpt-image-1` 时用。
+
+### 11.1 ComfyUI 节点已部署
+
+`ErmbgAutoMatte` / `ErmbgClassify` 已经装到上述远端 ComfyUI 服务器。安装方式见 [DEPLOY.md](DEPLOY.md):
+
+- `ermbg` 包通过 pip install 进 `E:\ComfyUI\.venv`
+- 节点目录改名为 `E:\ComfyUI\custom_nodes\ermbg-comfy\`(避免和 ermbg 包同名)
+- 重启 ComfyUI 后 `/object_info` 暴露两个节点
+
+### 11.2 openclaw skill
+
+Bot 通过 [`integrations/openclaw/ermbg-matte/`](integrations/openclaw/ermbg-matte) 调用远端 ComfyUI 跑抠图,产物归档到 `~/.openclaw/media/openclaw-production/images/ermbg/`。skill 调用方式和详细参数见 [integrations/openclaw/README.md](integrations/openclaw/README.md)。
 
 ---
 

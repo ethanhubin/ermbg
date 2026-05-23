@@ -1,0 +1,26 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "2": {
+    "class_type": "ErmbgAutoMatte",
+    "inputs": {
+      "image": ["1", 0],
+      "despill": "auto (router decides)",
+      "use_keyer": "auto (router decides)",
+      "bg_color": "0,200,0",
+      "matting_model": "ZhengPeng7/BiRefNet-matting"
+    }
+  },
+  "3": {
+    "class_type": "SaveImageWithAlpha",
+    "inputs": {
+      "images": ["2", 0],
+      "mask": ["2", 1],
+      "filename_prefix": "${prefix}"
+    }
+  }
+}
