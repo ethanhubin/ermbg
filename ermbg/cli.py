@@ -1,0 +1,351 @@
+"""ERMBG command-line interface.
+
+Phase-1 (revised) commands:
+
+  segment    coarse subject segmentation + rough trimap
+  diagnose   single-image background diagnosis (B, purity, edge_q10, risk map)
+  matte      end-to-end analytic matting -> RGBA + QA on multiple backgrounds
+  phase1     batch: diagnose + matte + QA over a directory
+  probe      (legacy) generate one probe via synthetic / sdxl / comfyui / openai
+
+The probe-generation backends are kept around for later experiments but are not
+part of the main matting pipeline anymore.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import typer
+from loguru import logger
+
+from . import io
+from .diagnose import BackgroundDiagnoser
+from .matting import matte as run_matte
+from .probe.generator import PROBE_COLORS
+from .probe.synthetic import SyntheticProbeGenerator
+from .qa import run_qa
+from .segmenter import build_segmenter, make_bands
+from .trimap import trimap_to_uint8
+
+app = typer.Typer(add_completion=False, help="ERMBG: clean transparent matting toolkit.")
+
+
+def _load_object_prompt(json_path: Path) -> Optional[str]:
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text())
+        return data.get("object_prompt")
+    except Exception as e:
+        logger.warning(f"Could not parse {json_path}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# segment
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def segment(
+    input_path: Path = typer.Argument(..., help="Input image path"),
+    out_dir: Path = typer.Option(Path("samples/outputs/smoke"), help="Output directory"),
+    backend: str = typer.Option("auto", help="auto | birefnet | grabcut"),
+):
+    """Run coarse subject segmentation + build a rough trimap."""
+    image = io.load_rgb(input_path)
+    seg = build_segmenter(backend=backend)
+    soft = seg.segment(image)
+    bands = make_bands(soft)
+
+    stem = input_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+    io.save_mask(out_dir / f"{stem}_mask.png", soft)
+    trimap_vis = np.zeros(soft.shape, dtype=np.uint8)
+    trimap_vis[bands.inner] = 255
+    trimap_vis[bands.unknown_band] = 128
+    io.save_mask(out_dir / f"{stem}_trimap.png", trimap_vis)
+    logger.info(f"Saved {out_dir / f'{stem}_mask.png'} and {stem}_trimap.png")
+
+
+# ---------------------------------------------------------------------------
+# diagnose
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def diagnose(
+    input_path: Path = typer.Argument(..., help="Input image path"),
+    out_dir: Path = typer.Option(Path("samples/outputs/diagnose"), help="Output directory"),
+    backend: str = typer.Option("auto", help="Segmenter backend"),
+):
+    """Background diagnosis: is the image suitable for direct analytic matting?"""
+    image = io.load_rgb(input_path)
+    seg = build_segmenter(backend=backend)
+    mask = seg.segment(image)
+    report = BackgroundDiagnoser().diagnose(image, mask)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = input_path.stem
+    (out_dir / f"{stem}.report.json").write_text(json.dumps(report.to_dict(), indent=2))
+    io.save_mask(out_dir / f"{stem}_mask.png", mask)
+    if report.risk_map is not None:
+        io.save_mask(out_dir / f"{stem}_risk.png", report.risk_map)
+    logger.info(f"verdict={report.verdict}  B={report.background_color}  purity_sigma={report.purity_sigma:.2f}  edge_q10={report.edge_contrast_q10:.2f}")
+
+
+# ---------------------------------------------------------------------------
+# matte (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def matte(
+    input_path: Path = typer.Argument(..., help="Input image path (clean solid-bg)"),
+    out_dir: Path = typer.Option(Path("samples/outputs/matte"), help="Output directory"),
+    backend: str = typer.Option("auto", help="Segmenter backend"),
+    matting_model: str = typer.Option(
+        "ZhengPeng7/BiRefNet-matting",
+        help="HF model id for the matting segmenter (default: BiRefNet-matting)",
+    ),
+    despill: str = typer.Option(
+        "auto",
+        help="auto | unmix | chroma_cap | local_borrow | closed_form | none. Overrides router.",
+    ),
+    use_keyer: bool = typer.Option(
+        True,
+        "--keyer/--no-keyer",
+        help="Run chromatic-key on top of matting α to recover small components missed by the matting net (auto-skipped when B is near-grey)",
+    ),
+    bg_color: str = typer.Option(
+        "0,200,0",
+        help="Composite background for transparent inputs, as 'R,G,B' (default green screen)",
+    ),
+    legacy_analytic_alpha: bool = typer.Option(
+        False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
+    ),
+    qa: bool = typer.Option(True, help="Composite to multiple backgrounds and score"),
+):
+    """End-to-end analytic matting: produce RGBA + alpha + clean foreground + QA report."""
+    bg_tuple = tuple(int(c) for c in bg_color.split(","))
+    if len(bg_tuple) != 3:
+        raise typer.BadParameter(f"--bg-color must be 'R,G,B', got {bg_color!r}")
+
+    image, source_alpha = io.load_image_with_alpha(input_path)
+    object_prompt = _load_object_prompt(input_path.with_suffix(".json"))
+    seg = build_segmenter(backend=backend, model_id=matting_model)
+
+    # If the source has alpha but the router decides to RE-matte (not pass-through),
+    # the matting net needs to see RGB on a known constant background, otherwise
+    # transparent-region junk biases the segmentation. Pre-composite onto bg_tuple;
+    # the router still sees source_alpha and can pick passthrough independently.
+    if source_alpha is not None:
+        from .router import classify_strategy
+        strat_preview = classify_strategy(image, source_alpha=source_alpha)
+        if not strat_preview.passthrough:
+            image = io.load_rgb(input_path, background=bg_tuple)
+
+    result = run_matte(
+        image,
+        source_alpha=source_alpha,
+        object_prompt=object_prompt,
+        segmenter=seg,
+        despill=despill if despill != "auto" else None,
+        use_keyer=False if not use_keyer else None,
+        legacy_analytic_alpha=legacy_analytic_alpha,
+    )
+
+    stem = input_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+    io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
+    io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
+    io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
+    io.save_mask(out_dir / f"{stem}_trimap.png", result.debug["trimap_u8"])
+
+    metrics_payload = {
+        "diagnosis": result.diagnosis.to_dict() if result.diagnosis is not None else None,
+        "background_color": list(result.background_color),
+        "despill_method": result.debug.get("despill_method"),
+        "matting_model": matting_model,
+        "keyer": result.debug.get("keyer", {}),
+        "strategy": result.debug.get("strategy", {}),
+    }
+
+    if qa:
+        qa_dir = out_dir / f"{stem}_qa"
+        qa_metrics = run_qa(
+            image_srgb=image,
+            rgba=result.rgba,
+            soft_mask=result.debug["soft_mask"],
+            background_color=result.background_color,
+            out_dir=qa_dir,
+        )
+        metrics_payload["qa"] = qa_metrics
+        (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+
+    (out_dir / f"{stem}.report.json").write_text(json.dumps(metrics_payload, indent=2))
+    verdict = result.diagnosis.verdict if result.diagnosis is not None else "passthrough"
+    logger.info(f"Saved RGBA + QA to {out_dir}; verdict={verdict}")
+
+
+# ---------------------------------------------------------------------------
+# phase1 batch (diagnose + matte over a directory)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def phase1(
+    input_dir: Path = typer.Option(..., help="Directory of input images"),
+    out_dir: Path = typer.Option(Path("samples/outputs/phase1"), help="Output root"),
+    backend: str = typer.Option("auto"),
+    matte_only_when_ready: bool = typer.Option(
+        False,
+        help="If true, only run matting when diagnose verdict='ready'. Default: always matte.",
+    ),
+):
+    """Batch: diagnose + matte all images in input_dir, write a summary."""
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    inputs = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in exts])
+    if not inputs:
+        logger.error(f"No images in {input_dir}")
+        return
+
+    seg = build_segmenter(backend=backend)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary: list[dict] = []
+    for p in inputs:
+        logger.info(f"=== {p.stem} ===")
+        image = io.load_rgb(p)
+        case_dir = out_dir / p.stem
+        case_dir.mkdir(parents=True, exist_ok=True)
+        io.save_rgb(case_dir / "original.png", image)
+
+        diag = BackgroundDiagnoser().diagnose(image, seg.segment(image))
+        (case_dir / "diagnose.json").write_text(json.dumps(diag.to_dict(), indent=2))
+        if diag.risk_map is not None:
+            io.save_mask(case_dir / "risk.png", diag.risk_map)
+
+        row = {
+            "image": p.stem,
+            "background_color": list(diag.background_color),
+            "purity_sigma": diag.purity_sigma,
+            "edge_q10": diag.edge_contrast_q10,
+            "verdict": diag.verdict,
+        }
+
+        if matte_only_when_ready and diag.verdict != "ready":
+            logger.info(f"  skipping matte (verdict={diag.verdict})")
+            row["matte_skipped"] = True
+            summary.append(row)
+            continue
+
+        try:
+            result = run_matte(image, segmenter=seg)
+        except Exception as e:
+            logger.exception(f"matte failed for {p.stem}: {e}")
+            row["error"] = str(e)
+            summary.append(row)
+            continue
+
+        io.save_rgba(case_dir / "rgba.png", result.rgba)
+        io.save_mask(case_dir / "alpha.png", result.alpha)
+        io.save_rgb(case_dir / "foreground.png", result.foreground_srgb)
+        io.save_mask(case_dir / "trimap.png", result.debug["trimap_u8"])
+
+        qa_metrics = run_qa(
+            image_srgb=image,
+            rgba=result.rgba,
+            soft_mask=result.debug["soft_mask"],
+            background_color=result.background_color,
+            out_dir=case_dir / "qa",
+        )
+        (case_dir / "qa" / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        row.update(qa_metrics)
+        summary.append(row)
+
+    _write_summary(out_dir / "summary.md", summary)
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    logger.info(f"Wrote {out_dir / 'summary.md'}")
+
+
+def _write_summary(path: Path, rows: list[dict]) -> None:
+    lines = [
+        "# Phase 1 Matting Summary",
+        "",
+        "| image | bg | purity_σ | edge_q10 | verdict | recomp_err | halo_mean | α_noise | thin_keep |",
+        "|---|---|---:|---:|---|---:|---:|---:|---:|",
+    ]
+    for r in rows:
+        bg = r.get("background_color", "")
+        lines.append(
+            "| {img} | {bg} | {ps:.2f} | {eq:.2f} | {v} | {re} | {hm} | {an} | {tk} |".format(
+                img=r["image"],
+                bg=tuple(bg) if bg else "-",
+                ps=r["purity_sigma"],
+                eq=r["edge_q10"],
+                v=r["verdict"],
+                re=f"{r.get('recomposition_error_on_observed_bg', float('nan')):.4f}" if "recomposition_error_on_observed_bg" in r else "-",
+                hm=f"{r.get('edge_halo_score_mean', float('nan')):.2f}" if "edge_halo_score_mean" in r else "-",
+                an=f"{r.get('alpha_noise_p95', float('nan')):.3f}" if "alpha_noise_p95" in r else "-",
+                tk=f"{r.get('thin_structure_preservation', float('nan')):.2f}" if "thin_structure_preservation" in r else "-",
+            )
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# probe (legacy: kept for development of probe backends)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def probe(
+    input_path: Path = typer.Argument(..., help="Input image path"),
+    color: str = typer.Option("white", help=f"Probe color name. One of {list(PROBE_COLORS)}"),
+    generator: str = typer.Option("synthetic", help="synthetic | sdxl | comfyui | openai"),
+    out_dir: Path = typer.Option(Path("samples/outputs/probes"), help="Output directory"),
+    backend: str = typer.Option("auto", help="Segmenter backend"),
+    seed: int = typer.Option(42, help="Random seed"),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL"),
+):
+    """(Legacy) generate one probe image. Not part of the main matting pipeline."""
+    image = io.load_rgb(input_path)
+    seg = build_segmenter(backend=backend)
+    mask = seg.segment(image)
+
+    if color not in PROBE_COLORS:
+        raise typer.BadParameter(f"Unknown color {color!r}; choose from {list(PROBE_COLORS)}")
+    bg = PROBE_COLORS[color]
+
+    if generator == "synthetic":
+        gen = SyntheticProbeGenerator()
+        probe_img = gen.generate(image, mask, bg, seed=seed)
+    elif generator == "sdxl":
+        from .probe.sdxl_inpaint import SDXLInpaintProbeGenerator
+        gen = SDXLInpaintProbeGenerator()
+        probe_img = gen.generate(image, mask, bg, seed=seed)
+    elif generator == "comfyui":
+        from .probe.comfyui import ComfyUIProbeGenerator
+        prompt = _load_object_prompt(input_path.with_suffix(".json"))
+        gen = ComfyUIProbeGenerator(url=comfy_url)
+        probe_img = gen.generate(image, mask, bg, seed=seed, object_prompt=prompt)
+    elif generator == "openai":
+        from .probe.openai_image import OpenAIImageProbeGenerator
+        gen = OpenAIImageProbeGenerator()
+        probe_img = gen.generate(image, mask, bg, seed=seed)
+    else:
+        raise typer.BadParameter(f"Unknown generator {generator!r}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{input_path.stem}_{generator}_{color}.png"
+    io.save_rgb(out_path, probe_img)
+    logger.info(f"Saved {out_path}")
+
+
+if __name__ == "__main__":
+    app()

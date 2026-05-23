@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ermbg"
+version = "0.1.0"
+description = "Clean transparent matting via solid-color background probes"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "ERMBG" }]
+
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "opencv-python-headless>=4.8",
+    "scipy>=1.11",
+    "scikit-image>=0.22",
+    "typer>=0.12",
+    "pydantic>=2.5",
+    "rich>=13.7",
+    "loguru>=0.7",
+    "requests>=2.31",
+    "pymatting>=1.1",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "diffusers>=0.27",
+    "transformers>=4.40",
+    "accelerate>=0.28",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.22",
+    "einops>=0.7",
+    "timm>=0.9",
+    "kornia>=0.7",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+ermbg = "ermbg.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["ermbg*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

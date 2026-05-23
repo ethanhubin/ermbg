@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.envrc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Pytest / mypy / ruff
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Project artifacts
+samples/outputs/
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+
+# Hugging Face cache (if accidentally placed inside repo)
+.cache/
+hf_cache/
+.claude/settings.local.json
