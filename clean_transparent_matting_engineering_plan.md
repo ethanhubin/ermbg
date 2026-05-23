@@ -246,7 +246,7 @@ tests/test_router.py       策略分类(saturated/white/black/grey/passthrough/g
 
 ### 11.2 openclaw skill
 
-Bot 通过 [`integrations/openclaw/ermbg-matte/`](integrations/openclaw/ermbg-matte) 调用远端 ComfyUI 跑抠图,产物归档到 `~/.openclaw/media/openclaw-production/images/ermbg/`。skill 调用方式和详细参数见 [integrations/openclaw/README.md](integrations/openclaw/README.md)。
+ERMBG 合并进 openclaw 现有的 `comfyui-rmbg` skill,作为 `--mode ermbg` 子模式存在 — 一个 skill,三个 mode(`rmbg` / `ermbg` / `edge-wand`),触发词区分:普通"抠图 / 去背景"走标准 RMBG,**"智能抠图 / AI生图抠图 / smart matte / ERMBG"** 触发 ermbg 路径。产物归档到 `~/.openclaw/media/openclaw-production/images/rmbg/`。详细参数与合并补丁见 [integrations/openclaw/README.md](integrations/openclaw/README.md) 和 [integrations/openclaw/comfyui-rmbg-patch/](integrations/openclaw/comfyui-rmbg-patch/)。
 
 ---
 

@@ -136,7 +136,7 @@ KSampler → VAEDecode → ERMBG AutoMatte → SaveImage(RGBA)
 
 ### openclaw bot skill
 
-`integrations/openclaw/ermbg-matte/` 是给 [openclaw](https://github.com/anthropics/openclaw) bot 调用的 skill — 用户在 bot 里发"抠图"请求时,会自动通过远端 ComfyUI 跑 ERMBG 并返回 RGBA。详见 [integrations/openclaw/README.md](integrations/openclaw/README.md)。
+ERMBG 合并进了 openclaw 已有的 `comfyui-rmbg` skill,作为 `--mode ermbg` 子模式。专属触发词 **"智能抠图 / AI生图抠图 / smart matte / ERMBG"** 走 ERMBG 路径,普通"抠图 / 去背景"仍走原来的 RMBG。一个 skill 三个 mode,意图区分清楚。详见 [integrations/openclaw/README.md](integrations/openclaw/README.md)。
 
 ---
 
