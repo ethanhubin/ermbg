@@ -21,7 +21,7 @@ from loguru import logger
 
 from . import io
 from .diagnose import BackgroundDiagnoser, DiagnosisReport
-from .keyer import KeyerThresholds, key_alpha, merge_alpha_components
+from .keyer import KeyerThresholds, gate_alpha_by_keyer, key_alpha, merge_alpha_components
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
 from .types import MattingResult, Trimap
@@ -100,6 +100,15 @@ def matte(
                 logger.info(f"keyer: patched {info['patched_components']} component(s) missed by matting net")
         else:
             keyer_info.update({"used": True, "patched_components": 0})
+        if strategy.use_keyer_gate:
+            soft, gate_info = gate_alpha_by_keyer(soft, key)
+            keyer_info["pixels_gated"] = gate_info["pixels_gated"]
+            keyer_info["mean_drop"] = gate_info["mean_drop"]
+            if gate_info["pixels_gated"]:
+                logger.info(
+                    f"keyer: gated {gate_info['pixels_gated']} halo px "
+                    f"(mean α drop {gate_info['mean_drop']:.3f})"
+                )
 
     if report.verdict == "not-pure-bg":
         logger.warning(

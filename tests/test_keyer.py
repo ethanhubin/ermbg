@@ -5,7 +5,9 @@ from __future__ import annotations
 import numpy as np
 
 from ermbg.keyer import (
+    KeyerThresholds,
     chromatic_key_alpha,
+    gate_alpha_by_keyer,
     key_alpha,
     luminance_key_alpha,
     merge_alpha_components,
@@ -103,3 +105,48 @@ def test_key_alpha_dispatch():
     # luminance separates, chromatic does not (white→black both grey-axis)
     assert a_lum[8, 8] > 0.9
     assert a_chrom[8, 8] > 0.9
+
+
+def test_gate_caps_halo_when_keyer_says_bg():
+    """If matting α has wide low-α halo on pixels the keyer calls bg, gate
+    should cap them to ≈0."""
+    h, w = 64, 64
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:44, 20:44] = 1.0           # solid subject
+    matting[10:20, 10:54] = 0.20          # wide halo above
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:44, 20:44] = 1.0               # keyer agrees on solid
+    # halo region: keyer says α=0 (it's pure bg color)
+
+    gated, info = gate_alpha_by_keyer(matting, key)
+    assert info["pixels_gated"] > 0
+    # halo region should be near-0 now
+    assert gated[10:20, 10:54].max() < 0.1
+    # solid region untouched
+    np.testing.assert_array_equal(gated[20:44, 20:44], matting[20:44, 20:44])
+
+
+def test_gate_protects_high_alpha_against_keyer_disagreement():
+    """If matting α is high (foreground) but keyer says bg (e.g. a hair
+    against bg color), gate must NOT pull it down. fg_protect_threshold
+    is the safety net."""
+    h, w = 32, 32
+    matting = np.full((h, w), 0.92, dtype=np.float32)  # confident fg everywhere
+    key = np.zeros((h, w), dtype=np.float32)            # keyer thinks all bg
+
+    gated, info = gate_alpha_by_keyer(matting, key)
+    np.testing.assert_array_equal(gated, matting)
+    assert info["pixels_gated"] == 0
+
+
+def test_gate_preserves_genuine_soft_edges():
+    """A real soft edge (matting α∈(0.2, 0.8), key α also non-trivial) should
+    survive — keyer's bg confidence is too low to gate."""
+    h, w = 32, 32
+    matting = np.full((h, w), 0.5, dtype=np.float32)
+    key = np.full((h, w), 0.4, dtype=np.float32)  # keyer disagrees but isn't bg-confident
+
+    gated, info = gate_alpha_by_keyer(matting, key)
+    # nothing gated because key α >= bg_confidence_threshold (0.08 default)
+    assert info["pixels_gated"] == 0
+    np.testing.assert_array_equal(gated, matting)

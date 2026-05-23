@@ -58,6 +58,7 @@ class Strategy:
     keyer_thresholds: KeyerThresholds | None
     despill: str                 # "auto" | "unmix" | "chroma_cap" | "local_borrow" | "closed_form" | "none"
     use_keyer_merge: bool        # whether to patch missing components from key α
+    use_keyer_gate: bool = False # whether to cap matting α by key α where keyer is bg-confident
     passthrough: bool = False    # if True, skip matting net entirely
     notes: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
@@ -198,22 +199,30 @@ def assess_source_alpha(image_srgb: np.ndarray, alpha: np.ndarray) -> AlphaHygie
         from .colorspace import linear_rgb_to_oklab
 
         low_rgb = ermbg_io.srgb_to_linear(image_srgb[very_low])
-        # Premultiplied: low_rgb ≈ 0; spread is tiny.
         low_std = float(np.mean(np.std(low_rgb, axis=0)))
-        # Premultiplied check: nearly black?
         low_mean_lab = linear_rgb_to_oklab(np.mean(low_rgb, axis=0).reshape(1, 1, 3)).reshape(3)
         zero_lab = np.zeros(3, dtype=np.float32)
         d_to_zero = float(np.sqrt(np.sum((low_mean_lab - zero_lab) ** 2))) * 100.0
         d_to_interior = float(np.sqrt(np.sum((low_mean_lab - interior_lab) ** 2))) * 100.0
-        # If transparent pixels have any meaningful RGB (premul: should be 0),
-        # AND that color is closer to interior than to zero, it's leaky.
-        if d_to_zero > 8.0 and d_to_interior < d_to_zero:
-            low_res = d_to_interior
+        # Three regimes:
+        # (a) premultiplied (RGB=0): low_mean ≈ zero → d_to_zero small → low_res = 0
+        # (b) interior-leaked (RGB ≈ F_interior): d_to_interior small but
+        #     d_to_zero large → fail. Reported value = "how much interior leaked"
+        #     scaled by inverse distance.
+        # (c) original-bg-leaked (RGB ≈ original solid bg): d_to_zero large,
+        #     d_to_interior also non-trivial → fail with magnitude d_to_zero
+        #     (we don't know what bg was, but anything that isn't black is
+        #     leaky for hygiene purposes).
+        if d_to_zero <= 6.0:
+            low_res = 0.0  # premul, fine
+        elif d_to_interior < d_to_zero * 0.5:
+            # Closer to interior than to zero → likely interior leak.
+            # Penalty grows as d_to_interior shrinks (closer = worse).
+            low_res = max(d_to_zero - d_to_interior, 20.0)
         else:
-            low_res = 0.0
-        # Penalty for high spread (suggests transparent regions store the original bg
-        # without zeroing, e.g. white-bg PNG saved with mask=0 but RGB still white).
-        if low_std > 0.05:  # noisy → multiple bg colors leaked through
+            low_res = d_to_zero  # generic non-zero transparent → also leak
+        # Penalty for high spread (multiple bg colors in transparent regions).
+        if low_std > 0.05:
             low_res = max(low_res, 100.0 * low_std)
     else:
         low_res = 0.0
@@ -359,8 +368,14 @@ def classify_strategy(
     # for photos (anti-aliased / hairy edges, allow more soft-edge slack).
     if image_type == "graphic":
         thr = KeyerThresholds(bg_max=4.0, fg_min=14.0)
+        # Hard-edged graphics get the gate: keyer veto on confident-bg pixels
+        # to remove BiRefNet's wide soft halo on solid backgrounds. Photos do
+        # not — there, soft edges (hair, fur) need to survive even though
+        # the keyer would call those pixels "bg colored".
+        gate_default = True
     else:
         thr = KeyerThresholds(bg_max=6.0, fg_min=22.0)
+        gate_default = False
 
     if sigma > 18.0:
         return Strategy(
@@ -384,6 +399,7 @@ def classify_strategy(
             keyer_thresholds=thr,
             despill="auto",
             use_keyer_merge=True,
+            use_keyer_gate=gate_default,
             notes=f"Saturated B (chroma={C:.1f}); chromatic key + unmix + chroma cap.",
             extras=extras,
         )
@@ -397,6 +413,7 @@ def classify_strategy(
             keyer_thresholds=thr,
             despill="unmix",
             use_keyer_merge=True,
+            use_keyer_gate=gate_default,
             notes=f"White-ish B (L={L:.1f}); luminance key + unmix (no chroma cap).",
             extras=extras,
         )
@@ -410,6 +427,7 @@ def classify_strategy(
             keyer_thresholds=thr,
             despill="unmix",
             use_keyer_merge=True,
+            use_keyer_gate=gate_default,
             notes=f"Black-ish B (L={L:.1f}); luminance key + unmix.",
             extras=extras,
         )

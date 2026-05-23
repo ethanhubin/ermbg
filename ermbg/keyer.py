@@ -99,6 +99,55 @@ def key_alpha(
     raise ValueError(f"Unknown keyer mode: {mode!r}")
 
 
+def gate_alpha_by_keyer(
+    matting_alpha: np.ndarray,
+    key_alpha: np.ndarray,
+    bg_confidence_threshold: float = 0.08,
+    fg_protect_threshold: float = 0.85,
+) -> tuple[np.ndarray, dict]:
+    """Cap matting α by key α where the keyer is confident the pixel is bg.
+
+    Motivation: BiRefNet-matting can over-feather hard-edged graphics on a
+    pure-color background, producing a wide low-α halo (α∈(0, 0.3]) on what
+    should be cleanly transparent pixels. When the keyer — which has direct
+    access to the known B — strongly disagrees ("this pixel's color IS the
+    background"), it's the keyer that's right.
+
+    Rules:
+      - For pixels where key α < ``bg_confidence_threshold``, cap matting α by
+        key α (i.e. force them down toward 0).
+      - For pixels where matting α >= ``fg_protect_threshold``, leave alone:
+        these are confident foreground, e.g. hair against bg where matting's
+        soft α is the *correct* signal even if the keyer would call those
+        pixels "bg colored".
+      - Pixels in between are untouched. The merge step (recall booster)
+        runs separately and additively.
+
+    The default ``bg_confidence_threshold = 0.08`` is intentionally tight —
+    we only want to remove obvious halo, not erode legitimate hairy / fuzzy
+    edges where the keyer's hard ramp is overconfident.
+
+    Returns:
+      gated_alpha: float32 H×W
+      info: dict with `pixels_gated`, `mean_drop`
+    """
+    m = matting_alpha.astype(np.float32)
+    k = key_alpha.astype(np.float32)
+
+    bg_confident = k < bg_confidence_threshold
+    fg_protected = m >= fg_protect_threshold
+    gate_zone = bg_confident & ~fg_protected
+
+    gated = m.copy()
+    if gate_zone.any():
+        gated[gate_zone] = np.minimum(m[gate_zone], k[gate_zone])
+
+    return gated, {
+        "pixels_gated": int(gate_zone.sum()),
+        "mean_drop": float((m[gate_zone] - gated[gate_zone]).mean()) if gate_zone.any() else 0.0,
+    }
+
+
 def merge_alpha_components(
     matting_alpha: np.ndarray,
     chromatic_alpha: np.ndarray,
@@ -161,5 +210,8 @@ def merge_alpha_components(
 __all__ = [
     "KeyerThresholds",
     "chromatic_key_alpha",
+    "luminance_key_alpha",
+    "key_alpha",
+    "gate_alpha_by_keyer",
     "merge_alpha_components",
 ]
