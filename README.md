@@ -167,7 +167,7 @@ samples/inputs/    11 张测试图,涵盖各类背景
 
 ## 实测效果与 RMBG 对比
 
-下面四组图来自 `samples/inputs/6.png`、`7.png`、`8.png`、`11.png` 的实测输出。每组从左到右依次是原图、ERMBG 合成到 checker 背景、RMBG baseline 合成到 checker 背景、ERMBG / RMBG alpha 对比。
+下面四组图来自 `samples/inputs/6.png`、`7.png`、`8.png`、`11.png` 的实测输出。每组从左到右依次是原图、ERMBG 合成到 checker 背景、RMBG baseline 合成到 checker 背景、白底 ERMBG / RMBG 对比、黑底 ERMBG / RMBG 对比、ERMBG / RMBG alpha 对比。
 
 ![Sample 6 ERMBG vs RMBG](docs/assets/readme/sample_6_ermbg_vs_rmbg.png)
 
