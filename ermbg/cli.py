@@ -21,6 +21,7 @@ from typing import Optional
 import numpy as np
 import typer
 from loguru import logger
+from PIL import Image
 
 from . import io
 from .diagnose import BackgroundDiagnoser
@@ -43,6 +44,16 @@ def _load_object_prompt(json_path: Path) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Could not parse {json_path}: {e}")
         return None
+
+
+def _load_subject_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray:
+    """Load an ownership mask as H×W float32 [0,1]."""
+    mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.float32) / 255.0
+    if mask.shape != shape:
+        raise typer.BadParameter(
+            f"--subject-mask shape must match input image {shape}, got {mask.shape}"
+        )
+    return np.clip(mask, 0.0, 1.0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +136,11 @@ def matte(
         "0,200,0",
         help="Composite background for transparent inputs, as 'R,G,B' (default green screen)",
     ),
+    subject_mask: Path | None = typer.Option(
+        None,
+        "--subject-mask",
+        help="Optional HxW ownership mask. Used only to repair subject-owned low-alpha holes.",
+    ),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -136,6 +152,7 @@ def matte(
         raise typer.BadParameter(f"--bg-color must be 'R,G,B', got {bg_color!r}")
 
     image, source_alpha = io.load_image_with_alpha(input_path)
+    subject_support = _load_subject_mask(subject_mask, image.shape[:2]) if subject_mask is not None else None
     object_prompt = _load_object_prompt(input_path.with_suffix(".json"))
     seg = build_segmenter(backend=backend, model_id=matting_model)
 
@@ -156,6 +173,7 @@ def matte(
         segmenter=seg,
         despill=despill if despill != "auto" else None,
         use_keyer=False if not use_keyer else None,
+        subject_support=subject_support,
         legacy_analytic_alpha=legacy_analytic_alpha,
     )
 

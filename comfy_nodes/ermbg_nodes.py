@@ -40,7 +40,14 @@ def _image_to_numpy(image: torch.Tensor) -> np.ndarray:
 def _mask_to_numpy(mask: torch.Tensor | None) -> np.ndarray | None:
     if mask is None:
         return None
-    arr = mask[0].detach().cpu().numpy()
+    if mask.ndim == 2:
+        arr = mask.detach().cpu().numpy()
+    elif mask.ndim == 3:
+        arr = mask[0].detach().cpu().numpy()
+    elif mask.ndim == 4:
+        arr = mask[0, ..., 0].detach().cpu().numpy()
+    else:
+        raise ValueError(f"Unsupported MASK tensor shape: {tuple(mask.shape)}")
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
 
@@ -80,6 +87,7 @@ class ErmbgAutoMatte:
             },
             "optional": {
                 "source_mask": ("MASK", {"tooltip": "If you have an existing α (e.g. from a prior segment), pass it here. The router will reuse it when clean."}),
+                "subject_mask": ("MASK", {"tooltip": "Independent subject ownership mask used only to repair subject-owned low-alpha holes."}),
             },
         }
 
@@ -96,9 +104,11 @@ class ErmbgAutoMatte:
         bg_color: str,
         matting_model: str,
         source_mask: torch.Tensor | None = None,
+        subject_mask: torch.Tensor | None = None,
     ):
         rgb = _image_to_numpy(image)
         alpha = _mask_to_numpy(source_mask)
+        support = _mask_to_numpy(subject_mask)
 
         # If user passed a source mask, fold it into the rgba contract
         # `matte_image` expects (it accepts ndarray with HxWx4 or PIL with α).
@@ -126,6 +136,7 @@ class ErmbgAutoMatte:
             bg_color=_bg_tuple(bg_color),
             despill=despill_arg,
             use_keyer=keyer_arg,
+            subject_mask=support,
         )
 
         # Outputs: foreground RGB (premultiplied is more compositing-friendly,

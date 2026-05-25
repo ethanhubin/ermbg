@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ermbg.keyer import (
-    KeyerThresholds,
     chromatic_key_alpha,
     gate_alpha_by_keyer,
     key_alpha,
     luminance_key_alpha,
     merge_alpha_components,
+    repair_alpha_with_subject_support,
 )
+
+pytestmark = pytest.mark.core
 
 
 def test_chromatic_key_alpha_pure_bg_is_zero():
@@ -150,3 +153,66 @@ def test_gate_preserves_genuine_soft_edges():
     # nothing gated because key α >= bg_confidence_threshold (0.08 default)
     assert info["pixels_gated"] == 0
     np.testing.assert_array_equal(gated, matting)
+
+
+def test_subject_support_repair_fills_owned_interior_hole_only():
+    """A precise subject mask can authorize a low-alpha interior repair, while
+    external keyer disagreement remains untouched."""
+    h, w = 80, 80
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:60, 20:60] = 1.0
+    matting[34:46, 44:56] = 0.1  # model recall hole inside the subject
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:60, 20:60] = 1.0
+    key[5:15, 5:15] = 1.0  # keyer false positive outside the subject
+
+    support = np.zeros((h, w), dtype=np.float32)
+    support[20:60, 20:60] = 1.0
+
+    repaired, info = repair_alpha_with_subject_support(matting, key, support)
+
+    assert info["accepted_components"] == 1
+    assert repaired[36:44, 46:54].mean() > 0.9
+    assert repaired[5:15, 5:15].max() == 0.0
+
+
+def test_subject_support_repair_respects_true_transparent_hole():
+    """If the independent ownership mask excludes an inner opening, keyer
+    evidence alone must not fill it."""
+    h, w = 80, 80
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:60, 20:60] = 1.0
+    matting[34:46, 34:46] = 0.0
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:60, 20:60] = 1.0
+
+    support = np.zeros((h, w), dtype=np.float32)
+    support[20:60, 20:60] = 1.0
+    support[34:46, 34:46] = 0.0  # semantic mask says this is not subject-owned
+
+    repaired, info = repair_alpha_with_subject_support(matting, key, support)
+
+    assert info["accepted_components"] == 0
+    assert repaired[34:46, 34:46].max() == 0.0
+
+
+def test_subject_support_repair_rejects_outer_contour_fringe():
+    """Even with a support mask, the outer contour safety margin prevents
+    lifting antialiasing pixels that still contain observed background color."""
+    h, w = 80, 80
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[22:58, 22:58] = 1.0
+    matting[20:22, 20:60] = 0.1  # low-alpha top contour fringe
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:60, 20:60] = 1.0
+
+    support = np.zeros((h, w), dtype=np.float32)
+    support[20:60, 20:60] = 1.0
+
+    repaired, info = repair_alpha_with_subject_support(matting, key, support, exterior_margin_px=3)
+
+    assert info["accepted_components"] == 0
+    np.testing.assert_array_equal(repaired[20:22, 20:60], matting[20:22, 20:60])

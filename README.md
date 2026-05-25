@@ -97,6 +97,31 @@ ermbg diagnose input.png
 
 # 批量
 ermbg phase1 --input-dir samples/inputs --out-dir out/phase1
+
+# 可选:传入独立主体归属 mask,用于修复浅色主体在白底上的低 α 缺口
+ermbg matte samples/inputs/12.png --subject-mask samples/outputs/clipseg_12/clipseg_3.png
+
+# 12 号 / subject_mask 回归对比
+.venv/bin/python scripts/04_subject_mask_regression.py \
+  --input samples/inputs/12.png \
+  --subject-mask samples/outputs/clipseg_12/clipseg_3.png \
+  --out samples/outputs/sample12_subject_regression \
+  --assert-improved
+
+# ComfyUI 忙时可先离线渲染 prompt-aware subject_mask 工作流 JSON
+.venv/bin/python scripts/05_comfy_subject_mask_workflow.py \
+  --input samples/inputs/12.png \
+  --prompt "the entire framed green panel" \
+  --out samples/outputs/comfy_workflows/sample12_clipseg_ermbg.json \
+  --filename-prefix sample12_clipseg_ermbg
+
+# ComfyUI 空闲时加 --submit:会等待完成并下载 foreground / alpha / subject_mask
+.venv/bin/python scripts/05_comfy_subject_mask_workflow.py \
+  --input samples/inputs/12.png \
+  --prompt "the entire framed green panel" \
+  --out samples/outputs/comfy_workflows/sample12_clipseg_ermbg.json \
+  --filename-prefix sample12_clipseg_ermbg \
+  --submit
 ```
 
 输出:`*_rgba.png` / `*_alpha.png` / `*_foreground.png` / `*_trimap.png` / `*.report.json` / `*_qa/on_*.png`。
@@ -112,6 +137,9 @@ r.rgba              # H×W×4 numpy uint8
 r.strategy_name     # 'saturated_bg' / 'white_bg' / 'rgba_passthrough' / ...
 r.report['qa']['edge_halo_score_mean']
 
+# 可选 subject_mask 只作为主体归属约束,不会直接替换最终 alpha
+r = matte_image("input.png", subject_mask="ownership_mask.png", output_dir="out/", qa=True)
+
 # 秒回预览(不跑 BiRefNet)
 s = classify_image("input.png")
 print(s.bg_type, s.image_type, s.notes)
@@ -123,7 +151,7 @@ print(s.bg_type, s.image_type, s.notes)
 
 `comfy_nodes/` 提供两个自定义节点:
 
-- **ERMBG AutoMatte**:接 IMAGE(+ 可选 MASK),自动路由,出 foreground / alpha / 调试 summary。
+- **ERMBG AutoMatte**:接 IMAGE(+ 可选 source_mask / subject_mask),自动路由,出 foreground / alpha / 调试 summary。
 - **ERMBG Classify (preview)**:只跑 router,秒回 bg_type / image_type / 完整策略 JSON,做工作流分支用。
 
 最简工作流:
@@ -159,7 +187,7 @@ ermbg/
 
 comfy_nodes/       ComfyUI 自定义节点
 examples/          quickstart 等示例
-tests/             81 项 pytest
+tests/             91 项 pytest
 samples/inputs/    11 张测试图,涵盖各类背景
 ```
 
@@ -199,6 +227,8 @@ samples/inputs/    11 张测试图,涵盖各类背景
 | 干净 RGBA | rgba_passthrough | 直接复用 |
 | 脏 RGBA | hygiene 拒绝 → 重抠 | 不让脏资产蒙混 |
 
+下一阶段方向是 **Interactive Intent Matting**:默认自动完成;低对比主体、花环/相框洞、多对象选择等极端情况允许用户用一句提示或粗笔触补充 keep / remove / hole 意图,系统再自动细化 alpha / foreground / QA。
+
 详细工程现状见 [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md)。
 
 ---
@@ -206,10 +236,14 @@ samples/inputs/    11 张测试图,涵盖各类背景
 ## 测试
 
 ```bash
+# 日常重点回归:router/keyer/API/CLI/subject-mask workflow
+.venv/bin/pytest -q -m core
+
+# 提交前全量
 .venv/bin/pytest -q
 ```
 
-覆盖 router 决策表 / keyer / despill / 诊断 / hygiene / API / ComfyUI 节点 / 端到端 smoke,共 81 项。
+覆盖 router 决策表 / keyer / despill / 诊断 / hygiene / API / ComfyUI 节点 / subject-mask workflow / 端到端 smoke,共 91 项。
 
 ---
 

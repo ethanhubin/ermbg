@@ -21,7 +21,12 @@ from loguru import logger
 
 from . import io
 from .diagnose import BackgroundDiagnoser, DiagnosisReport
-from .keyer import KeyerThresholds, gate_alpha_by_keyer, key_alpha, merge_alpha_components
+from .keyer import (
+    gate_alpha_by_keyer,
+    key_alpha,
+    merge_alpha_components,
+    repair_alpha_with_subject_support,
+)
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
 from .types import MattingResult, Trimap
@@ -43,6 +48,7 @@ def matte(
     strategy: Strategy | None = None,
     despill: str | None = None,
     use_keyer: bool | None = None,
+    subject_support: np.ndarray | None = None,
     legacy_analytic_alpha: bool = False,
 ) -> MattingResult:
     """Run the matting pipeline on one sRGB uint8 image.
@@ -60,12 +66,18 @@ def matte(
         despill: optional override for ``strategy.despill``.
         use_keyer: optional override; ``True`` forces the strategy keyer on,
             ``False`` forces it off, ``None`` uses the strategy as-is.
+        subject_support: optional H×W float32 [0,1] ownership mask from an
+            independent segmenter. When provided, ERMBG may repair low-α
+            regions inside this mask, but never uses the keyer as a direct
+            whole-component alpha replacement.
         legacy_analytic_alpha: run the old projection+guided-filter path.
     """
     if image_srgb.dtype != np.uint8:
         raise ValueError("matte() expects sRGB uint8 input")
     if image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("matte() expects HxWx3 image")
+    if subject_support is not None and subject_support.shape != image_srgb.shape[:2]:
+        raise ValueError("subject_support must have shape HxW matching image_srgb")
 
     if strategy is None:
         strategy = classify_strategy(image_srgb, source_alpha=source_alpha)
@@ -100,6 +112,14 @@ def matte(
                 logger.info(f"keyer: patched {info['patched_components']} component(s) missed by matting net")
         else:
             keyer_info.update({"used": True, "patched_components": 0})
+        if subject_support is not None:
+            soft, repair_info = repair_alpha_with_subject_support(soft, key, subject_support)
+            keyer_info["subject_repair"] = repair_info
+            if repair_info["accepted_components"]:
+                logger.info(
+                    f"keyer: repaired {repair_info['accepted_components']} subject-owned hole(s) "
+                    f"({repair_info['accepted_pixels']} px)"
+                )
         if strategy.use_keyer_gate:
             soft, gate_info = gate_alpha_by_keyer(soft, key)
             keyer_info["pixels_gated"] = gate_info["pixels_gated"]

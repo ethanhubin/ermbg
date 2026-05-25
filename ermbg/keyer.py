@@ -148,6 +148,132 @@ def gate_alpha_by_keyer(
     }
 
 
+def _flood_exterior(mask: np.ndarray) -> np.ndarray:
+    """Return pixels connected to the image border inside ``mask``."""
+    h, w = mask.shape
+    flood = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    work = mask.astype(np.uint8).copy()
+
+    seeds: list[tuple[int, int]] = []
+    _, xs = np.nonzero(work[0:1, :])
+    seeds.extend((int(x), 0) for x in xs)
+    _, xs = np.nonzero(work[-1:, :])
+    seeds.extend((int(x), h - 1) for x in xs)
+    ys, _ = np.nonzero(work[:, 0:1])
+    seeds.extend((0, int(y)) for y in ys)
+    ys, _ = np.nonzero(work[:, -1:])
+    seeds.extend((w - 1, int(y)) for y in ys)
+
+    for x, y in seeds:
+        if work[y, x]:
+            cv2.floodFill(work, flood, (x, y), 2)
+    return work == 2
+
+
+def repair_alpha_with_subject_support(
+    matting_alpha: np.ndarray,
+    key_alpha: np.ndarray,
+    subject_support: np.ndarray,
+    *,
+    key_fg_threshold: float = 0.75,
+    matting_low_threshold: float = 0.65,
+    support_threshold: float = 0.5,
+    fg_anchor_threshold: float = 0.85,
+    exterior_margin_px: int = 2,
+    min_component_area_ratio: float = 0.00002,
+    feather_radius: int = 1,
+) -> tuple[np.ndarray, dict]:
+    """Repair low-α regions only where an external subject mask owns them.
+
+    This is intentionally *not* a generic hole fill. The supplied
+    ``subject_support`` is a separate ownership signal from a stronger or more
+    targeted segmenter. The keyer only supplies known-background evidence, and
+    topology only keeps the repair away from the external contour.
+
+    Pixels are eligible when:
+      - the external subject mask includes them,
+      - the keyer is confident foreground,
+      - the matting α is too low,
+      - they are not in the support's exterior fringe,
+      - the connected component is anchored to confident matting foreground.
+
+    Returns the repaired α and a small debug dict.
+    """
+    m = matting_alpha.astype(np.float32)
+    k = key_alpha.astype(np.float32)
+    support_f = subject_support.astype(np.float32)
+    if m.shape != k.shape or m.shape != support_f.shape:
+        raise ValueError("matting_alpha, key_alpha, and subject_support must have the same HxW shape")
+
+    support = support_f >= support_threshold
+    if not support.any():
+        return m.copy(), {
+            "used": True,
+            "accepted_components": 0,
+            "accepted_pixels": 0,
+            "rejected_components": 0,
+            "component_areas": [],
+        }
+
+    exterior = _flood_exterior(~support)
+    if exterior_margin_px > 0:
+        # Distance is measured in pixels from exterior background. Candidate
+        # pixels close to exterior are likely outer antialiasing, not owned
+        # interior content.
+        dist_to_exterior = cv2.distanceTransform((~exterior).astype(np.uint8), cv2.DIST_L2, 3)
+        away_from_exterior = dist_to_exterior >= float(exterior_margin_px)
+    else:
+        away_from_exterior = ~exterior
+
+    candidate = support & away_from_exterior & (k >= key_fg_threshold) & (m <= matting_low_threshold)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), connectivity=8)
+
+    h, w = m.shape
+    min_area = max(1.0, min_component_area_ratio * float(h * w))
+    confident_fg = (m >= fg_anchor_threshold) & support
+    accepted = np.zeros_like(candidate)
+    accepted_areas: list[int] = []
+    rejected = 0
+
+    anchor_kernel = np.ones((3, 3), np.uint8)
+    for i in range(1, n_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area:
+            rejected += 1
+            continue
+        comp = labels == i
+        comp_touch = cv2.dilate(comp.astype(np.uint8), anchor_kernel, iterations=2).astype(bool)
+        if not (comp_touch & confident_fg).any():
+            rejected += 1
+            continue
+        accepted |= comp
+        accepted_areas.append(area)
+
+    repaired = m.copy()
+    if accepted.any():
+        target = np.maximum(m, np.minimum(k, support_f))
+        repaired[accepted] = target[accepted]
+
+        if feather_radius > 0:
+            ksize = 2 * feather_radius + 1
+            soft = cv2.GaussianBlur(
+                accepted.astype(np.float32),
+                (ksize, ksize),
+                sigmaX=float(feather_radius),
+            )
+            feather_zone = (soft > 0.0) & support & away_from_exterior
+            blended = m + soft * np.maximum(target - m, 0.0)
+            repaired[feather_zone] = np.maximum(repaired[feather_zone], blended[feather_zone])
+
+    return np.clip(repaired, 0.0, 1.0).astype(np.float32), {
+        "used": True,
+        "accepted_components": len(accepted_areas),
+        "accepted_pixels": int(accepted.sum()),
+        "rejected_components": rejected,
+        "component_areas": accepted_areas,
+    }
+
+
 def merge_alpha_components(
     matting_alpha: np.ndarray,
     chromatic_alpha: np.ndarray,
@@ -248,5 +374,6 @@ __all__ = [
     "luminance_key_alpha",
     "key_alpha",
     "gate_alpha_by_keyer",
+    "repair_alpha_with_subject_support",
     "merge_alpha_components",
 ]

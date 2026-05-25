@@ -7,6 +7,8 @@ import pytest
 
 from ermbg.router import assess_source_alpha, classify_strategy
 
+pytestmark = pytest.mark.core
+
 
 def _solid_with_subject(bg_color, fg_color=(220, 30, 30), h=128, w=128):
     img = np.broadcast_to(np.array(bg_color, dtype=np.uint8), (h, w, 3)).copy()
@@ -17,7 +19,6 @@ def _solid_with_subject(bg_color, fg_color=(220, 30, 30), h=128, w=128):
 def _make_clean_rgba(h=128, w=128):
     """RGBA where opaque interior is uniform red, transparent regions are
     premultiplied (RGB=0), and the soft edge is properly mixed."""
-    img = np.zeros((h, w, 3), dtype=np.uint8)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     cy, cx = h // 2, w // 2
     r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)

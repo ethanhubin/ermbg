@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 # as a package. For tests, add the repo root so the import resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from comfy_nodes.ermbg_nodes import ErmbgAutoMatte, ErmbgClassify  # noqa: E402
+from comfy_nodes.ermbg_nodes import ErmbgAutoMatte, ErmbgClassify, _mask_to_numpy  # noqa: E402
 
 
 def _green_with_red_subject(h=128, w=128):
@@ -91,3 +91,13 @@ def test_automatte_with_source_mask_passes_through(_force_grabcut):
         source_mask=mask,
     )
     assert "rgba_passthrough" in summary
+
+
+def test_mask_to_numpy_accepts_batched_and_unbatched_masks():
+    mask_2d = torch.ones((32, 48), dtype=torch.float32)
+    mask_3d = mask_2d.unsqueeze(0)
+    mask_4d = mask_2d.unsqueeze(0).unsqueeze(-1)
+
+    assert _mask_to_numpy(mask_2d).shape == (32, 48)
+    assert _mask_to_numpy(mask_3d).shape == (32, 48)
+    assert _mask_to_numpy(mask_4d).shape == (32, 48)

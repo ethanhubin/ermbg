@@ -36,6 +36,7 @@ from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
 
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
+MaskLike = Union[str, Path, np.ndarray, Image.Image]
 
 
 @dataclass
@@ -81,6 +82,35 @@ def _to_rgb_and_alpha(image: ImageLike) -> tuple[np.ndarray, np.ndarray | None, 
     raise TypeError(f"Unsupported input type: {type(image)}")
 
 
+def _to_mask(mask: MaskLike | None, shape: tuple[int, int], name: str) -> np.ndarray | None:
+    """Normalize a mask-like value to H×W float32 [0,1]."""
+    if mask is None:
+        return None
+
+    if isinstance(mask, (str, Path)):
+        arr = np.asarray(Image.open(mask).convert("L"), dtype=np.float32) / 255.0
+    elif isinstance(mask, Image.Image):
+        arr = np.asarray(mask.convert("L"), dtype=np.float32) / 255.0
+    elif isinstance(mask, np.ndarray):
+        is_uint8 = mask.dtype == np.uint8
+        arr = mask.astype(np.float32)
+        if arr.ndim == 3:
+            if arr.shape[2] == 4:
+                arr = arr[..., 3]
+            elif arr.shape[2] == 3:
+                arr = arr.mean(axis=2)
+            else:
+                raise ValueError(f"{name} ndarray must be HxW, HxWx3, or HxWx4")
+        if is_uint8 or arr.max(initial=0.0) > 1.0:
+            arr = arr / 255.0
+    else:
+        raise TypeError(f"Unsupported {name} type: {type(mask)}")
+
+    if arr.shape != shape:
+        raise ValueError(f"{name} must have shape {shape}, got {arr.shape}")
+    return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -105,6 +135,7 @@ def matte_image(
     bg_color: tuple[int, int, int] = (0, 200, 0),
     despill: str | None = None,
     use_keyer: bool | None = None,
+    subject_mask: MaskLike | None = None,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -122,8 +153,12 @@ def matte_image(
             target so the first stage's outputs route well.
         despill, use_keyer: optional manual overrides; default ``None`` lets
             the router decide.
+        subject_mask: optional H×W ownership mask from an independent segmenter.
+            When provided, ERMBG may repair keyer-supported low-alpha holes
+            inside this mask without raising the subject's external soft edge.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
+    subject_support = _to_mask(subject_mask, rgb.shape[:2], "subject_mask")
 
     # If source has α but the router decides to re-matte, the matting net
     # needs RGB on a known bg, not the raw (possibly premul or leaky) RGB.
@@ -142,6 +177,7 @@ def matte_image(
         segmenter=seg,
         despill=despill,
         use_keyer=use_keyer,
+        subject_support=subject_support,
     )
 
     # Build report.
@@ -200,4 +236,4 @@ def matte_image(
     )
 
 
-__all__ = ["matte_image", "classify_image", "MatteResponse", "ImageLike"]
+__all__ = ["matte_image", "classify_image", "MatteResponse", "ImageLike", "MaskLike"]

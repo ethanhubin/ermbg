@@ -68,3 +68,6 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "core: fast tests for the current subject-mask matting foundation",
+]

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 from PIL import Image
 
 from ermbg import MatteResponse, classify_image, matte_image
+
+pytestmark = pytest.mark.core
 
 
 def _solid_green_with_red_subject(h=128, w=128):

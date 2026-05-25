@@ -200,25 +200,27 @@ tests/test_keyer.py        chromatic + luminance keyer + merge
 tests/test_lightwrap.py    halo 抑制
 tests/test_matting.py      end-to-end smoke
 tests/test_router.py       策略分类(saturated/white/black/grey/passthrough/graphic/photo)
+tests/test_api.py          高阶 API / subject_mask 输入
+tests/test_cli.py          CLI subject_mask smoke
+tests/test_comfy_nodes.py  ComfyUI 节点输入输出
+tests/test_comfy_subject_workflow.py  CLIPSeg→ERMBG workflow 渲染/下载
 ```
 
-38 项全部通过(`.venv/bin/pytest -q`)。新增模块要带 smoke 测试。
+日常重点回归跑 `.venv/bin/pytest -q -m core`,覆盖 router / keyer / API / CLI / subject-mask workflow。提交前跑全量 `.venv/bin/pytest -q`;当前 91 项全部通过。新增模块要带 smoke 测试。
 
 ---
 
 ## 10. 已知问题 / TODO
 
-### 10.1 RGBA 输入的智能脏度检测(待实现)
+### 10.1 RGBA 输入的智能脏度检测(已实现)
 
-当前 `rgba_passthrough` 是无条件触发的:只要源图 α 至少 5% 半透明,就直接复用。但实际场景里很多 RGBA 资产本来就抠得脏(白边、黑边、彩边、α 二值化、低 α 残留旧背景色)。
+`rgba_passthrough` 现在不再无条件触发。只要源图 α 至少 5% 像素非全不透明,router 会先跑 `assess_source_alpha(rgb, alpha)` 做无监督卫生检查:
 
-**计划**:在 router 加 `assess_source_alpha(rgb, alpha)` 自动判断源 α 卫生度:
+- **fringe_dE**:在 α∈(0.05, 0.6] 的软边带,按 straight / sRGB-premul / linear-premul 三种包装恢复 implied F,取最贴近 opaque interior 的 OKLab 距离。
+- **low_alpha_residual**:检查 α≈0 区域 RGB 是否接近 premultiplied black,或是否泄露 interior / 原始背景色。
+- **bimodal_fraction**:识别硬二值 α,避免缺失 AA 的粗抠图被直接复用。
 
-- **fringe_dE**:把 RGBA 合到中灰底,看 α∈(0, 0.3] 的边缘像素颜色 vs 主体内部主调的 OKLab ΔE。脏抠图常带白/黑/绿边。
-- **low_alpha_residual**:α≈0 的像素 RGB 应该接近 0(如果做了 premultiply)或某个固定值;如果五颜六色,说明旧背景色还在 RGB 里。
-- **bimodal_fraction**:α 直方图集中在 0/255 两极的比例。过高 → 硬抠,缺半透明信息,需要重抠拿回边缘。
-
-任一指标失败 → 把 strategy 从 `rgba_passthrough` 切到正常路径,源 α 仅作为先验提示。所有判定**不需要用户参数**。
+任一指标失败 → strategy 从 `rgba_passthrough` 落回正常背景分类路径,由主流程重抠。测试覆盖 clean passthrough、halo reject、low-alpha leak、binarized matte、无 opaque interior 等边界。
 
 ### 10.2 白底 keyer merge 在小连通分量上失效
 
@@ -227,6 +229,95 @@ tests/test_router.py       策略分类(saturated/white/black/grey/passthrough/g
 ### 10.3 verdict=not-pure-bg 时仍然继续
 
 虽然加了 logger.warning,但管线照样跑。下一步可以让 router 在 `not-pure-bg` 时直接走 `noisy_bg` 策略。
+
+### 10.4 下一阶段:Semantic Matting Planner
+
+12 号样本暴露的问题不是单纯"洞要不要填",而是"这块区域是否语义上属于主体"。下一阶段不继续调白底 luminance keyer 阈值,而是把主体归属作为独立信号接入:
+
+```text
+Vision / prompt-aware segmentation -> OwnershipMap
+Language planner                  -> 有限操作计划
+ERMBG local algorithms             -> α 修复 / unmix / despill / QA
+```
+
+近期落地顺序:
+
+1. **接通 prompt-aware `subject_mask` 工作流**:ComfyUI 中用 CLIPSeg / Florence / SAM 生成完整主体 ownership mask,传给 `ERMBG AutoMatte(subject_mask=...)`。当前已新增 `ermbg/probe/comfyui_clipseg_ermbg.json` 和 `scripts/05_comfy_subject_mask_workflow.py`,支持离线渲染 JSON,空闲后 `--submit` 等待完成并下载 foreground / alpha / subject_mask / summary。
+2. **CLI/API 回归入口**:CLI `matte` 支持 `--subject-mask`,方便用 `samples/outputs/clipseg_12/*.png` 这类离线 mask 跑 12 号回归;`scripts/04_subject_mask_regression.py` 固化 nomask vs subject-mask 的 QA 对比。
+3. **12 号验收基准**:右上角浅绿色面板缺口必须修复;黑底 / checker / cyan / magenta QA 不允许新增白边;report 中必须记录 `keyer.subject_repair.accepted_pixels`。当前 CLIPSeg prompt-aware mask 已把 recomp 从 0.0308 降到约 0.012,black halo 从约 10.0 降到约 6.0。
+4. **抽象中间表示**:在 `subject_mask` 稳定后再升级为 `OwnershipMap / HoleMap / RiskMap / Plan`,记录来源、置信度、故意透明洞、matting/keyer/semantic 分歧。
+5. **触发策略保守化**:只在低对比、matting/keyer 大面积冲突、疑似内部洞、QA 失败或用户明确指定对象时调用视觉语义分支;简单绿幕/干净 RGBA 仍走本地快速路径。
+
+原则:视觉模型负责理解和提供区域证据,LLM 只在有限操作集合内规划,最终像素级 α / foreground RGB / QA 仍由本地确定性代码执行。
+
+### 10.5 产品重构:Interactive Intent Matting
+
+2026-05-26 进一步把第二阶段目标从"语义 planner"收束成更贴近用户的 **Interactive Intent Matting**:
+
+```text
+默认智能完成。
+失败时给用户一个极轻的纠偏入口。
+纠偏输入表达意图,不是让用户精修 alpha。
+```
+
+这不是推翻 `Semantic Matting Planner`,而是把它的产品边界说清楚:planner 不应该要求用户画完美 mask,也不应该让 VLM/LLM 直接改像素。用户只需要补充系统缺失的"意图信息",例如:
+
+- 文字提示:`这是一个花环,洞要抠干净` / `保留整个浅绿色面板` / `只保留左边这个徽章`;
+- 粗笔触 keep:`这块要保留`;
+- 粗笔触 remove:`这块要去掉`;
+- 粗笔触 hole:`这里是洞,要透明`;
+- prompt-aware subject mask:由 CLIPSeg / Florence / SAM 根据一句提示生成粗 ownership support。
+
+这些输入统一进入中间表示,而不是直接替换最终 alpha:
+
+```text
+instruction / keep_mask / remove_mask / hole_mask / subject_mask
+  -> OwnershipMap / BackgroundMap / HoleMap / RiskMap
+  -> 有限 MattingPlan
+  -> ERMBG deterministic executor
+  -> QA / debug overlays
+```
+
+建议第二阶段 API 表面逐步扩展:
+
+```bash
+ermbg matte input.png \
+  --keep-mask rough_keep.png \
+  --remove-mask rough_remove.png \
+  --hole-mask rough_hole.png \
+  --instruction "this is a wreath; keep leaves, remove the center hole"
+```
+
+ComfyUI 节点对应增加可选 MASK/STRING 输入:
+
+```text
+keep_mask
+remove_mask
+hole_mask
+instruction
+```
+
+第一版实现原则:
+
+1. **自动优先**:绿幕/黑白底清晰图/干净 RGBA/小漏检/脏边仍然无参数完成。
+2. **轻交互只补意图**:笔触和文字只产生 ownership / background / hole 约束,不直接成为最终 matte。
+3. **本地代码细化**:边缘、despill、unmix、gate、QA 仍由本地确定性算法执行。
+4. **hole 约束优先级最高**:花环、相框、窗户、镂空 logo 的洞不能被自动 subject repair 填掉。
+5. **报告可解释**:`report.json` 要记录哪些用户意图被采纳、哪些候选被拒绝、repair mask / rejected mask / risk overlay 在哪里。
+
+从用户体验上,系统应该主动暴露极少量纠偏动作:
+
+```text
+检测到浅色主体可能被白底吃掉。可以粗涂要保留的区域。
+检测到内部洞不确定。可以标记"洞要透明"。
+检测到多个对象。可以粗涂目标对象或用一句话指定。
+```
+
+阶段边界:
+
+- **Phase 2**:消费已有粗 mask / instruction,生成 Comfy workflow,不默认自动远端调用;先把中间表示和 report 打通。
+- **Phase 3**:router / QA 发现风险后,可选择自动请求 prompt-aware segmentation 分支。
+- **Phase 4**:VLM/LLM 只输出有限 plan schema,仍不碰像素算法。
 
 ---
 
