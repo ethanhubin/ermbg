@@ -44,9 +44,15 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
 ]
+web = [
+    "fastapi>=0.115",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+]
 
 [project.scripts]
 ermbg = "ermbg.cli:app"
+ermbg-web = "ermbg.web:main"
 
 [tool.setuptools.packages.find]
 include = ["ermbg*"]
