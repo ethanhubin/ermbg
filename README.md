@@ -165,6 +165,29 @@ samples/inputs/    11 张测试图,涵盖各类背景
 
 ---
 
+## 实测效果与 RMBG 对比
+
+下面四组图来自 `samples/inputs/6.png`、`7.png`、`8.png`、`11.png` 的实测输出。每组从左到右依次是原图、ERMBG 合成到 checker 背景、RMBG baseline 合成到 checker 背景、ERMBG / RMBG alpha 对比。
+
+![Sample 6 ERMBG vs RMBG](docs/assets/readme/sample_6_ermbg_vs_rmbg.png)
+
+![Sample 7 ERMBG vs RMBG](docs/assets/readme/sample_7_ermbg_vs_rmbg.png)
+
+![Sample 8 ERMBG vs RMBG](docs/assets/readme/sample_8_ermbg_vs_rmbg.png)
+
+![Sample 11 ERMBG vs RMBG](docs/assets/readme/sample_11_ermbg_vs_rmbg.png)
+
+| 输入 | ERMBG halo mean | RMBG halo mean | ERMBG recomp err | RMBG recomp err |
+|---|---:|---:|---:|---:|
+| 6 | 1.06 | 7.15 | 0.0216 | 0.0206 |
+| 7 | 2.34 | 4.75 | 0.0071 | 0.0063 |
+| 8 | 1.25 | 3.80 | 0.0097 | 0.0577 |
+| 11 | 3.03 | 5.64 | 0.0202 | 0.2375 |
+
+指标来自各自的 `report.json`:ERMBG 使用本仓库自动路由和 despill,RMBG baseline 使用 `comfyui-rembg-isnet-general-use` 后再跑同一套 QA。
+
+---
+
 ## 目前的工况
 
 | 输入 | 路由 | 评价 |
