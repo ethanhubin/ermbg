@@ -173,7 +173,11 @@ ermbg/
   segmenter.py     BiRefNet-matting / GrabCut 回退
   diagnose.py      背景诊断 (B / σ / verdict)
   despill.py       unmix / chroma_cap / local_borrow / closed_form
-  candidates.py    同色内区等歧义候选生成
+  risk.py          EvidenceRegion/RiskRegion 本地证据提取
+  planner.py       ToolCatalog / CandidatePlan / rule planner
+  vlm_planner.py   PlannerClient 协议 / rule client / JSON parser
+  executor.py      执行 CandidatePlan 的本地工具调度器
+  candidates.py    执行 planner 候选,输出可选 RGBA
   matting.py       端到端 matte() 主入口
   api.py           matte_image / classify_image 高阶 API
   web.py           后台上传 UI + 候选缩略图切换
@@ -185,7 +189,7 @@ ermbg/
 
 comfy_nodes/       ComfyUI 自定义节点
 examples/          quickstart 等示例
-tests/             102 项 pytest
+tests/             123 项 pytest
 samples/inputs/    12 张测试图,涵盖各类背景
 ```
 
@@ -225,9 +229,9 @@ samples/inputs/    12 张测试图,涵盖各类背景
 | 干净 RGBA | rgba_passthrough | 直接复用 |
 | 脏 RGBA | hygiene 拒绝 → 重抠 | 不让脏资产蒙混 |
 
-下一阶段方向是 **Known-B Candidate Matting + Region Policy Map**:优先把已知背景色下的 keyer / matting 融合做扎实;遇到同色内洞、多对象等信息论歧义时自动生成候选让用户选择;再用视觉/语义识别给局部区域打策略标签,例如 hard_edge / soft_hair / translucent / intentional_hole,由本地确定性算法分别执行。当前已落地 `hard_edge` 局部修复,以及同色内区的 `transparent_hole` / `same_color_marking` 候选和后台缩略图切换。
+下一阶段方向是 **Known-B Candidate Matting + Evidence-to-Policy Planning**:优先把已知背景色下的 keyer / matting 融合做扎实;遇到同色内洞、多对象等信息论歧义时自动生成候选让用户选择;再把本地 CV 提取的证据区域交给视觉/语义模型解释成区域策略,例如 hard_edge / soft_hair / translucent / intentional_hole,由本地确定性算法分别执行。当前已落地 `hard_edge` 局部修复,以及同色内区的 `transparent_hole` / `same_color_marking` 候选和后台缩略图切换。
 
-VLM/LLM 的定位是 **工具调度器 + 区域策略规划器**,不是直接抠图模型。ERMBG 会把本地 `RiskRegion`、证据和 `ToolCatalog` 告诉模型,由模型推理哪些区域调用哪些本地工具、需要生成几个候选;候选数量不固定,但每个候选必须由已注册工具组成,最终 alpha / foreground / despill / QA 仍由本地确定性代码执行。
+VLM/LLM 的定位是 **工具调度器 + 区域策略规划器**,不是直接抠图模型。ERMBG 会把本地 `RiskRegion`(实现名;语义上是 EvidenceRegion)、证据摘要和 `ToolCatalog` 告诉模型,由模型推理这些证据区域在语义上是什么、哪些区域调用哪些本地工具、需要生成几个候选;候选数量不固定,但每个候选必须由已注册工具组成,最终 alpha / foreground / despill / QA 仍由本地确定性代码执行。传给 planner/VLM 的区域 JSON 同时包含内部兼容 `kind` 和更证据化的 `evidence_kind`,工具也同时暴露 `allowed_region_kinds` / `allowed_evidence_kinds`。
 
 详细工程现状见 [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md)。
 
@@ -243,7 +247,7 @@ VLM/LLM 的定位是 **工具调度器 + 区域策略规划器**,不是直接抠
 .venv/bin/pytest -q
 ```
 
-覆盖 router 决策表 / keyer / despill / 诊断 / hygiene / API / Web 候选接口 / ComfyUI 节点 / subject-mask workflow / 端到端 smoke,共 102 项。
+覆盖 router 决策表 / keyer / despill / 诊断 / hygiene / planner / VLM planner adapter / executor / risk / API / Web 候选接口 / ComfyUI 节点 / subject-mask workflow / 端到端 smoke,共 123 项。
 
 ---
 

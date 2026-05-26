@@ -114,6 +114,9 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert payload["background"] == [255, 255, 255]
     assert payload["candidates"][0]["id"] == "auto"
     assert payload["candidates"][0]["label"] == "自动结果"
+    assert payload["candidates"][0]["regions"] == []
+    assert payload["candidates"][0]["operation_results"] == []
+    assert payload["candidates"][0]["plan"] is None
     data_url = payload["candidates"][0]["rgba"]
     assert data_url.startswith("data:image/png;base64,")
     png = base64.b64decode(data_url.split(",", 1)[1])
@@ -157,6 +160,10 @@ def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatc
     payload = response.json()
     ids = [candidate["id"] for candidate in payload["candidates"]]
     assert ids == ["transparent_hole", "same_color_marking"]
+    assert payload["candidates"][0]["plan"]["operations"][0]["tool"] == "preserve_hole"
+    assert payload["candidates"][0]["regions"][0]["kind"] == "same_bg_enclosed_region"
+    assert payload["candidates"][0]["regions"][0]["evidence_kind"] == "same_bg_low_alpha_enclosed"
+    assert payload["candidates"][1]["operation_results"][0]["tool"] == "fill_same_color_region"
     filled_url = payload["candidates"][1]["rgba"]
     filled_png = base64.b64decode(filled_url.split(",", 1)[1])
     filled = np.asarray(Image.open(BytesIO(filled_png)).convert("RGBA"))

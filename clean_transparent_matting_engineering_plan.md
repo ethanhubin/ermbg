@@ -95,7 +95,11 @@ image (sRGB uint8 + 可选 source α)
 | [ermbg/diagnose.py](ermbg/diagnose.py) | `BackgroundDiagnoser` 单图诊断 + risk_map |
 | [ermbg/metrics.py](ermbg/metrics.py) | `measure_background_color` / `background_purity_sigma` / `edge_contrast_q10` 等;σ 测量已修(避免 AA 边污染)|
 | [ermbg/despill.py](ermbg/despill.py) | `chroma_cap` / `local_foreground_borrow` / `unmix_foreground`(新)/ `closed_form_matting` / `apply_despill`(新增 `auto` 和 `unmix`) |
-| [ermbg/candidates.py](ermbg/candidates.py) | `generate_matte_candidates`:同色内区等信息论歧义的候选生成 |
+| [ermbg/risk.py](ermbg/risk.py) | EvidenceRegion / `RiskRegion` 本地证据提取:same-B 内洞 / alpha-keyer disagreement / high-contrast edge evidence |
+| [ermbg/planner.py](ermbg/planner.py) | `ToolCatalog` / `PlannerPromptBundle` / `CandidatePlan` / validator / rule planner,供未来 VLM planner 复用 |
+| [ermbg/vlm_planner.py](ermbg/vlm_planner.py) | `PlannerClient` 协议 / `RulePlannerClient` / 模型 JSON → `CandidatePlan[]` parser |
+| [ermbg/executor.py](ermbg/executor.py) | 执行 `CandidatePlan`,调度本地确定性工具并产出 debug metadata |
+| [ermbg/candidates.py](ermbg/candidates.py) | 执行 planner 生成的候选,输出 selectable `MatteCandidate` |
 | [ermbg/lightwrap.py](ermbg/lightwrap.py) | Brinkmann light wrap 边缘晕修 |
 | [ermbg/qa.py](ermbg/qa.py) | 6 背景合成 + halo / noise / 细结构指标 |
 | [ermbg/matting.py](ermbg/matting.py) | 端到端 `matte()` 主入口,接 router |
@@ -203,6 +207,10 @@ tests/test_despill.py      chroma_cap / local_borrow / unmix / dispatcher
 tests/test_diagnose.py     purity / contrast / verdict
 tests/test_io.py           sRGB↔linear,save/load
 tests/test_keyer.py        chromatic + luminance keyer + merge
+tests/test_risk.py         EvidenceRegion / RiskRegion 本地证据提取
+tests/test_planner.py      ToolCatalog / CandidatePlan / validator / rule planner
+tests/test_vlm_planner.py  PlannerClient mock adapter / 模型 JSON parser
+tests/test_executor.py     CandidatePlan 本地工具执行器
 tests/test_candidates.py   同色内区候选生成
 tests/test_lightwrap.py    halo 抑制
 tests/test_matting.py      end-to-end smoke
@@ -214,7 +222,7 @@ tests/test_comfy_nodes.py  ComfyUI 节点输入输出
 tests/test_comfy_subject_workflow.py  CLIPSeg→ERMBG workflow 渲染/下载
 ```
 
-日常重点回归跑 `.venv/bin/pytest -q -m core`,覆盖 router / keyer / API / CLI / subject-mask workflow。提交前跑全量 `.venv/bin/pytest -q`;当前 102 项全部通过。新增模块要带 smoke 测试。
+日常重点回归跑 `.venv/bin/pytest -q -m core`,覆盖 router / keyer / planner / VLM planner adapter / executor / risk / API / CLI / subject-mask workflow。提交前跑全量 `.venv/bin/pytest -q`;当前 123 项全部通过。新增模块要带 smoke 测试。
 
 ---
 
@@ -272,21 +280,46 @@ Known-B Candidate Matting
 1. **Robust Alpha Fusion**:像素颜色明显不是 B,但 matting alpha 偏低时,用 known-B/keyer 证据和 topology guard 保守抬 alpha。
 2. **Ambiguity Candidate Generation**:像素颜色等于 B,语义上可能是洞也可能是主体图案时,自动生成少量候选让用户选择。
 
-### 10.5 Region Policy Map
+### 10.5 Evidence-to-Policy Map
 
 10 号样本暴露的不是主体归属歧义,而是**同一张图里不同区域需要不同抠图策略**。黑色描边是硬边,应该追求轮廓忠实;毛发/绒毛是软边,应该保留连续 alpha;透明或反光材质还需要单独的混合恢复策略。
 
-因此下一层中间表示应从全图 `image_type ∈ {graphic, photo}` 升级为区域级 policy map:
+这里要区分两个层次:
+
+1. 本地 CV 输出 **EvidenceRegion**:只描述像素证据和拓扑证据,不做最终语义判断。
+2. VLM/LLM 或用户意图把 EvidenceRegion 解释成 **RegionPolicy** / `CandidatePlan`:决定这些区域语义上更像硬边、软边、透明洞、同色图案、半透明材质或应保留/移除的对象。
+
+当前代码里的 `RiskRegion` 是实现名,更准确的产品/架构语义是 EvidenceRegion。它不应该被理解成"本地已经判定了语义策略"。
+
+因此下一层中间表示应从全图 `image_type ∈ {graphic, photo}` 升级为:
 
 ```text
-Image / local evidence / optional vision annotation
-  -> RegionPolicyMap
+Image / known-B evidence / alpha-keyer disagreement / topology
+  -> EvidenceRegion[]
+  -> optional VLM/user interpretation
+  -> RegionPolicyMap / CandidatePlan[]
   -> finite local MattingPlan
   -> deterministic executor
   -> QA / debug overlays
 ```
 
-建议第一版标签:
+本地 EvidenceRegion 应尽量用证据化命名,避免提前替 VLM 做语义判断:
+
+| Evidence kind | 含义 | 可交给 VLM 判断的问题 |
+|---|---|---|
+| `same_bg_enclosed_region` | 颜色接近 known B、alpha 低、被前景包围 | 是透明洞还是同色主体图案? |
+| `alpha_keyer_disagreement` | keyer 认为前景,matting alpha 低 | 是主体漏检、外轮廓污染,还是材质/阴影? |
+| `hard_edge_candidate` | 高对比、小面积、keyer 前景、matting 偏低 | 是硬描边/文字边缘,还是应保留软边? |
+
+上表里的当前 `kind` 名称有历史兼容原因。代码现在保留 `kind` 作为执行器兼容键,同时在传给 planner/VLM 的 JSON 里增加 `evidence_kind` 作为更证据化的命名:
+
+- `same_bg_enclosed_region` -> `same_bg_low_alpha_enclosed`
+- `alpha_keyer_disagreement` -> `keyer_fg_matting_low`
+- `hard_edge_candidate` -> `high_contrast_keyer_fg_matting_low`
+
+`ToolCatalog` 也同步暴露 `allowed_region_kinds` 和 `allowed_evidence_kinds`:前者给本地 validator/executor 用,后者给 VLM 理解工具适用证据。这样策略推理逐步迁到模型侧时,不需要立刻重命名内部执行路径。
+
+VLM/LLM 输出的 RegionPolicy 才是语义标签:
 
 | Policy | 典型区域 | 执行策略 |
 |---|---|---|
@@ -298,7 +331,7 @@ Image / local evidence / optional vision annotation
 | `shadow_or_contact` | 投影、接触阴影 | 默认作为背景去除,后续可输出 shadow matte |
 | `unknown` | 证据冲突区域 | 生成候选或请求轻量意图输入 |
 
-视觉模型的角色是提供区域证据和策略先验,例如"这段是硬描边"、"这里是毛发"、"这个内圈是透明洞"。它不直接输出最终 alpha;最终像素操作仍由本地 keyer / matting / unmix / topology / QA 执行。
+视觉模型的角色不是重新做本地测量,而是解释本地证据和图像语义,例如"这段更像硬描边"、"这里是毛发"、"这个内圈是透明洞"。它不直接输出最终 alpha;最终像素操作仍由本地 keyer / matting / unmix / topology / QA 执行。
 
 当前已落地的第一条本地规则是 `hard_edge`:在 white/black graphic 路径里,只对 keyer 高置信、与背景亮度差极大、当前 alpha 偏低、且贴近可信前景的小型组件抬 alpha。它解决 10 号样本的黑色细描边被软化问题,同时避免把所有外轮廓抗锯齿直接二值化。
 
@@ -323,10 +356,10 @@ base known-B matte
 | 多对象 | selected_object | all_objects |
 | 硬边/软边冲突 | hard_edge_snap | preserve_soft_alpha |
 
-候选数量不固定。默认本地规则可以给 0-2 个候选;当升级到视觉/语言模型时,由模型根据风险区域和工具目录推理需要几个候选。约束是:
+候选数量不固定。默认本地规则可以给 0-2 个候选;当升级到视觉/语言模型时,由模型根据证据区域和工具目录推理需要几个候选。约束是:
 
 1. 候选必须由已注册本地工具组成,不能让模型直接输出 alpha / RGBA。
-2. 候选优先作用于本地 `RiskRegion` 提供的区域;模型可以拆分、命名、排序和解释,但不能凭空绕过本地风险证据。
+2. 候选优先作用于本地 EvidenceRegion(`RiskRegion` 实现名)提供的区域;模型可以拆分、命名、排序和解释,但不能凭空绕过本地证据。
 3. 超过 4 个候选通常说明歧义没有被结构化好,UI 应折叠为"推荐候选 + 需要用户意图"。
 
 只有候选都不对时,才进入 keep/remove/hole 粗笔触或文字提示纠偏。纠偏输入表达意图,不是最终 alpha:
@@ -342,7 +375,7 @@ Phase 边界:
 
 - **Phase 2**:Known-B robust alpha fusion + ambiguity candidate generation。
 - **Phase 3**:RegionPolicyMap 的本地规则版,覆盖 hard_edge / soft_hair / intentional_hole。
-- **Phase 4**:router / QA 发现风险后,可选择调用视觉模型提供区域策略先验。
+- **Phase 4**:router / QA 发现证据冲突后,可选择调用视觉模型解释 EvidenceRegion 并提供区域策略先验。
 - **Phase 5**:VLM/LLM 只输出有限 plan schema,仍不碰像素算法。
 
 ### 10.7 VLM Tool Planner
@@ -351,7 +384,7 @@ Phase 边界:
 
 ```text
 Local Analyzer
-  -> RiskRegion[] / local evidence / ToolCatalog
+  -> EvidenceRegion[] / local measurements / ToolCatalog
 VLM/LLM Planner
   -> CandidatePlan[] with variable length
 Local Executor
@@ -362,7 +395,7 @@ Validator / QA
 
 大模型负责推理:
 
-- 这个风险区域在语义上更像主体、背景、透明洞、硬边、软边还是半透明材质。
+- 这个证据区域在语义上更像主体、背景、透明洞、硬边、软边还是半透明材质。
 - 每个区域应该调用哪些本地工具。
 - 需要生成几个候选,以及候选的排序和解释。
 
@@ -372,6 +405,15 @@ Validator / QA
 - 输出最终 RGBA。
 - 编写或选择任意未注册图像处理代码。
 - 绕过 topology guard / QA / 参数范围限制。
+
+本地 analyzer 负责的是测量和压缩:
+
+- 颜色是否接近 known B。
+- alpha/keyer 是否冲突。
+- 连通域、bbox、area、是否接触外部背景。
+- 把相邻同类证据碎片 coalesce 成较少的 evidence groups。
+
+这些步骤不应该解释语义。coalesce 是 evidence compression,不是 semantic grouping;例如 40 个高对比边缘碎片合成 1 个 evidence group,仍然只表示"这里有高对比 keyer/matting 冲突",不表示本地已经判定它一定是 hard edge。
 
 #### ToolCatalog v0
 
@@ -417,17 +459,60 @@ Planner 输出受限 JSON,候选数量可变:
 执行前必须校验:
 
 - `tool` 必须在 `ToolCatalog` 中。
-- `region_id` 必须来自本地 `RiskRegion` 或用户 intent map。
+- `region_id` 必须来自本地 EvidenceRegion(`RiskRegion` 实现名)或用户 intent map。
 - 参数必须在工具 contract 允许范围内。
 - 工具的 `allowed_when` 必须能由本地证据或用户意图支持。
 
 第一步实现目标是本地闭环,不接真实 VLM:
 
 ```text
-RiskRegion[] + ToolCatalog -> rule/mock CandidatePlan[] -> PlanExecutor -> MatteCandidate[] -> QA/report/UI
+EvidenceRegion[] + ToolCatalog -> rule/mock CandidatePlan[] -> PlanExecutor -> MatteCandidate[] -> QA/report/UI
 ```
 
 等 schema、validator、executor 稳定后,再把 VLM 接到 `CandidatePlan[]` 生成位置。
+
+当前已落地的本地闭环:
+
+- [ermbg/planner.py](ermbg/planner.py):`RiskRegion`(实现名,语义上是 EvidenceRegion) / `evidence_kind` 兼容别名 / `ToolCatalog` / `PlannerPromptBundle` / `CandidatePlan` / plan validator / rule planner。
+- [ermbg/vlm_planner.py](ermbg/vlm_planner.py):`PlannerClient` 协议、`RulePlannerClient` mock adapter、模型 JSON 到 `CandidatePlan[]` 的解析入口。
+- [ermbg/risk.py](ermbg/risk.py):第一版本地证据区域提取,覆盖 `same_bg_enclosed_region`、`alpha_keyer_disagreement`、`hard_edge_candidate`;这些 kind 表示证据模式,不是最终语义策略;prompt/JSON 同时暴露更中性的 `evidence_kind`;支持把相邻同类碎片 coalesce 成 planner/VLM 友好的 evidence groups。
+- [ermbg/executor.py](ermbg/executor.py):独立 `PlanExecutor`,执行 planner 选择的本地工具并输出 `operation_results`。
+- [ermbg/candidates.py](ermbg/candidates.py):同色内洞候选改为消费 EvidenceRegion(`RiskRegion[]`) -> `PlannerPromptBundle` -> `PlannerClient` -> `CandidatePlan[]`,支持注入 planner client;默认走 `RulePlannerClient`;`repair_opaque_interior` / `snap_hard_edge` 已经通过 executor 接到现有 keyer 修复工具,不是裸 alpha fill。
+- `/api/matte-candidates`:每个候选 payload 直接暴露 `plan` / `regions` / `operation_results`,保留 `debug` 兼容旧调试入口。
+- [scripts/06_risk_overlay.py](scripts/06_risk_overlay.py):输入原图 + base RGBA + known B,输出 evidence/risk overlay PNG、排序后的 regions JSON、planner bundle JSON;默认展示 coalesced regions,同时记录 raw/coalesced counts,用于检查传给 planner/VLM 的区域证据是否太碎或偏移。
+
+### 10.8 本阶段总结
+
+本阶段已经把"同色内洞候选"扩展成了可替换 planner 的本地闭环:
+
+```text
+local CV evidence
+  -> EvidenceRegion / RiskRegion
+  -> PlannerPromptBundle + ToolCatalog
+  -> RulePlannerClient / future VLM planner
+  -> CandidatePlan[]
+  -> PlanExecutor
+  -> MatteCandidate[] + API/UI/debug overlay
+```
+
+关键边界已经确定:
+
+- 本地 CV 做测量、连通域、bbox、area、keyer/matting disagreement 和 evidence coalesce,不解释语义。
+- VLM/LLM 未来只做 evidence-to-policy 推理和候选计划生成,不直接输出 alpha/RGBA/任意图像代码。
+- `kind` 保留为内部兼容键,`evidence_kind` 给 planner/VLM 看;`ToolCatalog` 同时暴露 region/evidence 两套允许范围。
+- 候选数量由 planner 决定,可以是 0、1、2 或更多,但必须通过 validator 和有限工具目录。
+
+10 号样本已经能产出区域/风险标注图和 planner bundle:
+
+- raw evidence counts:`same_bg_enclosed_region=1`,`alpha_keyer_disagreement=33`,`hard_edge_candidate=40`
+- coalesced shown counts:`same_bg_enclosed_region=1`,`alpha_keyer_disagreement=18`,`hard_edge_candidate=1`
+- 输出位置:`out/risk_overlays/sample_10_risk_overlay_coalesced.png`、`.regions.json`、`.planner_bundle.json`
+
+下一步进入真实 VLM 接入前的 payload 层:
+
+- 定义 `PlannerPromptBundle -> VLM request` 的稳定组装规则。
+- 同时提供原图缩略图、overlay/crop、结构化 evidence JSON、ToolCatalog 和严格 JSON 输出 schema。
+- 先用 mock/VLM fixture 固定解析和 validator 行为,再替换成真实 VLM client。
 
 ---
 

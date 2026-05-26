@@ -716,6 +716,7 @@ def _png_data_url(rgba: np.ndarray) -> str:
 
 
 def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object]:
+    debug = candidate.debug
     return {
         "id": candidate.id,
         "label": candidate.label,
@@ -723,7 +724,10 @@ def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object
         "filename": f"{stem}_{candidate.id}.png",
         "rgba": _png_data_url(candidate.rgba),
         "selected": candidate.selected,
-        "debug": candidate.debug,
+        "plan": debug.get("plan"),
+        "regions": debug.get("regions", []),
+        "operation_results": debug.get("operation_results", []),
+        "debug": debug,
     }
 
 
