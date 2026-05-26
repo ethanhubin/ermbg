@@ -44,6 +44,24 @@ def _green_subject_with_shadow(h: int = 96, w: int = 128, shadow: bool = True):
     return image, subject, shadow_alpha, tuple(int(c) for c in bg)
 
 
+def _green_subject_with_hard_shadow(h: int = 96, w: int = 128):
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    fg = np.array([220, 30, 30], dtype=np.uint8)
+    subject = np.zeros((h, w), dtype=np.float32)
+    subject[24:54, 38:86] = 1.0
+
+    shadow_alpha = np.zeros((h, w), dtype=np.float32)
+    shadow_alpha[60:78, 44:102] = 0.48
+    shadow_alpha[subject > 0] = 0.0
+
+    B_lin = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0]
+    F_lin = io.srgb_to_linear(fg.reshape(1, 1, 3))[0, 0]
+    bg_shadow = (1.0 - shadow_alpha[..., None]) * B_lin
+    C_lin = subject[..., None] * F_lin + (1.0 - subject[..., None]) * bg_shadow
+    image = io.linear_to_srgb_u8(C_lin)
+    return image, subject, shadow_alpha, tuple(int(c) for c in bg)
+
+
 def _scaled_background_color(bg: np.ndarray, scale: float) -> np.ndarray:
     scaled = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0] * float(scale)
     return io.linear_to_srgb_u8(scaled.reshape(1, 1, 3))[0, 0]
@@ -62,6 +80,19 @@ def test_estimate_shadow_alpha_detects_scalar_darkening_shadow():
     assert (shadow_alpha[shadow_edge] > 0.0).mean() > 0.20
     assert shadow_alpha[shadow_edge].mean() < shadow_alpha[shadow_core].mean()
     assert ((shadow_alpha > 0.0) & (shadow_alpha < 0.08)).sum() > 0
+    assert info["boundary"]["boundary_mode"] == "soft"
+
+
+def test_estimate_shadow_alpha_preserves_hard_shadow_boundary_mode():
+    image, subject, shadow_gt, bg = _green_subject_with_hard_shadow()
+
+    shadow_alpha, info = estimate_shadow_alpha(image, subject, bg)
+
+    hard_core = (shadow_gt > 0.4) & (subject < 0.1)
+    assert info["detected"] is True
+    assert info["boundary"]["boundary_mode"] == "hard"
+    assert info["boundary"]["boundary_falloff_px"] <= 2.0
+    assert shadow_alpha[hard_core].mean() > 0.35
 
 
 def test_estimate_shadow_alpha_rejects_clean_background():

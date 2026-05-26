@@ -24,6 +24,7 @@ venv/
 htmlcov/
 .coverage
 coverage.xml
+.local-dev/
 
 # Project artifacts
 samples/outputs/

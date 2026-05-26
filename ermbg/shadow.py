@@ -38,6 +38,9 @@ class ShadowThresholds:
     max_component_area_ratio: float = 0.22
     min_total_area_ratio: float = 0.0025
     boundary_falloff_px: float = 28.0
+    hard_boundary_falloff_px: float = 2.0
+    hard_boundary_alpha_min: float = 0.16
+    hard_boundary_ratio_min: float = 0.40
     field_blur_sigma: float = 5.0
     contact_distance_ratio: float = 0.035
     contact_distance_px: int = 42
@@ -169,7 +172,7 @@ def estimate_shadow_alpha(
         reject_border=t.reject_border_components,
     )
 
-    shadow_alpha = _soft_shadow_alpha_from_seeds(
+    shadow_alpha, boundary_info = _soft_shadow_alpha_from_seeds(
         accepted,
         soft_support,
         strength,
@@ -188,7 +191,14 @@ def estimate_shadow_alpha(
     else:
         reason = ""
 
-    return shadow_alpha, _shadow_info(shadow_alpha, accepted, rejected, reason, prior=prior)
+    return shadow_alpha, _shadow_info(
+        shadow_alpha,
+        accepted,
+        rejected,
+        reason,
+        prior=prior,
+        boundary_info=boundary_info,
+    )
 
 
 def shadow_prior_from_regions(
@@ -299,11 +309,16 @@ def _soft_shadow_alpha_from_seeds(
     dist_to_subject: np.ndarray,
     *,
     thresholds: ShadowThresholds,
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, Any]]:
     """Grow hard seeds into connected support and preserve measured strength."""
     h, w = strength.shape
     if not seeds:
-        return np.zeros((h, w), dtype=np.float32)
+        return np.zeros((h, w), dtype=np.float32), _boundary_info(
+            "none",
+            0.0,
+            0.0,
+            float(thresholds.boundary_falloff_px),
+        )
 
     seed_union = np.zeros((h, w), dtype=bool)
     for seed in seeds:
@@ -332,7 +347,12 @@ def _soft_shadow_alpha_from_seeds(
     base_alpha = strength * err_conf * subject_conf
     base_alpha = np.where(support, base_alpha, 0.0).astype(np.float32)
     if not base_alpha.any():
-        return base_alpha
+        return base_alpha, _boundary_info(
+            "none",
+            0.0,
+            0.0,
+            float(thresholds.boundary_falloff_px),
+        )
 
     falloff_px = min(
         float(thresholds.boundary_falloff_px),
@@ -352,6 +372,20 @@ def _soft_shadow_alpha_from_seeds(
     open_boundary = inner_boundary & ~contact_side
 
     if open_boundary.any():
+        boundary_values = base_alpha[open_boundary & (base_alpha > 0.0)]
+        support_values = base_alpha[support & (base_alpha > 0.0)]
+        boundary_p75 = float(np.percentile(boundary_values, 75.0)) if boundary_values.size else 0.0
+        support_p75 = float(np.percentile(support_values, 75.0)) if support_values.size else 0.0
+        boundary_ratio = boundary_p75 / max(support_p75, 1e-6)
+        hard_boundary = (
+            boundary_p75 >= float(thresholds.hard_boundary_alpha_min)
+            and boundary_ratio >= float(thresholds.hard_boundary_ratio_min)
+        )
+        if hard_boundary:
+            falloff_px = min(falloff_px, float(thresholds.hard_boundary_falloff_px))
+            boundary_mode = "hard"
+        else:
+            boundary_mode = "soft"
         dist_to_open_boundary = cv2.distanceTransform(
             (~open_boundary).astype(np.uint8),
             cv2.DIST_L2,
@@ -359,11 +393,33 @@ def _soft_shadow_alpha_from_seeds(
         )
         open_falloff = _smoothstep(0.0, falloff_px, dist_to_open_boundary).astype(np.float32)
     else:
+        boundary_p75 = 0.0
+        boundary_ratio = 0.0
+        boundary_mode = "closed"
         open_falloff = np.ones((h, w), dtype=np.float32)
 
     alpha = np.where(support, base_alpha * open_falloff, 0.0).astype(np.float32)
 
-    return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32), _boundary_info(
+        boundary_mode,
+        boundary_p75,
+        boundary_ratio,
+        falloff_px,
+    )
+
+
+def _boundary_info(
+    mode: str,
+    boundary_alpha_p75: float,
+    boundary_to_support_alpha_ratio: float,
+    falloff_px: float,
+) -> dict[str, Any]:
+    return {
+        "boundary_mode": mode,
+        "boundary_alpha_p75": float(boundary_alpha_p75),
+        "boundary_to_support_alpha_ratio": float(boundary_to_support_alpha_ratio),
+        "boundary_falloff_px": float(falloff_px),
+    }
 
 
 def _coerce_optional_mask(
@@ -425,6 +481,7 @@ def _shadow_info(
     reason: str,
     *,
     prior: ShadowPrior | None = None,
+    boundary_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mask = shadow_alpha > 0
     pixels = int(mask.sum())
@@ -454,6 +511,7 @@ def _shadow_info(
         "rejected_components": int(rejected_components),
         "reason": reason,
         "prior": _prior_info(prior),
+        "boundary": dict(boundary_info or {}),
     }
 
 

@@ -57,9 +57,8 @@ def test_game_eval_page_serves_result_table():
     response = client.get("/eval/game")
     assert response.status_code == 200
     assert "ERMBG Game Eval" in response.text
-    assert "vlm_eval_game_run_20260526" in response.text
+    assert "vlm_eval_game_qwen_gw_v001_20260526" in response.text
     assert 'id="run-select"' in response.text
-    assert "vlm_eval_game_shadow_rerun_20260526" in response.text
     assert "ui_glass_button_soft_shadow" in response.text
     assert '"sampleRows": 18' in response.text
     assert '"sampleId": "G01"' in response.text
@@ -67,9 +66,9 @@ def test_game_eval_page_serves_result_table():
     assert '"sampleCode": "G01-G"' in response.text
     assert '"sampleVariant": "white"' in response.text
     assert '"sampleVariant": "green"' in response.text
-    assert '"runStatus": "not-run"' in response.text
     assert '"runStatus": "ran"' in response.text
-    assert '"regionsUrl": "/eval/game/regions/ui_hard_button_no_shadow"' in response.text
+    assert '"regionsUrl": "/eval/game/regions/ui_hard_button_no_shadow?variant=green"' in response.text
+    assert "comfy-qwen:Qwen3-VL-4B-Instruct-FP8" in response.text
     assert "<th class=\"regions-col\">regions</th>" in response.text
     assert "<th class=\"preview-col\">purple</th>" in response.text
     assert "<th class=\"preview-col\">gray</th>" not in response.text
@@ -77,32 +76,22 @@ def test_game_eval_page_serves_result_table():
     assert "<th class=\"preview-col\">blue</th>" not in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
-    assert "/eval/game/file/out/vlm_eval_game_run_20260526/" in response.text
-
-
-def test_game_eval_page_can_switch_to_shadow_rerun_batch():
-    client = TestClient(app)
-    response = client.get("/eval/game?run=vlm_eval_game_shadow_rerun_20260526")
-    assert response.status_code == 200
-    assert "vlm_eval_game_shadow_rerun_20260526" in response.text
-    assert "out/vlm_eval_game_shadow_rerun_20260526/matte/summary_shadow_rerun.json" in response.text
-    assert "matte result" in response.text
-    assert "shadow_pixels" in response.text
+    assert "/eval/game/file/out/vlm_eval_game_qwen_gw_v001_20260526/" in response.text
 
 
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(
-        "/eval/game/file/out/vlm_eval_game_run_20260526/vlm_openai/ui_glass_button_soft_shadow/candidates/candidate_1.png"
+        "/eval/game/file/out/vlm_eval_game_qwen_gw_v001_20260526/vlm_qwen/selected_candidates_checker_sheet.png"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
-    assert Image.open(BytesIO(response.content)).mode == "RGBA"
+    assert Image.open(BytesIO(response.content)).mode == "RGB"
 
 
 def test_game_eval_regions_serves_bbox_overlay():
     client = TestClient(app)
-    response = client.get("/eval/game/regions/ui_glass_button_soft_shadow")
+    response = client.get("/eval/game/regions/ui_glass_button_soft_shadow?variant=green")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     image = Image.open(BytesIO(response.content))

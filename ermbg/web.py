@@ -27,8 +27,8 @@ from .candidates import MatteCandidate, generate_matte_candidates
 
 ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet"}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_run_20260526"
-GAME_EVAL_PREFIX = "vlm_eval_game"
+DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_qwen_gw_v001_20260526"
+GAME_EVAL_PREFIX = "vlm_eval_game_qwen_gw_v"
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
     "same_bg_enclosed_region": (0, 153, 255, 235),
@@ -932,10 +932,38 @@ def _game_sample_ids() -> dict[str, str]:
     return sample_ids
 
 
+def _game_report_path(root: Path) -> Path | None:
+    for name in ("vlm_qwen", "vlm_openai"):
+        path = root / name / "eval_report.json"
+        if path.exists():
+            return path
+    return None
+
+
+def _game_vlm_root(root: Path) -> Path:
+    report_path = _game_report_path(root)
+    if report_path is not None:
+        return report_path.parent
+    return root / "vlm_qwen"
+
+
 def _game_eval_root_has_data(root: Path) -> bool:
-    if (root / "vlm_openai" / "eval_report.json").exists():
+    if _game_report_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
+
+
+def _game_eval_root_is_complete(root: Path) -> bool:
+    report_path = _game_report_path(root)
+    if report_path is None:
+        return False
+    report = _load_json(report_path)
+    if not isinstance(report, dict):
+        return False
+    try:
+        return int(report.get("case_count", 0)) >= 18
+    except (TypeError, ValueError):
+        return False
 
 
 def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
@@ -948,7 +976,7 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
         roots.insert(0, DEFAULT_GAME_EVAL_ROOT)
 
-    selected = (selected_root or DEFAULT_GAME_EVAL_ROOT).resolve()
+    selected = (selected_root or _default_game_eval_root()).resolve()
     runs: list[dict[str, object]] = []
     for root in roots:
         runs.append(
@@ -962,9 +990,28 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     return runs
 
 
+def _default_game_eval_root() -> Path:
+    roots = [
+        path
+        for path in sorted((PROJECT_ROOT / "out").glob(f"{GAME_EVAL_PREFIX}*"), reverse=True)
+        if path.is_dir() and _game_eval_root_has_data(path)
+    ]
+    complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
+    if complete_roots:
+        return complete_roots[0]
+    if roots:
+        return roots[0]
+    if DEFAULT_GAME_EVAL_ROOT.is_dir() and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
+        return DEFAULT_GAME_EVAL_ROOT
+    return DEFAULT_GAME_EVAL_ROOT
+
+
 def _game_eval_root(run: str | None = None) -> Path:
     if not run:
-        return DEFAULT_GAME_EVAL_ROOT
+        root = _default_game_eval_root()
+        if root.is_dir() and _game_eval_root_has_data(root):
+            return root
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
     if "/" in run or "\\" in run or run.startswith("."):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
     root = (PROJECT_ROOT / "out" / run).resolve()
@@ -989,7 +1036,9 @@ def _game_matte_summary_path(root: Path) -> Path | None:
 
 
 def _game_report_rows(root: Path = DEFAULT_GAME_EVAL_ROOT) -> list[dict[str, object]]:
-    report_path = root / "vlm_openai" / "eval_report.json"
+    report_path = _game_report_path(root)
+    if report_path is None:
+        raise HTTPException(status_code=404, detail="Game eval report not found.")
     report = _load_json(report_path)
     if not isinstance(report, dict):
         raise HTTPException(status_code=500, detail="Game eval report must be a JSON object.")
@@ -1003,7 +1052,12 @@ def _game_report_rows(root: Path = DEFAULT_GAME_EVAL_ROOT) -> list[dict[str, obj
 def _game_case_out_dir(row: dict[str, object], root: Path = DEFAULT_GAME_EVAL_ROOT) -> Path:
     case_id = str(row.get("case_id", "unknown"))
     out_dir_value = row.get("out_dir")
-    return _resolve_project_path(out_dir_value) if isinstance(out_dir_value, str) else root / "vlm_openai" / case_id
+    if isinstance(out_dir_value, str):
+        return _resolve_project_path(out_dir_value)
+    variant = row.get("sample_variant")
+    if isinstance(variant, str):
+        return _game_vlm_root(root) / case_id / variant
+    return _game_vlm_root(root) / case_id
 
 
 def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, object]) -> str | None:
@@ -1020,11 +1074,15 @@ def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, objec
     return _image_url(matches[0]) if matches else None
 
 
-def _game_region_url(root: Path, case_id: str) -> str:
+def _game_region_url(root: Path, case_id: str, sample_variant: str | None = None) -> str:
     base = f"/eval/game/regions/{quote(case_id, safe='')}"
+    params: list[str] = []
+    if sample_variant:
+        params.append(f"variant={quote(sample_variant, safe='')}")
     if root.resolve() == DEFAULT_GAME_EVAL_ROOT.resolve():
-        return base
-    return f"{base}?run={quote(root.name, safe='')}"
+        return f"{base}?{'&'.join(params)}" if params else base
+    params.append(f"run={quote(root.name, safe='')}")
+    return f"{base}?{'&'.join(params)}"
 
 
 def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
@@ -1095,8 +1153,8 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
 
 
 def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
-    report_path = root / "vlm_openai" / "eval_report.json"
-    if not report_path.exists():
+    report_path = _game_report_path(root)
+    if report_path is None:
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name
@@ -1154,8 +1212,15 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
             )
 
         sample_paths = _game_sample_paths(case_id)
-        active_variant = _sample_variant_from_path(summary.get("input")) or "green"
-        for sample_variant, sample_path in sample_paths.items():
+        row_variant = row.get("sample_variant")
+        active_variant = (
+            row_variant
+            if isinstance(row_variant, str) and row_variant in sample_paths
+            else _sample_variant_from_path(summary.get("input")) or "green"
+        )
+        variants = [active_variant] if isinstance(row_variant, str) else list(sample_paths)
+        for sample_variant in variants:
+            sample_path = sample_paths.get(sample_variant, str(summary.get("input", "")))
             is_active_run = sample_variant == active_variant
             sample_code = f"{sample_id}-{sample_variant[:1].upper()}"
             cases.append(
@@ -1168,12 +1233,18 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "category": row.get("category", ""),
                     "verdict": row.get("diagnosis_verdict", "") if is_active_run else "not-run",
                     "expectedHit": bool(row.get("expected_hit")) if is_active_run else False,
+                    "expectedAnyHit": bool(row.get("expected_any_hit", row.get("expected_hit"))) if is_active_run else False,
+                    "harmfulToolSelected": bool(row.get("harmful_tool_selected")) if is_active_run else False,
+                    "harmfulTools": row.get("harmful_tools", []) if is_active_run else [],
+                    "shadowPolicyRequired": bool(row.get("shadow_policy_required")) if is_active_run else False,
+                    "shadowPolicyHit": row.get("shadow_policy_hit") if is_active_run else None,
+                    "shadowCandidateCount": row.get("shadow_candidate_count", 0) if is_active_run else 0,
                     "regionCount": row.get("region_count", 0) if is_active_run else 0,
                     "counts": row.get("counts", {}) if is_active_run else {},
                     "selectedTools": fallback_tools if is_active_run else [],
                     "primaryAmbiguity": row.get("primary_ambiguity", ""),
                     "originalUrl": _image_url(sample_path),
-                    "regionsUrl": _game_region_url(root, case_id) if is_active_run else None,
+                    "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_active_run else None,
                     "matteUrl": _image_url(summary.get("rgba") or root / "matte" / case_id / "rgba.png")
                     if is_active_run
                     else None,
@@ -1186,10 +1257,13 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         "model": report.get("model", ""),
         "success": f"{report.get('ok_count', 0)}/{report.get('case_count', len(cases))}",
         "expectedHit": f"{report.get('expected_tool_hit_count', 0)}/{report.get('case_count', len(cases))}",
+        "expectedAnyHit": f"{report.get('expected_any_tool_hit_count', report.get('expected_tool_hit_count', 0))}/{report.get('case_count', len(cases))}",
+        "harmfulTools": f"{report.get('harmful_tool_selected_count', 0)}/{report.get('case_count', len(cases))}",
+        "shadowPolicyHit": f"{report.get('shadow_policy_hit_count', 0)}/{report.get('shadow_policy_required_count', 0)}",
         "sampleRows": len(cases),
         "reportPath": str(report_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
-        "vlmRoot": str((root / "vlm_openai").relative_to(PROJECT_ROOT)),
+        "vlmRoot": str(_game_vlm_root(root).relative_to(PROJECT_ROOT)),
         "runs": _game_eval_runs(root),
         "selectedRun": root.name,
         "cases": cases,
@@ -1262,10 +1336,22 @@ def _draw_region_overlay(input_path: Path, regions: list[dict[str, object]]) -> 
 
 
 @app.get("/eval/game/regions/{case_id}")
-def game_eval_regions(case_id: str, run: str | None = Query(default=None)) -> Response:
+def game_eval_regions(
+    case_id: str,
+    run: str | None = Query(default=None),
+    variant: str | None = Query(default=None),
+) -> Response:
     root = _game_eval_root(run)
     rows = _game_report_rows(root)
-    row = next((item for item in rows if item.get("case_id") == case_id), None)
+    row = next(
+        (
+            item
+            for item in rows
+            if item.get("case_id") == case_id
+            and (variant is None or item.get("sample_variant") == variant)
+        ),
+        None,
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="Case not found.")
     out_dir = _game_case_out_dir(row, root)
@@ -1659,6 +1745,9 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         `model: ${{text(data.model)}}`,
         `success: ${{text(data.success)}}`,
         `expected hit: ${{text(data.expectedHit)}}`,
+        `any hit: ${{text(data.expectedAnyHit)}}`,
+        `harmful tools: ${{text(data.harmfulTools)}}`,
+        `shadow policy: ${{text(data.shadowPolicyHit)}}`,
         `sample rows: ${{text(data.sampleRows)}}`,
         `report: ${{text(data.reportPath)}}`,
         `vlm: ${{text(data.vlmRoot)}}`,
@@ -1701,12 +1790,16 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
           meta.className = "case-meta";
           const hitClass = caseItem.runStatus === "not-run" ? "pending" : (caseItem.expectedHit ? "hit" : "miss");
           const hitText = caseItem.runStatus === "not-run" ? "not run" : `expected ${{caseItem.expectedHit ? "hit" : "miss"}}`;
+          const harmfulText = caseItem.harmfulToolSelected ? ` · harmful: ${{(caseItem.harmfulTools || []).join(", ")}}` : "";
+          const shadowText = caseItem.shadowPolicyRequired
+            ? ` · shadow: ${{caseItem.shadowPolicyHit ? "hit" : "miss"}} (${{text(caseItem.shadowCandidateCount)}})`
+            : "";
           meta.innerHTML = `
             <span>verdict: ${{text(caseItem.verdict)}} · <span class="${{hitClass}}">${{hitText}}</span></span>
             <span>regions: ${{text(caseItem.regionCount)}}</span>
             <span>${{text(caseItem.primaryAmbiguity)}}</span>
             <span>${{countsText(caseItem.counts)}}</span>
-            <span class="tools">tools: ${{candidate ? (candidate.tools || []).join(", ") || "—" : "—"}}</span>
+            <span class="tools">tools: ${{candidate ? (candidate.tools || []).join(", ") || "—" : "—"}}${{harmfulText}}${{shadowText}}</span>
           `;
           caseCell.appendChild(sampleCode);
           caseCell.appendChild(title);
