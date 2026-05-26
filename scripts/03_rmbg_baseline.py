@@ -3,8 +3,8 @@ metrics + multi-bg composites our pipeline produces, so the two can be compared
 side-by-side.
 
 Usage:
-    .venv/bin/python scripts/03_rmbg_baseline.py --input samples/inputs/6.png \
-        --out samples/outputs/rmbg_baseline
+    .venv/bin/python scripts/03_rmbg_baseline.py --input samples/legacy/inputs/6.png \
+        --out samples/legacy/outputs/rmbg_baseline
 """
 
 from __future__ import annotations

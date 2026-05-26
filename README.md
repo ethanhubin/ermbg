@@ -99,7 +99,7 @@ ermbg matte input.png
 ermbg diagnose input.png
 
 # 批量
-ermbg phase1 --input-dir samples/inputs --out-dir out/phase1
+ermbg phase1 --input-dir samples/legacy/inputs --out-dir out/phase1
 
 # 可选:传入独立主体归属 mask,只作为 ownership 约束,不直接替换 alpha
 ermbg matte input.png --subject-mask ownership_mask.png
@@ -176,6 +176,7 @@ ermbg/
   risk.py          EvidenceRegion/RiskRegion 本地证据提取
   planner.py       ToolCatalog / CandidatePlan / rule planner
   vlm_planner.py   PlannerClient 协议 / rule client / JSON parser
+  vlm_payload.py   PlannerPromptBundle + 缩略图/overlay/crop -> VLM 请求
   executor.py      执行 CandidatePlan 的本地工具调度器
   candidates.py    执行 planner 候选,输出可选 RGBA
   matting.py       端到端 matte() 主入口
@@ -190,14 +191,15 @@ ermbg/
 comfy_nodes/       ComfyUI 自定义节点
 examples/          quickstart 等示例
 tests/             123 项 pytest
-samples/inputs/    12 张测试图,涵盖各类背景
+samples/vlm_eval/ AI 生成的 VLM planner 评估集,每个 case 含 input.png / case.json
+samples/legacy/inputs/    12 张测试图,涵盖各类背景
 ```
 
 ---
 
 ## 实测效果与 RMBG 对比
 
-下面四组图来自 `samples/inputs/6.png`、`7.png`、`8.png`、`11.png` 的实测输出。每组从左到右依次是原图、ERMBG 合成到 checker 背景、RMBG baseline 合成到 checker 背景、白底 ERMBG / RMBG 对比、黑底 ERMBG / RMBG 对比、ERMBG / RMBG alpha 对比。
+下面四组图来自 `samples/legacy/inputs/6.png`、`7.png`、`8.png`、`11.png` 的实测输出。每组从左到右依次是原图、ERMBG 合成到 checker 背景、RMBG baseline 合成到 checker 背景、白底 ERMBG / RMBG 对比、黑底 ERMBG / RMBG 对比、ERMBG / RMBG alpha 对比。
 
 ![Sample 6 ERMBG vs RMBG](docs/assets/readme/sample_6_ermbg_vs_rmbg.png)
 

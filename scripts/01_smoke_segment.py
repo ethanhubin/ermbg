@@ -14,7 +14,7 @@ from ermbg import io
 from ermbg.segmenter import build_segmenter, make_bands
 
 
-def main(input_path: str, out_dir: str = "samples/outputs/smoke", backend: str = "auto") -> None:
+def main(input_path: str, out_dir: str = "samples/legacy/outputs/smoke", backend: str = "auto") -> None:
     image = io.load_rgb(input_path)
     seg = build_segmenter(backend=backend)
     soft = seg.segment(image)

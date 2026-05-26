@@ -67,8 +67,9 @@ ermbg/
     openai_image.py   gpt-image-1 via OpenAI API
     comfyui_*.json    workflow templates
     prompts.py        GREEN_SCREEN_RGB / GREEN_SCREEN_PROMPT
-samples/inputs/       3.png 4.png ... 8.png + optional *.json prompts
-samples/outputs/      matte_* and green_* output trees
+samples/vlm_eval/            AI-generated VLM planner eval cases
+samples/legacy/inputs/       3.png 4.png ... 8.png + optional *.json prompts
+samples/legacy/outputs/      archived matte_* and green_* output trees
 tests/                pytest, 22 tests passing
 ```
 

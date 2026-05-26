@@ -156,23 +156,23 @@ C = α · F + (1 − α) · B          (in linear RGB)
 
 ```bash
 # 端到端(主路径,router 自动选策略)
-.venv/bin/ermbg matte samples/inputs/3.png
+.venv/bin/ermbg matte samples/legacy/inputs/3.png
 
 # 手动覆盖 despill
-.venv/bin/ermbg matte samples/inputs/3.png --despill unmix
-.venv/bin/ermbg matte samples/inputs/3.png --despill chroma_cap
+.venv/bin/ermbg matte samples/legacy/inputs/3.png --despill unmix
+.venv/bin/ermbg matte samples/legacy/inputs/3.png --despill chroma_cap
 
 # 关掉 keyer
-.venv/bin/ermbg matte samples/inputs/3.png --no-keyer
+.venv/bin/ermbg matte samples/legacy/inputs/3.png --no-keyer
 
 # 只看诊断
-.venv/bin/ermbg diagnose samples/inputs/3.png
+.venv/bin/ermbg diagnose samples/legacy/inputs/3.png
 
 # 批量
-.venv/bin/ermbg phase1 --input-dir samples/inputs --out-dir samples/outputs/phase1
+.venv/bin/ermbg phase1 --input-dir samples/legacy/inputs --out-dir samples/legacy/outputs/phase1
 
 # 粗分割(只出 mask + rough trimap)
-.venv/bin/ermbg segment samples/inputs/3.png
+.venv/bin/ermbg segment samples/legacy/inputs/3.png
 ```
 
 输出:`*_rgba.png` / `*_alpha.png` / `*_foreground.png` / `*_trimap.png` / `*.report.json` / `*_qa/on_*.png`。
@@ -210,6 +210,9 @@ tests/test_keyer.py        chromatic + luminance keyer + merge
 tests/test_risk.py         EvidenceRegion / RiskRegion 本地证据提取
 tests/test_planner.py      ToolCatalog / CandidatePlan / validator / rule planner
 tests/test_vlm_planner.py  PlannerClient mock adapter / 模型 JSON parser
+tests/test_vlm_payload.py  VLM 请求组装 / visual attachments / JSON schema
+tests/test_vlm_openai.py   OpenAI Responses payload / mock HTTP / CandidatePlan parse
+tests/test_vlm_debug_script.py VLM request 导出 + fixture 候选执行脚本
 tests/test_executor.py     CandidatePlan 本地工具执行器
 tests/test_candidates.py   同色内区候选生成
 tests/test_lightwrap.py    halo 抑制
@@ -474,12 +477,15 @@ EvidenceRegion[] + ToolCatalog -> rule/mock CandidatePlan[] -> PlanExecutor -> M
 当前已落地的本地闭环:
 
 - [ermbg/planner.py](ermbg/planner.py):`RiskRegion`(实现名,语义上是 EvidenceRegion) / `evidence_kind` 兼容别名 / `ToolCatalog` / `PlannerPromptBundle` / `CandidatePlan` / plan validator / rule planner。
-- [ermbg/vlm_planner.py](ermbg/vlm_planner.py):`PlannerClient` 协议、`RulePlannerClient` mock adapter、模型 JSON 到 `CandidatePlan[]` 的解析入口。
+- [ermbg/vlm_planner.py](ermbg/vlm_planner.py):`PlannerClient` 协议、`RulePlannerClient` mock adapter、`FixturePlannerClient`、模型 JSON 到 `CandidatePlan[]` 的解析入口。
+- [ermbg/vlm_payload.py](ermbg/vlm_payload.py):真实 VLM 接入前的 payload 层,把 `PlannerPromptBundle`、原图缩略图、base matte 复合预览、evidence overlay、region crop 和严格 JSON 输出 schema 组装成可序列化请求;不调用远端模型。
+- [ermbg/vlm_openai.py](ermbg/vlm_openai.py):可选 OpenAI Responses API client,输入 `VLMPlannerRequest`,输出仍走 `parse_candidate_plans`;只在显式 debug/provider 路径调用,主抠图路径不联网。
 - [ermbg/risk.py](ermbg/risk.py):第一版本地证据区域提取,覆盖 `same_bg_enclosed_region`、`alpha_keyer_disagreement`、`hard_edge_candidate`;这些 kind 表示证据模式,不是最终语义策略;prompt/JSON 同时暴露更中性的 `evidence_kind`;支持把相邻同类碎片 coalesce 成 planner/VLM 友好的 evidence groups。
 - [ermbg/executor.py](ermbg/executor.py):独立 `PlanExecutor`,执行 planner 选择的本地工具并输出 `operation_results`。
 - [ermbg/candidates.py](ermbg/candidates.py):同色内洞候选改为消费 EvidenceRegion(`RiskRegion[]`) -> `PlannerPromptBundle` -> `PlannerClient` -> `CandidatePlan[]`,支持注入 planner client;默认走 `RulePlannerClient`;`repair_opaque_interior` / `snap_hard_edge` 已经通过 executor 接到现有 keyer 修复工具,不是裸 alpha fill。
 - `/api/matte-candidates`:每个候选 payload 直接暴露 `plan` / `regions` / `operation_results`,保留 `debug` 兼容旧调试入口。
 - [scripts/06_risk_overlay.py](scripts/06_risk_overlay.py):输入原图 + base RGBA + known B,输出 evidence/risk overlay PNG、排序后的 regions JSON、planner bundle JSON;默认展示 coalesced regions,同时记录 raw/coalesced counts,用于检查传给 planner/VLM 的区域证据是否太碎或偏移。
+- [scripts/07_vlm_planner_debug.py](scripts/07_vlm_planner_debug.py):输入原图 + base RGBA + known B,导出 `vlm_request.json`、附件 PNG、manifest;可选读取 fixture VLM response 或显式 `--provider openai`,解析成 `CandidatePlan[]` 并执行候选 PNG。
 
 ### 10.8 本阶段总结
 
@@ -508,11 +514,11 @@ local CV evidence
 - coalesced shown counts:`same_bg_enclosed_region=1`,`alpha_keyer_disagreement=18`,`hard_edge_candidate=1`
 - 输出位置:`out/risk_overlays/sample_10_risk_overlay_coalesced.png`、`.regions.json`、`.planner_bundle.json`
 
-下一步进入真实 VLM 接入前的 payload 层:
+真实 VLM 接入前的 payload 层已落地。下一步是接入一个可选真实 client,并保持 fixture 回归先行:
 
-- 定义 `PlannerPromptBundle -> VLM request` 的稳定组装规则。
-- 同时提供原图缩略图、overlay/crop、结构化 evidence JSON、ToolCatalog 和严格 JSON 输出 schema。
-- 先用 mock/VLM fixture 固定解析和 validator 行为,再替换成真实 VLM client。
+- 先为真实 client 固定超时、重试、空响应和非法 JSON 的降级策略。
+- 真实模型输出仍必须走 `parse_candidate_plans` + `validate_candidate_plans` + 本地 executor。
+- fixture 回归保留为默认测试路径,避免网络或模型漂移影响 core 测试。
 
 ---
 

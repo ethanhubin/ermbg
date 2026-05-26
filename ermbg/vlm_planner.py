@@ -7,6 +7,8 @@ objects that the local executor can validate and run.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Protocol
 
 from .planner import CandidatePlan, PlanOperation, PlannerPromptBundle
@@ -145,6 +147,27 @@ class RulePlannerClient:
         return plans
 
 
+class FixturePlannerClient:
+    """Planner client backed by a static JSON payload or JSON fixture file.
+
+    This is useful for locking the future VLM boundary in tests before any real
+    remote model is connected. The payload is parsed through the same
+    ``parse_candidate_plans`` entry point that live model responses will use.
+    """
+
+    def __init__(self, payload: dict[str, Any] | list[dict[str, Any]] | str | Path):
+        self.payload = payload
+
+    def plan(self, bundle: PlannerPromptBundle) -> list[CandidatePlan]:
+        del bundle
+        payload: dict[str, Any] | list[dict[str, Any]]
+        if isinstance(self.payload, (str, Path)):
+            payload = json.loads(Path(self.payload).read_text(encoding="utf-8"))
+        else:
+            payload = self.payload
+        return parse_candidate_plans(payload)
+
+
 def parse_candidate_plans(payload: dict[str, Any] | list[dict[str, Any]]) -> list[CandidatePlan]:
     """Parse model/mock JSON into ``CandidatePlan`` objects.
 
@@ -200,4 +223,4 @@ def parse_candidate_plans(payload: dict[str, Any] | list[dict[str, Any]]) -> lis
     return plans
 
 
-__all__ = ["PlannerClient", "RulePlannerClient", "parse_candidate_plans"]
+__all__ = ["FixturePlannerClient", "PlannerClient", "RulePlannerClient", "parse_candidate_plans"]

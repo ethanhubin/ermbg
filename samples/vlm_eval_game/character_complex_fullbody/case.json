@@ -1,0 +1,66 @@
+{
+  "id": "character_complex_fullbody",
+  "category": "character",
+  "white": "samples/vlm_eval_game/character_complex_fullbody/white.png",
+  "green": "samples/vlm_eval_game/character_complex_fullbody/green.png",
+  "green_status": "edited_from_white_reference_bg_not_pixel_exact_allowed",
+  "backgrounds": {
+    "white": [
+      255,
+      255,
+      255
+    ],
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "primary_ambiguity": "complex_combination",
+  "shadow": {
+    "present": false,
+    "kind": "none",
+    "semantic": "none"
+  },
+  "image_size": {
+    "white": {
+      "width": 1254,
+      "height": 1692
+    },
+    "green": {
+      "width": 1254,
+      "height": 1692
+    }
+  },
+  "expected": {
+    "target_tools": [
+      [
+        "preserve_hole"
+      ],
+      [
+        "preserve_soft_alpha"
+      ],
+      [
+        "mark_translucent"
+      ],
+      [
+        "snap_hard_edge"
+      ],
+      [
+        "repair_opaque_interior"
+      ]
+    ],
+    "target_policy": [],
+    "must_preserve_subject_identity_between_white_and_green": true
+  },
+  "generation": {
+    "white_method": "codex image_gen",
+    "white_source_image": "/Users/ethanhu/.codex/generated_images/019e620b-778b-70b0-abbe-adbc38754bd1/ig_042e6aabfd8ff4c9016a152365bc20819195a3353c2e7f1ecb.png",
+    "green_method": "image_edit_from_white_reference",
+    "green_prompt_goal": "Keep subject pixels/shape/materials/holes/shadows unchanged; replace only background color with #00c800.",
+    "green_background_tolerance": "non_pixel_exact_allowed"
+  },
+  "white_note": "Portrait canvas padded horizontally to keep both dimensions at 1024+ without resizing the subject.",
+  "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact.",
+  "green_source": "/Users/ethanhu/.codex/generated_images/019e620b-778b-70b0-abbe-adbc38754bd1/ig_0581be115044acbe016a1546bee2a48191bff4ddeb79ead85e.png"
+}

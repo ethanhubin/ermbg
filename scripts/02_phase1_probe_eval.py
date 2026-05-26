@@ -17,8 +17,8 @@ from ermbg.phase1 import run_phase1
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--input", type=Path, default=Path("samples/inputs"))
-    p.add_argument("--out", type=Path, default=Path("samples/outputs/phase1"))
+    p.add_argument("--input", type=Path, default=Path("samples/legacy/inputs"))
+    p.add_argument("--out", type=Path, default=Path("samples/legacy/outputs/phase1"))
     p.add_argument("--generators", default="synthetic")
     p.add_argument("--colors", default="white,black,cyan")
     p.add_argument("--backend", default="auto")

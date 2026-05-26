@@ -2,8 +2,8 @@
 
 Usage:
     .venv/bin/python scripts/06_risk_overlay.py \
-        --input samples/inputs/10.png \
-        --rgba samples/outputs/matte/10_rgba.png \
+        --input samples/legacy/inputs/10.png \
+        --rgba samples/legacy/outputs/matte/10_rgba.png \
         --background 255,255,255 \
         --out out/risk_overlays/sample_10_risk_overlay.png
 """

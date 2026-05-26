@@ -6,9 +6,9 @@ can authorize a conservative alpha repair.
 
 Usage:
     .venv/bin/python scripts/04_subject_mask_regression.py \
-        --input samples/inputs/12.png \
-        --subject-mask samples/outputs/clipseg_12/clipseg_3.png \
-        --out samples/outputs/sample12_subject_regression
+        --input samples/legacy/inputs/12.png \
+        --subject-mask samples/legacy/outputs/clipseg_12/clipseg_3.png \
+        --out samples/legacy/outputs/sample12_subject_regression
 """
 
 from __future__ import annotations
