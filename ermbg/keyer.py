@@ -4,14 +4,14 @@ When B is fixed (the system's "specified background" contract), the cleanest
 signal for "is this pixel background?" is the perceptual distance from each
 pixel to B. Two flavors:
 
-  ``chromatic_key_alpha``  — uses full OKLab distance. Good for saturated B
-      (green/cyan/magenta). Useless when B has near-zero chroma (white/black/grey)
-      because then the signal is dominated by lightness, not color.
+  ``chromatic_key_alpha``  — uses full OKLab distance. Best for saturated B
+      (green/cyan/magenta), and still useful as auxiliary "not equal to B"
+      evidence for pale subjects on white/black backgrounds.
 
   ``luminance_key_alpha``  — uses |ΔL| only. The right tool for white or
-      black backgrounds: dark subjects on a white screen separate cleanly by
-      lightness alone. Cannot tell "white subject on white" from "background";
-      that case is information-theoretically lost regardless of method.
+      black backgrounds as a primary key: dark subjects on a white screen
+      separate cleanly by lightness alone. It is paired with full-color known-B
+      repair for pale colored interiors whose lightness is close to B.
 
   ``key_alpha(..., mode=...)`` — dispatcher.
 
@@ -38,8 +38,8 @@ class KeyerThresholds:
     Pixels with d <= ``bg_max`` are full background (α=0).
     Pixels with d >= ``fg_min`` are full foreground (α=1).
     In between, α ramps linearly. Defaults are tuned for a saturated screen
-    (green/cyan/magenta) — for a low-saturation B (e.g. white on white)
-    these will be too tight and the keyer should be skipped or replaced.
+    (green/cyan/magenta), but are also used as auxiliary full-color evidence
+    for known white/black background repair.
     """
 
     bg_max: float = 6.0
@@ -182,6 +182,7 @@ def repair_alpha_with_subject_support(
     exterior_margin_px: int = 2,
     min_component_area_ratio: float = 0.00002,
     feather_radius: int = 1,
+    target_alpha_floor: float | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Repair low-α regions only where an external subject mask owns them.
 
@@ -252,6 +253,8 @@ def repair_alpha_with_subject_support(
     repaired = m.copy()
     if accepted.any():
         target = np.maximum(m, np.minimum(k, support_f))
+        if target_alpha_floor is not None:
+            target = np.maximum(target, float(target_alpha_floor))
         repaired[accepted] = target[accepted]
 
         if feather_radius > 0:
@@ -271,6 +274,139 @@ def repair_alpha_with_subject_support(
         "accepted_pixels": int(accepted.sum()),
         "rejected_components": rejected,
         "component_areas": accepted_areas,
+    }
+
+
+def repair_alpha_with_known_bg_key(
+    matting_alpha: np.ndarray,
+    full_color_key_alpha: np.ndarray,
+    *,
+    key_fg_threshold: float = 0.45,
+    matting_low_threshold: float = 0.65,
+    support_threshold: float = 0.35,
+    fg_anchor_threshold: float = 0.85,
+    exterior_margin_px: int = 3,
+    min_component_area_ratio: float = 0.00002,
+    feather_radius: int = 1,
+    target_alpha_floor: float = 0.90,
+) -> tuple[np.ndarray, dict]:
+    """Repair low-α holes using only known-background color evidence.
+
+    This is the non-semantic sibling of ``repair_alpha_with_subject_support``.
+    For white/black graphic assets, a luminance-only key can miss pale colored
+    subject regions whose lightness is close to the background. The full OKLab
+    distance to the known background still carries the missing evidence:
+    "this pixel is not actually B".
+
+    The key output is *not* used as final alpha. It is only used as a rough
+    support map, then the same topology guards apply:
+      - avoid the exterior fringe,
+      - require keyer foreground confidence,
+      - require the candidate to touch confident matting foreground,
+      - only raise alpha, never lower it.
+    """
+    repaired, info = repair_alpha_with_subject_support(
+        matting_alpha,
+        full_color_key_alpha,
+        full_color_key_alpha,
+        key_fg_threshold=key_fg_threshold,
+        matting_low_threshold=matting_low_threshold,
+        support_threshold=support_threshold,
+        fg_anchor_threshold=fg_anchor_threshold,
+        exterior_margin_px=exterior_margin_px,
+        min_component_area_ratio=min_component_area_ratio,
+        feather_radius=feather_radius,
+        target_alpha_floor=target_alpha_floor,
+    )
+    info["source"] = "known_bg_full_color_key"
+    info["key_fg_threshold"] = key_fg_threshold
+    info["support_threshold"] = support_threshold
+    info["exterior_margin_px"] = exterior_margin_px
+    info["target_alpha_floor"] = target_alpha_floor
+    return repaired, info
+
+
+def repair_hard_edge_alpha(
+    image_srgb: np.ndarray,
+    matting_alpha: np.ndarray,
+    key_alpha: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    key_fg_threshold: float = 0.90,
+    matting_low_threshold: float = 0.85,
+    lightness_contrast_min: float = 55.0,
+    fg_anchor_threshold: float = 0.85,
+    anchor_dilate_px: int = 2,
+    min_component_area_ratio: float = 0.000005,
+    max_component_area_ratio: float = 0.02,
+    target_alpha_floor: float = 0.95,
+) -> tuple[np.ndarray, dict]:
+    """Restore high-contrast hard-edge strokes that the matting net softened.
+
+    This is the first local ``hard_edge`` policy. It is deliberately narrower
+    than a generic ``alpha = max(alpha, key)`` rule: candidates must be strongly
+    separated from the known background in lightness, be foreground according to
+    the keyer, currently have under-estimated alpha, stay small enough to look
+    like an edge/stroke component, and touch confident foreground nearby.
+    """
+    m = matting_alpha.astype(np.float32)
+    k = key_alpha.astype(np.float32)
+    if image_srgb.shape[:2] != m.shape or k.shape != m.shape:
+        raise ValueError("image_srgb, matting_alpha, and key_alpha must share HxW")
+
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)).reshape(3)
+    lightness_contrast = np.abs(lab[..., 0] - bg_lab[0]).astype(np.float32) * 100.0
+
+    candidate = (
+        (k >= key_fg_threshold)
+        & (m < matting_low_threshold)
+        & (lightness_contrast >= lightness_contrast_min)
+    )
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), connectivity=8)
+
+    h, w = m.shape
+    img_area = float(h * w)
+    min_area = max(1.0, min_component_area_ratio * img_area)
+    max_area = max(min_area, max_component_area_ratio * img_area)
+    confident_fg = m >= fg_anchor_threshold
+    anchor_kernel = np.ones((3, 3), np.uint8)
+
+    accepted = np.zeros_like(candidate)
+    accepted_areas: list[int] = []
+    rejected = 0
+    for i in range(1, n_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            rejected += 1
+            continue
+        comp = labels == i
+        comp_touch = cv2.dilate(
+            comp.astype(np.uint8),
+            anchor_kernel,
+            iterations=max(1, int(anchor_dilate_px)),
+        ).astype(bool)
+        if not (comp_touch & confident_fg).any():
+            rejected += 1
+            continue
+        accepted |= comp
+        accepted_areas.append(area)
+
+    repaired = m.copy()
+    if accepted.any():
+        target = np.maximum(k, float(target_alpha_floor))
+        repaired[accepted] = np.maximum(repaired[accepted], target[accepted])
+
+    return np.clip(repaired, 0.0, 1.0).astype(np.float32), {
+        "used": True,
+        "accepted_components": len(accepted_areas),
+        "accepted_pixels": int(accepted.sum()),
+        "rejected_components": rejected,
+        "component_areas": accepted_areas,
+        "key_fg_threshold": key_fg_threshold,
+        "matting_low_threshold": matting_low_threshold,
+        "lightness_contrast_min": lightness_contrast_min,
+        "target_alpha_floor": target_alpha_floor,
     }
 
 
@@ -374,6 +510,8 @@ __all__ = [
     "luminance_key_alpha",
     "key_alpha",
     "gate_alpha_by_keyer",
+    "repair_hard_edge_alpha",
+    "repair_alpha_with_known_bg_key",
     "repair_alpha_with_subject_support",
     "merge_alpha_components",
 ]

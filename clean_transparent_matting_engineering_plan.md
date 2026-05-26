@@ -40,6 +40,7 @@ image (sRGB uint8 + 可选 source α)
   │
   ├── key α (chromatic | luminance | none) + merge_alpha_components
   │      把 BiRefNet 漏掉的小连通分量从 key α 补回主 α,不覆盖主主体
+  │      white/black graphic 额外执行 known-B / hard-edge 局部修复
   │
   ├── sRGB → linear RGB
   │
@@ -52,6 +53,9 @@ image (sRGB uint8 + 可选 source α)
   │      └── none         baseline
   │
   ├── F_lin → sRGB,α → uint8,dstack 出 RGBA
+  │
+  ├── generate_matte_candidates
+  │      对同色内区等真实歧义生成 transparent_hole / same_color_marking 候选
   │
   └── run_qa: 合到 6 张背景 + 每张配 lightwrap → 多指标
 ```
@@ -91,9 +95,11 @@ image (sRGB uint8 + 可选 source α)
 | [ermbg/diagnose.py](ermbg/diagnose.py) | `BackgroundDiagnoser` 单图诊断 + risk_map |
 | [ermbg/metrics.py](ermbg/metrics.py) | `measure_background_color` / `background_purity_sigma` / `edge_contrast_q10` 等;σ 测量已修(避免 AA 边污染)|
 | [ermbg/despill.py](ermbg/despill.py) | `chroma_cap` / `local_foreground_borrow` / `unmix_foreground`(新)/ `closed_form_matting` / `apply_despill`(新增 `auto` 和 `unmix`) |
+| [ermbg/candidates.py](ermbg/candidates.py) | `generate_matte_candidates`:同色内区等信息论歧义的候选生成 |
 | [ermbg/lightwrap.py](ermbg/lightwrap.py) | Brinkmann light wrap 边缘晕修 |
 | [ermbg/qa.py](ermbg/qa.py) | 6 背景合成 + halo / noise / 细结构指标 |
 | [ermbg/matting.py](ermbg/matting.py) | 端到端 `matte()` 主入口,接 router |
+| [ermbg/web.py](ermbg/web.py) | FastAPI 后台 UI/API,结果区支持候选缩略图切换 |
 | [ermbg/cli.py](ermbg/cli.py) | `segment` / `diagnose` / `matte` / `phase1` / `probe` |
 | [ermbg/colorspace.py](ermbg/colorspace.py) | sRGB ↔ OKLab |
 | [ermbg/io.py](ermbg/io.py) | `load_image_with_alpha`(新,返回 (rgb, source_α))/ `load_rgb` 自动合到指定背景 / sRGB ↔ linear |
@@ -197,16 +203,18 @@ tests/test_despill.py      chroma_cap / local_borrow / unmix / dispatcher
 tests/test_diagnose.py     purity / contrast / verdict
 tests/test_io.py           sRGB↔linear,save/load
 tests/test_keyer.py        chromatic + luminance keyer + merge
+tests/test_candidates.py   同色内区候选生成
 tests/test_lightwrap.py    halo 抑制
 tests/test_matting.py      end-to-end smoke
 tests/test_router.py       策略分类(saturated/white/black/grey/passthrough/graphic/photo)
 tests/test_api.py          高阶 API / subject_mask 输入
 tests/test_cli.py          CLI subject_mask smoke
+tests/test_web.py          后台 UI / 候选 API
 tests/test_comfy_nodes.py  ComfyUI 节点输入输出
 tests/test_comfy_subject_workflow.py  CLIPSeg→ERMBG workflow 渲染/下载
 ```
 
-日常重点回归跑 `.venv/bin/pytest -q -m core`,覆盖 router / keyer / API / CLI / subject-mask workflow。提交前跑全量 `.venv/bin/pytest -q`;当前 91 项全部通过。新增模块要带 smoke 测试。
+日常重点回归跑 `.venv/bin/pytest -q -m core`,覆盖 router / keyer / API / CLI / subject-mask workflow。提交前跑全量 `.venv/bin/pytest -q`;当前 102 项全部通过。新增模块要带 smoke 测试。
 
 ---
 
@@ -222,102 +230,204 @@ tests/test_comfy_subject_workflow.py  CLIPSeg→ERMBG workflow 渲染/下载
 
 任一指标失败 → strategy 从 `rgba_passthrough` 落回正常背景分类路径,由主流程重抠。测试覆盖 clean passthrough、halo reject、low-alpha leak、binarized matte、无 opaque interior 等边界。
 
-### 10.2 白底 keyer merge 在小连通分量上失效
+### 10.2 9/10 白底 graphic 闭环(已落地)
 
-10 号图(白底蓝星 + 红环 + 小红点),luminance keyer 算 α 没问题,但 `merge_alpha_components` 没把小红点补回来 — 因为白底场景下 BiRefNet 给的小红点 α 不是严格 0,触发了"matting 已经看见"的跳过分支。需要在 white_bg / black_bg 路径用更严格的"matting present"阈值,或改用主体大小过滤。
+9/10 号样本把两个问题分开了:
+
+1. **硬边细描边**:10 号红圈外的黑色细描边是 hard edge,不应被 BiRefNet 羽化成灰白半透明。当前 white/black graphic 路径已加入 `hard_edge` repair:只对 keyer 高置信、与背景亮度差极大、当前 alpha 偏低、且贴近可信前景的小型组件抬 alpha,保住 1px 描边。
+2. **同色内区歧义**:红圈内部白色区域与白底 B 同色,单张图像无法证明它到底是透明洞还是主体上的白色标记。当前不再强行猜唯一答案,而是在 [ermbg/candidates.py](ermbg/candidates.py) 生成 `transparent_hole` 和 `same_color_marking` 候选;后台 `/api/matte-candidates` 返回候选 JSON,UI 结果区用缩略图 tab 点击切换。
+
+这两个修复对应不同边界:hard-edge 是局部策略识别后可以确定执行;同色内区是信息论歧义,必须暴露候选或等待用户意图。
 
 ### 10.3 verdict=not-pure-bg 时仍然继续
 
 虽然加了 logger.warning,但管线照样跑。下一步可以让 router 在 `not-pure-bg` 时直接走 `noisy_bg` 策略。
 
-### 10.4 下一阶段:Semantic Matting Planner
+### 10.4 当前主线:Known-B Candidate Matting
 
-12 号样本暴露的问题不是单纯"洞要不要填",而是"这块区域是否语义上属于主体"。下一阶段不继续调白底 luminance keyer 阈值,而是把主体归属作为独立信号接入:
+12 号样本相关分析已归档到 [docs/archive/sample-12-white-bg-panel-analysis.md](docs/archive/sample-12-white-bg-panel-analysis.md)。那份文档记录的是临时测试迭代和多次反转,不再作为当前设计依据。
+
+当前主线重新收敛到项目原始 contract:
 
 ```text
-Vision / prompt-aware segmentation -> OwnershipMap
-Language planner                  -> 有限操作计划
-ERMBG local algorithms             -> α 修复 / unmix / despill / QA
+Known background color B -> robust alpha + foreground recovery
 ```
 
-近期落地顺序:
+优先级:
 
-1. **接通 prompt-aware `subject_mask` 工作流**:ComfyUI 中用 CLIPSeg / Florence / SAM 生成完整主体 ownership mask,传给 `ERMBG AutoMatte(subject_mask=...)`。当前已新增 `ermbg/probe/comfyui_clipseg_ermbg.json` 和 `scripts/05_comfy_subject_mask_workflow.py`,支持离线渲染 JSON,空闲后 `--submit` 等待完成并下载 foreground / alpha / subject_mask / summary。
-2. **CLI/API 回归入口**:CLI `matte` 支持 `--subject-mask`,方便用 `samples/outputs/clipseg_12/*.png` 这类离线 mask 跑 12 号回归;`scripts/04_subject_mask_regression.py` 固化 nomask vs subject-mask 的 QA 对比。
-3. **12 号验收基准**:右上角浅绿色面板缺口必须修复;黑底 / checker / cyan / magenta QA 不允许新增白边;report 中必须记录 `keyer.subject_repair.accepted_pixels`。当前 CLIPSeg prompt-aware mask 已把 recomp 从 0.0308 降到约 0.012,black halo 从约 10.0 降到约 6.0。
-4. **抽象中间表示**:在 `subject_mask` 稳定后再升级为 `OwnershipMap / HoleMap / RiskMap / Plan`,记录来源、置信度、故意透明洞、matting/keyer/semantic 分歧。
-5. **触发策略保守化**:只在低对比、matting/keyer 大面积冲突、疑似内部洞、QA 失败或用户明确指定对象时调用视觉语义分支;简单绿幕/干净 RGBA 仍走本地快速路径。
+1. 饱和 / 白 / 黑 / 灰背景都最大化利用已知 B 的颜色证据。
+2. keyer 只提供证据和约束,不直接替换最终 alpha。
+3. 内部低 α 修复必须有 topology guard,外轮廓软边不能被抬高。
+4. 多背景 QA 作为验收,特别看 black / checker / saturated 背景。
+5. 只有当 foreground 与 B 同色、多对象选择、真实洞语义不明确,或局部材质策略冲突时,才升级到候选、轻交互或视觉语义提示。
 
-原则:视觉模型负责理解和提供区域证据,LLM 只在有限操作集合内规划,最终像素级 α / foreground RGB / QA 仍由本地确定性代码执行。
-
-### 10.5 产品重构:Interactive Intent Matting
-
-2026-05-26 进一步把第二阶段目标从"语义 planner"收束成更贴近用户的 **Interactive Intent Matting**:
+Phase 2 名称:
 
 ```text
-默认智能完成。
-失败时给用户一个极轻的纠偏入口。
-纠偏输入表达意图,不是让用户精修 alpha。
+Known-B Candidate Matting
 ```
 
-这不是推翻 `Semantic Matting Planner`,而是把它的产品边界说清楚:planner 不应该要求用户画完美 mask,也不应该让 VLM/LLM 直接改像素。用户只需要补充系统缺失的"意图信息",例如:
+包含两部分:
 
-- 文字提示:`这是一个花环,洞要抠干净` / `保留整个浅绿色面板` / `只保留左边这个徽章`;
-- 粗笔触 keep:`这块要保留`;
-- 粗笔触 remove:`这块要去掉`;
-- 粗笔触 hole:`这里是洞,要透明`;
-- prompt-aware subject mask:由 CLIPSeg / Florence / SAM 根据一句提示生成粗 ownership support。
+1. **Robust Alpha Fusion**:像素颜色明显不是 B,但 matting alpha 偏低时,用 known-B/keyer 证据和 topology guard 保守抬 alpha。
+2. **Ambiguity Candidate Generation**:像素颜色等于 B,语义上可能是洞也可能是主体图案时,自动生成少量候选让用户选择。
 
-这些输入统一进入中间表示,而不是直接替换最终 alpha:
+### 10.5 Region Policy Map
+
+10 号样本暴露的不是主体归属歧义,而是**同一张图里不同区域需要不同抠图策略**。黑色描边是硬边,应该追求轮廓忠实;毛发/绒毛是软边,应该保留连续 alpha;透明或反光材质还需要单独的混合恢复策略。
+
+因此下一层中间表示应从全图 `image_type ∈ {graphic, photo}` 升级为区域级 policy map:
 
 ```text
-instruction / keep_mask / remove_mask / hole_mask / subject_mask
-  -> OwnershipMap / BackgroundMap / HoleMap / RiskMap
-  -> 有限 MattingPlan
-  -> ERMBG deterministic executor
+Image / local evidence / optional vision annotation
+  -> RegionPolicyMap
+  -> finite local MattingPlan
+  -> deterministic executor
   -> QA / debug overlays
 ```
 
-建议第二阶段 API 表面逐步扩展:
+建议第一版标签:
 
-```bash
-ermbg matte input.png \
-  --keep-mask rough_keep.png \
-  --remove-mask rough_remove.png \
-  --hole-mask rough_hole.png \
-  --instruction "this is a wreath; keep leaves, remove the center hole"
-```
+| Policy | 典型区域 | 执行策略 |
+|---|---|---|
+| `hard_edge` | logo 描边、图标轮廓、文字边缘 | 用 known-B keyer / edge snapping 保护轮廓,允许抬高 alpha |
+| `soft_hair` | 毛发、绒毛、烟雾状边缘 | 保护 BiRefNet soft alpha,禁止硬 keyer 拉满/拉空 |
+| `opaque_interior` | 主体内部实色面 | known-B repair 可修低 alpha 缺口 |
+| `translucent` | 玻璃、薄纱、半透明材质 | 保留低 alpha,用 unmix/foreground recovery 处理颜色 |
+| `intentional_hole` | 花环、相框、镂空 logo、窗口 | hole 约束优先,不做 subject repair |
+| `shadow_or_contact` | 投影、接触阴影 | 默认作为背景去除,后续可输出 shadow matte |
+| `unknown` | 证据冲突区域 | 生成候选或请求轻量意图输入 |
 
-ComfyUI 节点对应增加可选 MASK/STRING 输入:
+视觉模型的角色是提供区域证据和策略先验,例如"这段是硬描边"、"这里是毛发"、"这个内圈是透明洞"。它不直接输出最终 alpha;最终像素操作仍由本地 keyer / matting / unmix / topology / QA 执行。
 
-```text
-keep_mask
-remove_mask
-hole_mask
-instruction
-```
+当前已落地的第一条本地规则是 `hard_edge`:在 white/black graphic 路径里,只对 keyer 高置信、与背景亮度差极大、当前 alpha 偏低、且贴近可信前景的小型组件抬 alpha。它解决 10 号样本的黑色细描边被软化问题,同时避免把所有外轮廓抗锯齿直接二值化。
 
-第一版实现原则:
+### 10.6 候选与轻交互边界
 
-1. **自动优先**:绿幕/黑白底清晰图/干净 RGBA/小漏检/脏边仍然无参数完成。
-2. **轻交互只补意图**:笔触和文字只产生 ownership / background / hole 约束,不直接成为最终 matte。
-3. **本地代码细化**:边缘、despill、unmix、gate、QA 仍由本地确定性算法执行。
-4. **hole 约束优先级最高**:花环、相框、窗户、镂空 logo 的洞不能被自动 subject repair 填掉。
-5. **报告可解释**:`report.json` 要记录哪些用户意图被采纳、哪些候选被拒绝、repair mask / rejected mask / risk overlay 在哪里。
-
-从用户体验上,系统应该主动暴露极少量纠偏动作:
+当 local evidence 无法证明唯一答案时,不要先要求用户画 mask。系统应先生成有限数量的合理候选:
 
 ```text
-检测到浅色主体可能被白底吃掉。可以粗涂要保留的区域。
-检测到内部洞不确定。可以标记"洞要透明"。
-检测到多个对象。可以粗涂目标对象或用一句话指定。
+base known-B matte
+  -> detect ambiguous regions
+  -> propose finite interpretations
+  -> execute local plans
+  -> render candidate composites
+  -> user selects one
 ```
 
-阶段边界:
+典型候选:
 
-- **Phase 2**:消费已有粗 mask / instruction,生成 Comfy workflow,不默认自动远端调用;先把中间表示和 report 打通。
-- **Phase 3**:router / QA 发现风险后,可选择自动请求 prompt-aware segmentation 分支。
-- **Phase 4**:VLM/LLM 只输出有限 plan schema,仍不碰像素算法。
+| Ambiguity | Candidate A | Candidate B |
+|---|---|---|
+| 内部区域颜色等于 B | transparent_hole | same_color_marking |
+| 多对象 | selected_object | all_objects |
+| 硬边/软边冲突 | hard_edge_snap | preserve_soft_alpha |
+
+候选数量不固定。默认本地规则可以给 0-2 个候选;当升级到视觉/语言模型时,由模型根据风险区域和工具目录推理需要几个候选。约束是:
+
+1. 候选必须由已注册本地工具组成,不能让模型直接输出 alpha / RGBA。
+2. 候选优先作用于本地 `RiskRegion` 提供的区域;模型可以拆分、命名、排序和解释,但不能凭空绕过本地风险证据。
+3. 超过 4 个候选通常说明歧义没有被结构化好,UI 应折叠为"推荐候选 + 需要用户意图"。
+
+只有候选都不对时,才进入 keep/remove/hole 粗笔触或文字提示纠偏。纠偏输入表达意图,不是最终 alpha:
+
+```text
+instruction / keep_mask / remove_mask / hole_mask / subject_mask
+  -> OwnershipMap / BackgroundMap / HoleMap / RegionPolicyMap / RiskMap
+  -> finite MattingPlan
+  -> deterministic executor
+```
+
+Phase 边界:
+
+- **Phase 2**:Known-B robust alpha fusion + ambiguity candidate generation。
+- **Phase 3**:RegionPolicyMap 的本地规则版,覆盖 hard_edge / soft_hair / intentional_hole。
+- **Phase 4**:router / QA 发现风险后,可选择调用视觉模型提供区域策略先验。
+- **Phase 5**:VLM/LLM 只输出有限 plan schema,仍不碰像素算法。
+
+### 10.7 VLM Tool Planner
+
+更准确的架构不是"大模型抠图",而是:
+
+```text
+Local Analyzer
+  -> RiskRegion[] / local evidence / ToolCatalog
+VLM/LLM Planner
+  -> CandidatePlan[] with variable length
+Local Executor
+  -> deterministic ERMBG tools
+Validator / QA
+  -> reject illegal plans, score candidates, produce debug overlays
+```
+
+大模型负责推理:
+
+- 这个风险区域在语义上更像主体、背景、透明洞、硬边、软边还是半透明材质。
+- 每个区域应该调用哪些本地工具。
+- 需要生成几个候选,以及候选的排序和解释。
+
+大模型不负责:
+
+- 输出最终 alpha。
+- 输出最终 RGBA。
+- 编写或选择任意未注册图像处理代码。
+- 绕过 topology guard / QA / 参数范围限制。
+
+#### ToolCatalog v0
+
+第一版只暴露已经存在或很容易包装的确定性工具:
+
+| Tool | 作用 | 底层实现 |
+|---|---|---|
+| `preserve_hole` | 保留透明内洞 | 保持指定区域低 alpha |
+| `fill_same_color_region` | 把同背景色内区解释为主体图案 | 候选 executor 局部抬 alpha 并保留输入 RGB |
+| `repair_opaque_interior` | 修复主体内部低 alpha 缺口 | `repair_alpha_with_known_bg_key` / `repair_alpha_with_subject_support` |
+| `snap_hard_edge` | 修复 logo / 文字 / 描边硬边 | `repair_hard_edge_alpha` |
+| `preserve_soft_alpha` | 保护毛发 / 绒毛 / 烟雾软边 | 禁止 hard gate / hard fill 作用于该区域 |
+| `mark_translucent` | 标记玻璃 / 薄纱等半透明区域 | 保留 partial alpha,交给 unmix / foreground recovery |
+
+每个工具必须有机器可读 contract:
+
+```text
+name / purpose / input parameters / parameter ranges
+allowed_when / rejects_when / risks
+```
+
+#### Plan Schema v0
+
+Planner 输出受限 JSON,候选数量可变:
+
+```json
+{
+  "candidates": [
+    {
+      "id": "transparent_center",
+      "label": "中心透明",
+      "confidence": 0.78,
+      "operations": [
+        {"tool": "preserve_hole", "region_id": "r3"},
+        {"tool": "snap_hard_edge", "region_id": "r1", "alpha_floor": 0.95}
+      ],
+      "reason": "主体像环形徽章,中心白色区域更可能是镂空"
+    }
+  ]
+}
+```
+
+执行前必须校验:
+
+- `tool` 必须在 `ToolCatalog` 中。
+- `region_id` 必须来自本地 `RiskRegion` 或用户 intent map。
+- 参数必须在工具 contract 允许范围内。
+- 工具的 `allowed_when` 必须能由本地证据或用户意图支持。
+
+第一步实现目标是本地闭环,不接真实 VLM:
+
+```text
+RiskRegion[] + ToolCatalog -> rule/mock CandidatePlan[] -> PlanExecutor -> MatteCandidate[] -> QA/report/UI
+```
+
+等 schema、validator、executor 稳定后,再把 VLM 接到 `CandidatePlan[]` 生成位置。
 
 ---
 

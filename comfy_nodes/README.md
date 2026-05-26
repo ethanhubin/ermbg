@@ -69,16 +69,16 @@ LoadImage → ERMBG Classify → ShowText (json)
 
 如果你的工作流前面已经有别的分割节点(比如 SAM),把 MASK 接到 AutoMatte 的 `source_mask`。AutoMatte 会自动评估这个 mask 的卫生度:边缘干净就直接用,有 halo / 二值化 / 旧背景泄漏就重抠。
 
-如果是 12 号样本这类浅色主体贴白底的场景,把 CLIPSeg / Florence / SAM 生成的完整主体 ownership mask 接到 `subject_mask`。这条输入只回答"哪些区域属于主体",ERMBG 仍会用 keyer、外轮廓保护和 QA 来决定实际修复范围。
+如果本地证据无法稳定判断主体归属,可以把 CLIPSeg / Florence / SAM 生成的粗 ownership mask 接到 `subject_mask`。这条输入只回答"哪些区域属于主体",ERMBG 仍会用 keyer、外轮廓保护和 QA 来决定实际修复范围。
 
 服务器忙时可以先只渲染工作流 JSON,不提交队列:
 
 ```bash
 .venv/bin/python scripts/05_comfy_subject_mask_workflow.py \
-  --input samples/inputs/12.png \
-  --prompt "the entire framed green panel" \
-  --out samples/outputs/comfy_workflows/sample12_clipseg_ermbg.json \
-  --filename-prefix sample12_clipseg_ermbg
+  --input input.png \
+  --prompt "the complete object to keep" \
+  --out out/comfy_workflows/subject_mask_ermbg.json \
+  --filename-prefix subject_mask_ermbg
 ```
 
 等 ComfyUI 空闲后加 `--submit` 即可上传、排队、等待完成并下载 foreground / alpha / subject mask 三个调试输出;如果只想排队不等待,再加 `--no-wait`。

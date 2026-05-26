@@ -1,5 +1,11 @@
 # Sample 12 White Background Panel Analysis
 
+> Archived iteration log. This document records temporary experiments and
+> reversals around sample 12. It is not current design guidance. The current
+> direction is documented in `README.md` and
+> `clean_transparent_matting_engineering_plan.md`: known-background alpha
+> fusion first, region/material policy only when local evidence is insufficient.
+
 Date: 2026-05-25
 
 ## Context
@@ -737,4 +743,157 @@ known-background matting
   -> subject_mask ownership repair
   -> semantic ownership planning
   -> lightweight human intent correction
+```
+
+## 2026-05-26 Correction: Known-B First
+
+After another review, sample 12 was reclassified again. The earlier semantic
+interpretation was useful as a safety design exercise, but it over-escalated the
+root cause for this specific image.
+
+The project's original contract is:
+
+```text
+Known background color B -> clean alpha and foreground recovery.
+```
+
+Under that contract, the pale panel should not require semantic ownership:
+
+```text
+If B is known white, and the panel pixels are not white, known-B color evidence
+should be enough to keep the panel.
+```
+
+The actual bug was narrower:
+
+- the white-background path used `luminance_key_alpha` as the main keyer,
+- the pale green panel has lightness close to the white background,
+- therefore luminance evidence was weak in the panel,
+- `merge_alpha_components` only patches separately missed connected components,
+  not low-alpha holes inside an already represented component,
+- the system then escalated to `subject_mask`, even though full OKLab distance
+  to B still showed that the panel was not the background.
+
+The corrected known-B repair uses a full-color OKLab keyer as auxiliary
+evidence. It does **not** do `alpha = max(alpha, keyer)`. That direct replacement
+was tested and produced much worse black-background halos. Instead, it repairs
+only candidates that pass topology guards:
+
+```text
+candidate =
+  full_color_key says "not B"
+  AND matting alpha is low
+  AND candidate is away from exterior background
+  AND candidate touches confident matting foreground
+```
+
+Accepted internal holes receive an opaque alpha floor; external antialiasing
+remains protected.
+
+Updated no-mask QA on `samples/inputs/12.png`:
+
+| Variant | Recomp err | Black halo | Halo mean | Repair |
+|---|---:|---:|---:|---|
+| old no-mask | 0.0308 | 9.9987 | 3.3779 | none |
+| CLIPSeg `subject_mask` | 0.0125 | 5.9681 | 3.1298 | 29 comps / 6355 px |
+| known-B repair no-mask | 0.0133 | 5.8761 | 3.1166 | 15 comps / 5889 px |
+
+Conclusion:
+
+```text
+Sample 12 is primarily a known-B robust alpha fusion regression.
+Semantic / interactive intent remains a fallback class, not the main fix.
+```
+
+The engineering direction is therefore re-centered:
+
+```text
+Known-B Robust Alpha Fusion first.
+Semantic or human intent only when known-B evidence is genuinely insufficient.
+```
+
+## 2026-05-26 Candidate Matting For True Ambiguity
+
+The review of samples 9 and 10 clarified the next boundary. Their white internal
+circle is not the same kind of problem as sample 12.
+
+For sample 12:
+
+```text
+B = white
+C = pale green panel
+C != B
+```
+
+Known-B color evidence can say "this is not background", so the correct fix is
+robust alpha fusion.
+
+For samples 9/10:
+
+```text
+B = white
+C = white internal circle
+C == B
+```
+
+The same observed pixels support two valid explanations:
+
+```text
+alpha = 0, foreground arbitrary      # transparent hole
+alpha = 1, foreground = white        # white subject marking
+```
+
+This is a genuine ambiguity. It is not a failure of full-color known-B repair;
+there is no color evidence to decide.
+
+The product response should therefore be candidate generation, not immediate
+manual correction. Instead of asking the user to paint a mask or write a prompt
+first, ERMBG can produce a small set of plausible outputs:
+
+| Candidate | Meaning | Local operation |
+|---|---|---|
+| `transparent_hole` | Treat the internal white region as background opening | keep alpha low |
+| `white_marking` | Treat the internal white region as subject-owned white shape | fill enclosed same-color region |
+
+The user can then choose visually. Only if none of the candidates is correct
+does the system need a rough keep/remove/hole stroke or text instruction.
+
+### Candidate Matting Pipeline
+
+```text
+base known-B matte
+  -> find ambiguous regions
+  -> propose 2-3 interpretations
+  -> execute finite local plans
+  -> render candidate composites
+  -> user selects one
+```
+
+For the first implementation, ambiguous region detection can be local:
+
+- region color is close to known B,
+- region alpha is low,
+- region is not connected to image exterior,
+- region is enclosed or mostly enclosed by confident foreground,
+- area is within a reasonable range.
+
+The first two local plans are enough for samples 9/10:
+
+```text
+preserve_transparent_hole
+fill_same_color_interior
+```
+
+VLM/LLM can be layered later to name and rank candidates:
+
+- "red ring with transparent center" vs "red disk with white circular marking",
+- "single object" vs "multiple objects",
+- "wreath hole should remain transparent" vs "badge center should stay white".
+
+This preserves the project hierarchy:
+
+```text
+Known-B evidence solves what pixels can prove.
+Candidate Matting handles information-theoretic ambiguity.
+Lightweight user intent only resolves candidates when automatic proposals fail.
 ```

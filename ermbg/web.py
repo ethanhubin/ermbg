@@ -6,6 +6,7 @@ run ``matte_image``, preview the returned RGBA PNG, and download it.
 
 from __future__ import annotations
 
+import base64
 from io import BytesIO
 from typing import Annotated
 
@@ -19,6 +20,7 @@ except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
 from .api import matte_image
+from .candidates import MatteCandidate, generate_matte_candidates
 
 ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet"}
 
@@ -183,7 +185,7 @@ def index() -> str:
     .preview {
       min-height: 520px;
       display: grid;
-      grid-template-rows: 48px 1fr 56px;
+      grid-template-rows: 48px 1fr 104px 56px;
       overflow: hidden;
     }
     .preview-bar, .preview-actions {
@@ -273,6 +275,78 @@ def index() -> str:
       color: #6a746f;
       font-size: 14px;
     }
+    .candidate-panel {
+      min-height: 104px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-top: 1px solid #d9dfd7;
+      background: #fbfcfa;
+    }
+    .candidate-title {
+      font-size: 12px;
+      font-weight: 800;
+      color: #47524c;
+      white-space: nowrap;
+    }
+    .candidate-list {
+      min-width: 0;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 2px;
+    }
+    .candidate-tab {
+      width: 92px;
+      min-width: 92px;
+      min-height: 76px;
+      display: grid;
+      grid-template-rows: 48px auto;
+      gap: 5px;
+      padding: 5px;
+      border: 1px solid #cfd7cc;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #47524c;
+      cursor: pointer;
+    }
+    .candidate-tab[aria-selected="true"] {
+      border-color: #196f5a;
+      box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18);
+      color: #1c2320;
+    }
+    .candidate-thumb {
+      width: 100%;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border-radius: 4px;
+      background-color: #e9eee6;
+      background-image:
+        linear-gradient(45deg, #d3dbd0 25%, transparent 25%),
+        linear-gradient(-45deg, #d3dbd0 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #d3dbd0 75%),
+        linear-gradient(-45deg, transparent 75%, #d3dbd0 75%);
+      background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+      background-size: 12px 12px;
+    }
+    .candidate-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .candidate-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
     @media (max-width: 760px) {
       header { padding: 0 16px; }
       main {
@@ -281,7 +355,7 @@ def index() -> str:
       }
       .preview {
         min-height: 420px;
-        grid-template-rows: auto 1fr 56px;
+        grid-template-rows: auto 1fr 104px 56px;
       }
       .preview-bar {
         min-height: 84px;
@@ -295,6 +369,11 @@ def index() -> str:
         overflow-x: auto;
       }
       .canvas { min-height: 312px; }
+      .candidate-panel {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: 8px;
+      }
     }
   </style>
 </head>
@@ -341,6 +420,12 @@ def index() -> str:
       <div class="canvas" id="canvas">
         <span class="empty">结果会显示在这里</span>
       </div>
+      <div class="candidate-panel" aria-label="候选结果">
+        <span class="candidate-title">候选</span>
+        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图">
+          <span class="empty">候选会显示在这里</span>
+        </div>
+      </div>
       <div class="preview-actions">
         <span class="status" id="meta">RGBA PNG</span>
         <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
@@ -356,12 +441,15 @@ def index() -> str:
     const strategyEl = document.getElementById("strategy");
     const canvas = document.getElementById("canvas");
     const download = document.getElementById("download");
+    const candidateList = document.getElementById("candidate-list");
+    const metaEl = document.getElementById("meta");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
     const sourceMeta = document.getElementById("source-meta");
     const tabs = Array.from(document.querySelectorAll(".tab"));
-    let resultUrl = null;
     let sourceUrl = null;
+    let candidates = [];
+    let activeCandidateIndex = -1;
     let resultImage = null;
     let previewScale = 1;
     let previewPanX = 0;
@@ -390,12 +478,17 @@ def index() -> str:
     }
 
     function resetResult() {
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      resultUrl = null;
+      candidates.forEach((candidate) => {
+        if (candidate.revoke) URL.revokeObjectURL(candidate.url);
+      });
+      candidates = [];
+      activeCandidateIndex = -1;
       resultImage = null;
       resetPreviewTransform();
       canvas.innerHTML = '<span class="empty">结果会显示在这里</span>';
       canvas.classList.remove("has-image", "is-dragging");
+      candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>';
+      metaEl.textContent = "RGBA PNG";
       download.removeAttribute("href");
       download.setAttribute("aria-disabled", "true");
     }
@@ -417,23 +510,89 @@ def index() -> str:
       applyPreviewTransform();
     }
 
-    function setDownload(blob, name) {
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      resultUrl = URL.createObjectURL(blob);
+    function renderCandidateTabs() {
+      candidateList.innerHTML = "";
+      if (!candidates.length) {
+        candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>';
+        return;
+      }
+      candidates.forEach((candidate, index) => {
+        const button = document.createElement("button");
+        button.className = "candidate-tab";
+        button.type = "button";
+        button.role = "tab";
+        button.setAttribute("aria-selected", String(index === activeCandidateIndex));
+        button.dataset.index = String(index);
+        button.title = candidate.label;
+
+        const thumb = document.createElement("span");
+        thumb.className = "candidate-thumb";
+        const img = document.createElement("img");
+        img.src = candidate.url;
+        img.alt = `${candidate.label} 缩略图`;
+        thumb.appendChild(img);
+
+        const label = document.createElement("span");
+        label.className = "candidate-name";
+        label.textContent = candidate.label;
+
+        button.appendChild(thumb);
+        button.appendChild(label);
+        button.addEventListener("click", () => setActiveCandidate(index));
+        candidateList.appendChild(button);
+      });
+    }
+
+    function setActiveCandidate(index) {
+      if (index < 0 || index >= candidates.length) return;
+      const candidate = candidates[index];
+      activeCandidateIndex = index;
       resetPreviewTransform();
       canvas.innerHTML = "";
       const img = document.createElement("img");
-      img.src = resultUrl;
-      img.alt = "ERMBG result";
+      img.src = candidate.url;
+      img.alt = candidate.label;
       img.draggable = false;
       img.className = "result-image";
       resultImage = img;
       canvas.classList.add("has-image");
       canvas.appendChild(img);
       applyPreviewTransform();
-      download.href = resultUrl;
-      download.download = name.replace(/\\.[^.]+$/, "") + "_rgba.png";
+      download.href = candidate.url;
+      download.download = candidate.downloadName;
       download.setAttribute("aria-disabled", "false");
+      metaEl.textContent = candidate.meta;
+      renderCandidateTabs();
+    }
+
+    function setDownload(blob, name) {
+      resetResult();
+      const url = URL.createObjectURL(blob);
+      const stem = name.replace(/\\.[^.]+$/, "");
+      candidates = [{
+        url,
+        revoke: true,
+        label: "自动结果",
+        meta: "候选 1 / 1 · RGBA PNG",
+        downloadName: `${stem}_rgba.png`,
+      }];
+      setActiveCandidate(0);
+    }
+
+    function setCandidatePayloads(payload, name) {
+      resetResult();
+      const stem = name.replace(/\\.[^.]+$/, "");
+      candidates = (payload.candidates || []).map((candidate, index) => ({
+        url: candidate.rgba,
+        revoke: false,
+        label: candidate.label || `候选 ${index + 1}`,
+        meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`,
+        downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png`,
+      }));
+      if (!candidates.length) {
+        throw new Error("没有可显示的候选结果");
+      }
+      setActiveCandidate(0);
     }
 
     file.addEventListener("change", () => {
@@ -525,7 +684,7 @@ def index() -> str:
       statusEl.textContent = "正在抠图";
       strategyEl.textContent = backend.value;
       try {
-        const response = await fetch("/api/matte", { method: "POST", body: formData });
+        const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
         if (!response.ok) {
           let message = "处理失败";
           try {
@@ -534,10 +693,10 @@ def index() -> str:
           } catch (_) {}
           throw new Error(message);
         }
-        const blob = await response.blob();
-        setDownload(blob, file.files[0].name);
-        const strategy = response.headers.get("x-ermbg-strategy") || "done";
-        const bg = response.headers.get("x-ermbg-background") || "";
+        const payload = await response.json();
+        setCandidatePayloads(payload, file.files[0].name);
+        const strategy = payload.strategy || "done";
+        const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
         statusEl.textContent = "完成";
         strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy;
       } catch (error) {
@@ -549,6 +708,23 @@ def index() -> str:
   </script>
 </body>
 </html>"""
+
+
+def _png_data_url(rgba: np.ndarray) -> str:
+    encoded = base64.b64encode(_encode_png(rgba)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object]:
+    return {
+        "id": candidate.id,
+        "label": candidate.label,
+        "kind": candidate.kind,
+        "filename": f"{stem}_{candidate.id}.png",
+        "rgba": _png_data_url(candidate.rgba),
+        "selected": candidate.selected,
+        "debug": candidate.debug,
+    }
 
 
 @app.post("/api/matte")
@@ -576,6 +752,30 @@ def matte_endpoint(
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
         },
     )
+
+
+@app.post("/api/matte-candidates")
+def matte_candidates_endpoint(
+    file: Annotated[UploadFile, File()],
+    backend: Annotated[str, Form()] = "grabcut",
+) -> dict[str, object]:
+    if backend not in ALLOWED_BACKENDS:
+        raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
+
+    image = _load_upload_image(file)
+    try:
+        result = matte_image(image, backend=backend, qa=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
+
+    stem = (file.filename or "ermbg").rsplit(".", 1)[0]
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    candidates = generate_matte_candidates(image_rgb, result.rgba, result.background_color)
+    return {
+        "strategy": result.strategy_name,
+        "background": list(result.background_color),
+        "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
+    }
 
 
 def main() -> None:

@@ -11,6 +11,8 @@ from ermbg.keyer import (
     key_alpha,
     luminance_key_alpha,
     merge_alpha_components,
+    repair_hard_edge_alpha,
+    repair_alpha_with_known_bg_key,
     repair_alpha_with_subject_support,
 )
 
@@ -216,3 +218,74 @@ def test_subject_support_repair_rejects_outer_contour_fringe():
 
     assert info["accepted_components"] == 0
     np.testing.assert_array_equal(repaired[20:22, 20:60], matting[20:22, 20:60])
+
+
+def test_known_bg_repair_fills_internal_low_alpha_region():
+    """Full-color known-B evidence can repair a pale subject region on white
+    without requiring a semantic subject mask."""
+    h, w = 80, 80
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:60, 20:60] = 1.0
+    matting[34:46, 42:54] = 0.1
+
+    full_key = np.zeros((h, w), dtype=np.float32)
+    full_key[20:60, 20:60] = 1.0
+
+    repaired, info = repair_alpha_with_known_bg_key(matting, full_key)
+
+    assert info["source"] == "known_bg_full_color_key"
+    assert info["accepted_components"] == 1
+    assert repaired[36:44, 44:52].mean() > 0.9
+
+
+def test_known_bg_repair_rejects_external_fringe():
+    """Known-B repair must not lift the outside antialiasing fringe, where
+    raising alpha would preserve observed background contamination."""
+    h, w = 80, 80
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[22:58, 22:58] = 1.0
+    matting[20:22, 20:60] = 0.1
+
+    full_key = np.zeros((h, w), dtype=np.float32)
+    full_key[20:60, 20:60] = 1.0
+
+    repaired, info = repair_alpha_with_known_bg_key(matting, full_key)
+
+    assert info["accepted_components"] == 0
+    np.testing.assert_array_equal(repaired[20:22, 20:60], matting[20:22, 20:60])
+
+
+def test_hard_edge_repair_restores_thin_dark_outline():
+    """A graphic hard-edge stroke can be true opaque foreground even when the
+    matting model softened it as if it were antialiasing."""
+    h, w = 72, 72
+    image = np.full((h, w, 3), 255, dtype=np.uint8)
+    image[24:52, 20:56] = (230, 0, 0)
+    image[23, 20:56] = (20, 20, 20)
+
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[24:52, 20:56] = 1.0
+    matting[23, 20:56] = 0.25
+
+    key = luminance_key_alpha(image, (255, 255, 255))
+    repaired, info = repair_hard_edge_alpha(image, matting, key, (255, 255, 255))
+
+    assert info["accepted_components"] == 1
+    assert repaired[23, 22:54].min() > 0.94
+    assert repaired[:10, :10].max() == 0.0
+    np.testing.assert_array_equal(repaired[24:52, 20:56], matting[24:52, 20:56])
+
+
+def test_hard_edge_repair_rejects_unanchored_dark_speck():
+    h, w = 72, 72
+    image = np.full((h, w, 3), 255, dtype=np.uint8)
+    image[10:12, 10:12] = (20, 20, 20)
+
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[10:12, 10:12] = 0.25
+
+    key = luminance_key_alpha(image, (255, 255, 255))
+    repaired, info = repair_hard_edge_alpha(image, matting, key, (255, 255, 255))
+
+    assert info["accepted_components"] == 0
+    np.testing.assert_array_equal(repaired, matting)

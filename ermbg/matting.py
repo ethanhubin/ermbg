@@ -20,11 +20,13 @@ import numpy as np
 from loguru import logger
 
 from . import io
-from .diagnose import BackgroundDiagnoser, DiagnosisReport
+from .diagnose import BackgroundDiagnoser
 from .keyer import (
     gate_alpha_by_keyer,
     key_alpha,
     merge_alpha_components,
+    repair_hard_edge_alpha,
+    repair_alpha_with_known_bg_key,
     repair_alpha_with_subject_support,
 )
 from .router import Strategy, classify_strategy
@@ -112,6 +114,22 @@ def matte(
                 logger.info(f"keyer: patched {info['patched_components']} component(s) missed by matting net")
         else:
             keyer_info.update({"used": True, "patched_components": 0})
+        if strategy.bg_type in {"white", "black"} and strategy.image_type == "graphic":
+            full_color_key = key_alpha(image_srgb, B_srgb, mode="chromatic", thresholds=strategy.keyer_thresholds)
+            soft, repair_info = repair_alpha_with_known_bg_key(soft, full_color_key)
+            keyer_info["known_bg_repair"] = repair_info
+            if repair_info["accepted_components"]:
+                logger.info(
+                    f"keyer: repaired {repair_info['accepted_components']} known-B hole(s) "
+                    f"({repair_info['accepted_pixels']} px)"
+                )
+            soft, hard_edge_info = repair_hard_edge_alpha(image_srgb, soft, key, B_srgb)
+            keyer_info["hard_edge_repair"] = hard_edge_info
+            if hard_edge_info["accepted_components"]:
+                logger.info(
+                    f"keyer: repaired {hard_edge_info['accepted_components']} hard-edge component(s) "
+                    f"({hard_edge_info['accepted_pixels']} px)"
+                )
         if subject_support is not None:
             soft, repair_info = repair_alpha_with_subject_support(soft, key, subject_support)
             keyer_info["subject_repair"] = repair_info

@@ -52,6 +52,7 @@ def test_matte_cli_accepts_subject_mask(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     report = json.loads((out_dir / "panel.report.json").read_text())
-    repair = report["keyer"]["subject_repair"]
-    assert repair["accepted_components"] == 1
-    assert repair["accepted_pixels"] > 0
+    subject_repair = report["keyer"]["subject_repair"]
+    known_repair = report["keyer"].get("known_bg_repair", {})
+    assert subject_repair["used"] is True
+    assert subject_repair["accepted_pixels"] + known_repair.get("accepted_pixels", 0) > 0
