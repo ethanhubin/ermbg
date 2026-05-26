@@ -47,6 +47,8 @@ def test_index_serves_upload_ui():
     assert '<option value="auto" selected>auto</option>' in response.text
     assert 'canvas.addEventListener("wheel"' in response.text
     assert 'canvas.addEventListener("pointerdown"' in response.text
+    assert "selected: candidate.selected === true" in response.text
+    assert "setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0)" in response.text
 
 
 def test_matte_endpoint_returns_png(monkeypatch):

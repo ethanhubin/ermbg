@@ -41,24 +41,64 @@ def execute_plan(
     region_by_id = {region.id: region for region in regions}
     rgba = base_rgba.copy()
     operation_results: list[dict[str, Any]] = []
+    protected_mask = np.zeros(base_rgba.shape[:2], dtype=bool)
+
+    for op in plan.operations:
+        if op.tool in {"preserve_hole", "preserve_soft_alpha", "mark_translucent"}:
+            protected_mask |= region_by_id[op.region_id].mask
 
     for op in plan.operations:
         mask = region_by_id[op.region_id].mask
         if op.tool == "preserve_hole":
-            operation_results.append({"tool": op.tool, "region_id": op.region_id, "applied_pixels": 0})
+            operation_results.append(
+                {
+                    "tool": op.tool,
+                    "region_id": op.region_id,
+                    "applied_pixels": 0,
+                    "protected_pixels": int(mask.sum()),
+                }
+            )
+            continue
+        if op.tool == "preserve_soft_alpha":
+            operation_results.append(
+                {
+                    "tool": op.tool,
+                    "region_id": op.region_id,
+                    "applied_pixels": 0,
+                    "protected_pixels": int(mask.sum()),
+                }
+            )
+            continue
+        if op.tool == "mark_translucent":
+            operation_results.append(
+                {
+                    "tool": op.tool,
+                    "region_id": op.region_id,
+                    "applied_pixels": 0,
+                    "marked_pixels": int(mask.sum()),
+                    "protected_pixels": int(mask.sum()),
+                }
+            )
             continue
         if op.tool == "fill_same_color_region":
+            editable_mask = mask & ~protected_mask
             alpha_floor = float(op.parameters.get("alpha_floor", 1.0))
             alpha_u8 = int(np.clip(alpha_floor, 0.0, 1.0) * 255 + 0.5)
-            rgba[mask, :3] = image_srgb[mask]
-            rgba[mask, 3] = np.maximum(rgba[mask, 3], alpha_u8)
+            rgba[editable_mask, :3] = image_srgb[editable_mask]
+            rgba[editable_mask, 3] = np.maximum(rgba[editable_mask, 3], alpha_u8)
             operation_results.append(
-                {"tool": op.tool, "region_id": op.region_id, "applied_pixels": int(mask.sum())}
+                {
+                    "tool": op.tool,
+                    "region_id": op.region_id,
+                    "applied_pixels": int(editable_mask.sum()),
+                    "protected_pixels": int((mask & protected_mask).sum()),
+                }
             )
             continue
         if op.tool == "repair_opaque_interior":
             if background_color is None:
                 raise ValueError("repair_opaque_interior requires background_color")
+            editable_mask = mask & ~protected_mask
             alpha_floor = float(op.parameters.get("alpha_floor", 0.9))
             bg = tuple(int(c) for c in background_color)
             alpha = rgba[..., 3].astype(np.float32) / 255.0
@@ -70,14 +110,15 @@ def execute_plan(
             )
             repaired_u8 = (np.clip(repaired, 0.0, 1.0) * 255 + 0.5).astype(np.uint8)
             before = rgba[..., 3].copy()
-            rgba[mask, 3] = np.maximum(rgba[mask, 3], repaired_u8[mask])
-            changed = mask & (rgba[..., 3] > before)
+            rgba[editable_mask, 3] = np.maximum(rgba[editable_mask, 3], repaired_u8[editable_mask])
+            changed = editable_mask & (rgba[..., 3] > before)
             rgba[changed, :3] = image_srgb[changed]
             operation_results.append(
                 {
                     "tool": op.tool,
                     "region_id": op.region_id,
                     "applied_pixels": int(changed.sum()),
+                    "protected_pixels": int((mask & protected_mask).sum()),
                     "repair_info": info,
                 }
             )
@@ -85,6 +126,7 @@ def execute_plan(
         if op.tool == "snap_hard_edge":
             if background_color is None:
                 raise ValueError("snap_hard_edge requires background_color")
+            editable_mask = mask & ~protected_mask
             alpha_floor = float(op.parameters.get("alpha_floor", 0.95))
             bg = tuple(int(c) for c in background_color)
             alpha = rgba[..., 3].astype(np.float32) / 255.0
@@ -98,14 +140,15 @@ def execute_plan(
             )
             repaired_u8 = (np.clip(repaired, 0.0, 1.0) * 255 + 0.5).astype(np.uint8)
             before = rgba[..., 3].copy()
-            rgba[mask, 3] = np.maximum(rgba[mask, 3], repaired_u8[mask])
-            changed = mask & (rgba[..., 3] > before)
+            rgba[editable_mask, 3] = np.maximum(rgba[editable_mask, 3], repaired_u8[editable_mask])
+            changed = editable_mask & (rgba[..., 3] > before)
             rgba[changed, :3] = image_srgb[changed]
             operation_results.append(
                 {
                     "tool": op.tool,
                     "region_id": op.region_id,
                     "applied_pixels": int(changed.sum()),
+                    "protected_pixels": int((mask & protected_mask).sum()),
                     "repair_info": info,
                 }
             )

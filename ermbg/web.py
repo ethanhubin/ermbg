@@ -586,13 +586,15 @@ def index() -> str:
         url: candidate.rgba,
         revoke: false,
         label: candidate.label || `候选 ${index + 1}`,
+        selected: candidate.selected === true,
         meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`,
         downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png`,
       }));
       if (!candidates.length) {
         throw new Error("没有可显示的候选结果");
       }
-      setActiveCandidate(0);
+      const selectedIndex = candidates.findIndex((candidate) => candidate.selected);
+      setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0);
     }
 
     file.addEventListener("change", () => {
