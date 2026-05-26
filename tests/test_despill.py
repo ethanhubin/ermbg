@@ -46,6 +46,14 @@ def test_chroma_cap_reduces_green_channel_only():
     np.testing.assert_allclose(out[2], C_arr[0, 0, 2], atol=1e-6)
 
 
+def test_chroma_cap_respects_semantic_protect_mask():
+    """VLM-marked green subject material should not be capped as screen spill."""
+    C_lin, _, B_lin, _ = _make_polluted_pixel(fg_srgb=(30, 150, 80), alpha=1.0)
+    C_arr = C_lin.reshape(1, 1, 3)
+    out = chroma_cap(C_arr, B_lin, protect_mask=np.ones((1, 1), dtype=np.float32))
+    np.testing.assert_allclose(out, C_arr, atol=1e-6)
+
+
 def test_chroma_cap_no_op_on_black_bg():
     """Black bg has no dominant channel; chroma cap returns input."""
     C_lin, _, B_lin, _ = _make_polluted_pixel(fg_srgb=(200, 80, 60), bg_srgb=(0, 0, 0))

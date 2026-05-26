@@ -1,4 +1,5 @@
 {
+  "sample_id": "G07",
   "id": "prop_bundle_glass_metal_cloth",
   "category": "props",
   "white": "samples/vlm_eval_game/prop_bundle_glass_metal_cloth/white.png",

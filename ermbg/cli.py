@@ -141,6 +141,18 @@ def matte(
         "--subject-mask",
         help="Optional HxW ownership mask. Used only to repair subject-owned low-alpha holes.",
     ),
+    vlm_prior: bool = typer.Option(
+        False,
+        "--vlm-prior/--no-vlm-prior",
+        help="Use a VLM provider to classify semantic prior regions before despill.",
+    ),
+    vlm_provider: str = typer.Option("openai", help="openai | comfy-qwen"),
+    vlm_model: str = typer.Option("gpt-4o-mini", help="Vision model for --vlm-prior"),
+    vlm_prior_mode: str = typer.Option(
+        "shadow",
+        help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
+    ),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --vlm-provider comfy-qwen"),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -166,6 +178,73 @@ def matte(
         if not strat_preview.passthrough:
             image = io.load_rgb(input_path, background=bg_tuple)
 
+    semantic_prior = None
+    if vlm_prior:
+        from .shadow import estimate_shadow_alpha
+        from .vlm_semantic import (
+            ComfyQwenVLMSemanticPriorClient,
+            OpenAIVLMSemanticPriorClient,
+            build_vlm_semantic_request,
+            extract_shadow_candidate_regions,
+            extract_subject_material_candidate_regions,
+        )
+
+        soft_preview = seg.segment(image, object_prompt=object_prompt)
+        diag_preview = BackgroundDiagnoser().diagnose(image, soft_preview)
+        B_preview = np.array(diag_preview.background_color, dtype=np.uint8)
+        shadow_preview, _ = estimate_shadow_alpha(image, soft_preview, B_preview)
+        mode = vlm_prior_mode.strip().lower()
+        if mode not in {"shadow", "material", "all"}:
+            raise typer.BadParameter("--vlm-prior-mode must be shadow, material, or all")
+        regions = []
+        if mode in {"shadow", "all"}:
+            regions.extend(
+                extract_shadow_candidate_regions(
+                    image,
+                    soft_preview,
+                    B_preview,
+                    shadow_alpha=shadow_preview,
+                )
+            )
+        if mode in {"material", "all"}:
+            regions.extend(
+                extract_subject_material_candidate_regions(
+                    image,
+                    soft_preview,
+                    B_preview,
+                    shadow_alpha=shadow_preview,
+                )
+            )
+        logger.info(f"vlm-prior: mode={mode} found {len(regions)} candidate region(s)")
+        if regions:
+            request = build_vlm_semantic_request(
+                image_srgb=image,
+                subject_alpha=soft_preview,
+                background_color=tuple(int(c) for c in B_preview),
+                regions=regions,
+                shadow_alpha=shadow_preview,
+            )
+            if vlm_provider == "openai":
+                client = OpenAIVLMSemanticPriorClient(
+                    model=vlm_model,
+                    env_path=Path(".env"),
+                )
+            elif vlm_provider == "comfy-qwen":
+                client = ComfyQwenVLMSemanticPriorClient(
+                    url=comfy_url,
+                    model=vlm_model if vlm_model != "gpt-4o-mini" else "Qwen3-VL-4B-Instruct-FP8",
+                )
+            else:
+                raise typer.BadParameter("--vlm-provider must be openai or comfy-qwen")
+            semantic_prior = client.classify_request(request, regions, image.shape[:2])
+            prior_dict = semantic_prior.to_dict()
+            logger.info(
+                "vlm-prior: shadow_allowed="
+                f"{prior_dict['shadow_allowed']} shadow_ownership_pixels="
+                f"{prior_dict['shadow_ownership_pixels']} subject_material_pixels="
+                f"{prior_dict['subject_material_pixels']}"
+            )
+
     result = run_matte(
         image,
         source_alpha=source_alpha,
@@ -174,6 +253,7 @@ def matte(
         despill=despill if despill != "auto" else None,
         use_keyer=False if not use_keyer else None,
         subject_support=subject_support,
+        semantic_prior=semantic_prior,
         legacy_analytic_alpha=legacy_analytic_alpha,
     )
 
@@ -181,6 +261,7 @@ def matte(
     out_dir.mkdir(parents=True, exist_ok=True)
     io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
     io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
+    io.save_mask(out_dir / f"{stem}_shadow.png", result.debug["shadow_alpha"])
     io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
     io.save_mask(out_dir / f"{stem}_trimap.png", result.debug["trimap_u8"])
 
@@ -190,6 +271,8 @@ def matte(
         "despill_method": result.debug.get("despill_method"),
         "matting_model": matting_model,
         "keyer": result.debug.get("keyer", {}),
+        "shadow": result.debug.get("shadow", {}),
+        "semantic_prior": result.debug.get("semantic_prior", {}),
         "strategy": result.debug.get("strategy", {}),
     }
 
@@ -272,6 +355,7 @@ def phase1(
 
         io.save_rgba(case_dir / "rgba.png", result.rgba)
         io.save_mask(case_dir / "alpha.png", result.alpha)
+        io.save_mask(case_dir / "shadow.png", result.debug["shadow_alpha"])
         io.save_rgb(case_dir / "foreground.png", result.foreground_srgb)
         io.save_mask(case_dir / "trimap.png", result.debug["trimap_u8"])
 

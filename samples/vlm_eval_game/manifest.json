@@ -16,6 +16,7 @@
   "generation_policy": "Generate canonical white image first; green variant is image-edited from white reference with subject identity prioritized. Green background purity is allowed to be non-pixel-exact because AI editing may introduce mild variation.",
   "cases": [
     {
+      "sample_id": "G01",
       "id": "ui_hard_button_no_shadow",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_hard_button_no_shadow/white.png",
@@ -71,6 +72,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G02",
       "id": "ui_hard_button_soft_shadow",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_hard_button_soft_shadow/white.png",
@@ -128,6 +130,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G03",
       "id": "ui_hard_button_hard_shadow",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_hard_button_hard_shadow/white.png",
@@ -185,6 +188,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G04",
       "id": "ui_glass_button_soft_shadow",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_glass_button_soft_shadow/white.png",
@@ -242,6 +246,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G05",
       "id": "ui_panel_ribbon_slots",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_panel_ribbon_slots/white.png",
@@ -300,6 +305,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G06",
       "id": "ui_icon_glow_soft_hard",
       "category": "ui",
       "white": "samples/vlm_eval_game/ui_icon_glow_soft_hard/white.png",
@@ -358,6 +364,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G07",
       "id": "prop_bundle_glass_metal_cloth",
       "category": "props",
       "white": "samples/vlm_eval_game/prop_bundle_glass_metal_cloth/white.png",
@@ -416,6 +423,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G08",
       "id": "creature_pet_fur_outline",
       "category": "creature",
       "white": "samples/vlm_eval_game/creature_pet_fur_outline/white.png",
@@ -474,6 +482,7 @@
       "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact."
     },
     {
+      "sample_id": "G09",
       "id": "character_complex_fullbody",
       "category": "character",
       "white": "samples/vlm_eval_game/character_complex_fullbody/white.png",

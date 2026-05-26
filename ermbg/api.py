@@ -136,6 +136,11 @@ def matte_image(
     despill: str | None = None,
     use_keyer: bool | None = None,
     subject_mask: MaskLike | None = None,
+    vlm_prior: bool = False,
+    vlm_provider: str = "openai",
+    vlm_model: str = "gpt-4o-mini",
+    vlm_prior_mode: str = "shadow",
+    comfy_url: str = "http://192.168.0.8:8000",
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -156,6 +161,11 @@ def matte_image(
         subject_mask: optional H×W ownership mask from an independent segmenter.
             When provided, ERMBG may repair keyer-supported low-alpha holes
             inside this mask without raising the subject's external soft edge.
+        vlm_prior: call the optional VLM semantic-prior pass before
+            despill. The model only classifies CV candidate regions; local code
+            still computes alpha, foreground colors, and shadow strength.
+        vlm_provider: ``openai`` or ``comfy-qwen``.
+        vlm_prior_mode: ``shadow`` (default), ``material``, or ``all``.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
     subject_support = _to_mask(subject_mask, rgb.shape[:2], "subject_mask")
@@ -171,6 +181,66 @@ def matte_image(
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
     seg = build_segmenter(backend=backend, model_id=matting_model)
+    semantic_prior = None
+    if vlm_prior:
+        from .diagnose import BackgroundDiagnoser
+        from .shadow import estimate_shadow_alpha
+        from .vlm_semantic import (
+            ComfyQwenVLMSemanticPriorClient,
+            OpenAIVLMSemanticPriorClient,
+            build_vlm_semantic_request,
+            extract_shadow_candidate_regions,
+            extract_subject_material_candidate_regions,
+        )
+
+        soft = seg.segment(rgb)
+        diag = BackgroundDiagnoser().diagnose(rgb, soft)
+        B = np.asarray(diag.background_color, dtype=np.uint8)
+        shadow_alpha, _ = estimate_shadow_alpha(rgb, soft, B)
+        mode = vlm_prior_mode.strip().lower()
+        if mode not in {"shadow", "material", "all"}:
+            raise ValueError(f"Unknown vlm_prior_mode: {vlm_prior_mode!r}")
+        regions = []
+        if mode in {"shadow", "all"}:
+            regions.extend(
+                extract_shadow_candidate_regions(
+                    rgb,
+                    soft,
+                    B,
+                    shadow_alpha=shadow_alpha,
+                )
+            )
+        if mode in {"material", "all"}:
+            regions.extend(
+                extract_subject_material_candidate_regions(
+                    rgb,
+                    soft,
+                    B,
+                    shadow_alpha=shadow_alpha,
+                )
+            )
+        if regions:
+            request = build_vlm_semantic_request(
+                image_srgb=rgb,
+                subject_alpha=soft,
+                background_color=tuple(int(c) for c in B),
+                regions=regions,
+                shadow_alpha=shadow_alpha,
+            )
+            if vlm_provider == "openai":
+                client = OpenAIVLMSemanticPriorClient(
+                    model=vlm_model,
+                    env_path=Path(".env"),
+                )
+            elif vlm_provider == "comfy-qwen":
+                client = ComfyQwenVLMSemanticPriorClient(
+                    url=comfy_url,
+                    model=vlm_model if vlm_model != "gpt-4o-mini" else "Qwen3-VL-4B-Instruct-FP8",
+                )
+            else:
+                raise ValueError(f"Unknown vlm_provider: {vlm_provider!r}")
+            semantic_prior = client.classify_request(request, regions, rgb.shape[:2])
+
     result = _matte_internal(
         rgb,
         source_alpha=alpha,
@@ -178,6 +248,7 @@ def matte_image(
         despill=despill,
         use_keyer=use_keyer,
         subject_support=subject_support,
+        semantic_prior=semantic_prior,
     )
 
     # Build report.
@@ -187,6 +258,8 @@ def matte_image(
         "despill_method": result.debug.get("despill_method"),
         "matting_model": matting_model,
         "keyer": result.debug.get("keyer", {}),
+        "shadow": result.debug.get("shadow", {}),
+        "semantic_prior": result.debug.get("semantic_prior", {}),
         "strategy": result.debug.get("strategy", {}),
     }
 
@@ -197,6 +270,7 @@ def matte_image(
         stem = Path(src_path).stem if src_path else "matte"
         ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
         ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", result.debug["shadow_alpha"])
         ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
         ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", result.debug["trimap_u8"])
 

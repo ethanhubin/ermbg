@@ -1,4 +1,5 @@
 {
+  "sample_id": "G01",
   "id": "ui_hard_button_no_shadow",
   "category": "ui",
   "white": "samples/vlm_eval_game/ui_hard_button_no_shadow/white.png",

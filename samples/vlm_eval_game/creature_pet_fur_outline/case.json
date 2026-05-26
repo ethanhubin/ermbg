@@ -1,4 +1,5 @@
 {
+  "sample_id": "G08",
   "id": "creature_pet_fur_outline",
   "category": "creature",
   "white": "samples/vlm_eval_game/creature_pet_fur_outline/white.png",

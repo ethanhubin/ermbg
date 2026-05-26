@@ -1,0 +1,48 @@
+{
+  "id": "hard_outline_soft_fuzzy_heart",
+  "input": "samples/vlm_eval/hard_outline_soft_fuzzy_heart/input.png",
+  "background": [
+    255,
+    255,
+    255
+  ],
+  "primary_ambiguity": "mixed_hard_soft",
+  "human_label": "hard black outline and fuzzy edge need different policies",
+  "source_contact_sheet_cell": {
+    "row": 1,
+    "col": 2,
+    "bbox_xyxy": [
+      627,
+      314,
+      938,
+      625
+    ]
+  },
+  "expected": {
+    "target_tools": [
+      [
+        "snap_hard_edge"
+      ],
+      [
+        "preserve_soft_alpha"
+      ]
+    ],
+    "notes": "Expected region IDs are assigned after local evidence extraction; this case file records semantic intent only."
+  },
+  "green_input": "samples/vlm_eval/hard_outline_soft_fuzzy_heart/green_input.png",
+  "green_comparison": "samples/vlm_eval/hard_outline_soft_fuzzy_heart/compare_white_green.png",
+  "green_background": [
+    0,
+    200,
+    0
+  ],
+  "green_generation": {
+    "method": "replace near-white background with default ERMBG green",
+    "white_threshold_min_channel": 246,
+    "chroma_spread_max": 12,
+    "border_connected_background": true,
+    "included_internal_white_components": false,
+    "replaced_pixels": 56718,
+    "total_pixels": 96721
+  }
+}

@@ -46,6 +46,7 @@ def chroma_cap(
     background_linear: np.ndarray,
     alpha: np.ndarray | None = None,
     strength: float = 1.0,
+    protect_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Despill by capping the dominant-screen channel at the max of the others.
 
@@ -70,6 +71,9 @@ def chroma_cap(
     new_d = np.minimum(F[..., d], cap)
     out = F.copy()
     out[..., d] = (1.0 - strength) * F[..., d] + strength * new_d
+    if protect_mask is not None:
+        protect = np.clip(protect_mask.astype(np.float32), 0.0, 1.0)[..., None]
+        out = out * (1.0 - protect) + F * protect
     return out
 
 
@@ -253,6 +257,7 @@ def apply_despill(
     image_linear: np.ndarray,
     background_linear: np.ndarray,
     alpha: np.ndarray,
+    protect_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run the requested despill, return (alpha_out, foreground_out).
 
@@ -273,13 +278,13 @@ def apply_despill(
     if method == "auto":
         F = unmix_foreground(image_linear, background_linear, alpha)
         if has_dominant_screen_channel(background_linear) is not None:
-            F = chroma_cap(F, background_linear, alpha=alpha)
+            F = chroma_cap(F, background_linear, alpha=alpha, protect_mask=protect_mask)
         return alpha, F
     if method == "unmix":
         F = unmix_foreground(image_linear, background_linear, alpha)
         return alpha, F
     if method == "chroma_cap":
-        F = chroma_cap(image_linear, background_linear, alpha=alpha)
+        F = chroma_cap(image_linear, background_linear, alpha=alpha, protect_mask=protect_mask)
         # Then locally borrow on remaining halo pixels for safety.
         F = local_foreground_borrow(F, background_linear, alpha)
         return alpha, F

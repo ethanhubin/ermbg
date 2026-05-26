@@ -22,7 +22,11 @@ RegionKind = Literal[
     "soft_edge_band",
     "opaque_interior",
     "translucent_candidate",
+    "subject_material_candidate",
     "intentional_hole",
+    "subject_owned_region",
+    "owned_shadow_candidate",
+    "shadow_search_region",
     "unknown",
 ]
 
@@ -33,7 +37,11 @@ EvidenceKind = Literal[
     "soft_edge_band",
     "opaque_interior",
     "translucent_candidate",
+    "subject_material_candidate",
     "intentional_hole",
+    "subject_ownership_prior",
+    "owned_shadow_prior",
+    "shadow_search_prior",
     "unknown",
 ]
 
@@ -44,7 +52,11 @@ EVIDENCE_KIND_ALIASES: dict[str, EvidenceKind] = {
     "soft_edge_band": "soft_edge_band",
     "opaque_interior": "opaque_interior",
     "translucent_candidate": "translucent_candidate",
+    "subject_material_candidate": "subject_material_candidate",
     "intentional_hole": "intentional_hole",
+    "subject_owned_region": "subject_ownership_prior",
+    "owned_shadow_candidate": "owned_shadow_prior",
+    "shadow_search_region": "shadow_search_prior",
     "unknown": "unknown",
 }
 

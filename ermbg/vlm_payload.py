@@ -23,6 +23,7 @@ DEFAULT_VLM_INSTRUCTIONS = [
     "Return CandidatePlan JSON only.",
     "Use only registered tools and existing region_id values.",
     "Do not output alpha, RGBA, masks, or image-processing code.",
+    "For shadows, provide only semantic subject/search/ownership interpretation; local CV must verify known-background darkening and set opacity.",
     "Each candidate must be a complete whole-image interpretation, not one candidate per region.",
     "Combine compatible operations in the same candidate when they should be applied together.",
     "If two interpretations differ only in an ambiguous region, repeat shared repair operations in both candidates.",
@@ -37,7 +38,11 @@ REGION_COLORS: dict[str, tuple[int, int, int]] = {
     "soft_edge_band": (80, 160, 255),
     "opaque_interior": (80, 220, 120),
     "translucent_candidate": (180, 120, 255),
+    "subject_material_candidate": (40, 230, 180),
     "intentional_hole": (255, 80, 120),
+    "subject_owned_region": (60, 220, 120),
+    "owned_shadow_candidate": (90, 90, 255),
+    "shadow_search_region": (120, 140, 255),
     "unknown": (255, 255, 0),
 }
 

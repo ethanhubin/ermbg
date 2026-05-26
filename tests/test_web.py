@@ -41,6 +41,7 @@ def test_index_serves_upload_ui():
     assert "source-preview" in response.text
     assert "candidate-list" in response.text
     assert "候选缩略图" in response.text
+    assert 'href="/eval/game"' in response.text
     assert 'role="tablist"' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
@@ -49,6 +50,65 @@ def test_index_serves_upload_ui():
     assert 'canvas.addEventListener("pointerdown"' in response.text
     assert "selected: candidate.selected === true" in response.text
     assert "setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0)" in response.text
+
+
+def test_game_eval_page_serves_result_table():
+    client = TestClient(app)
+    response = client.get("/eval/game")
+    assert response.status_code == 200
+    assert "ERMBG Game Eval" in response.text
+    assert "vlm_eval_game_run_20260526" in response.text
+    assert 'id="run-select"' in response.text
+    assert "vlm_eval_game_shadow_rerun_20260526" in response.text
+    assert "ui_glass_button_soft_shadow" in response.text
+    assert '"sampleRows": 18' in response.text
+    assert '"sampleId": "G01"' in response.text
+    assert '"sampleCode": "G01-W"' in response.text
+    assert '"sampleCode": "G01-G"' in response.text
+    assert '"sampleVariant": "white"' in response.text
+    assert '"sampleVariant": "green"' in response.text
+    assert '"runStatus": "not-run"' in response.text
+    assert '"runStatus": "ran"' in response.text
+    assert '"regionsUrl": "/eval/game/regions/ui_hard_button_no_shadow"' in response.text
+    assert "<th class=\"regions-col\">regions</th>" in response.text
+    assert "<th class=\"preview-col\">purple</th>" in response.text
+    assert "<th class=\"preview-col\">gray</th>" not in response.text
+    assert "<th class=\"preview-col\">green</th>" not in response.text
+    assert "<th class=\"preview-col\">blue</th>" not in response.text
+    assert "modalStage.addEventListener(\"wheel\"" in response.text
+    assert "modalStage.addEventListener(\"pointerdown\"" in response.text
+    assert "/eval/game/file/out/vlm_eval_game_run_20260526/" in response.text
+
+
+def test_game_eval_page_can_switch_to_shadow_rerun_batch():
+    client = TestClient(app)
+    response = client.get("/eval/game?run=vlm_eval_game_shadow_rerun_20260526")
+    assert response.status_code == 200
+    assert "vlm_eval_game_shadow_rerun_20260526" in response.text
+    assert "out/vlm_eval_game_shadow_rerun_20260526/matte/summary_shadow_rerun.json" in response.text
+    assert "matte result" in response.text
+    assert "shadow_pixels" in response.text
+
+
+def test_game_eval_file_serves_eval_image():
+    client = TestClient(app)
+    response = client.get(
+        "/eval/game/file/out/vlm_eval_game_run_20260526/vlm_openai/ui_glass_button_soft_shadow/candidates/candidate_1.png"
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert Image.open(BytesIO(response.content)).mode == "RGBA"
+
+
+def test_game_eval_regions_serves_bbox_overlay():
+    client = TestClient(app)
+    response = client.get("/eval/game/regions/ui_glass_button_soft_shadow")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    image = Image.open(BytesIO(response.content))
+    assert image.mode == "RGBA"
+    assert image.size[0] > 0
+    assert image.size[1] > 0
 
 
 def test_matte_endpoint_returns_png(monkeypatch):

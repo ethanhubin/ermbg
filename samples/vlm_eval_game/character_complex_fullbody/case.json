@@ -1,4 +1,5 @@
 {
+  "sample_id": "G09",
   "id": "character_complex_fullbody",
   "category": "character",
   "white": "samples/vlm_eval_game/character_complex_fullbody/white.png",

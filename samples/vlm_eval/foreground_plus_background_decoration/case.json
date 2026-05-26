@@ -1,0 +1,41 @@
+{
+  "id": "foreground_plus_background_decoration",
+  "input": "samples/vlm_eval/foreground_plus_background_decoration/input.png",
+  "background": [
+    255,
+    255,
+    255
+  ],
+  "primary_ambiguity": "ownership_ambiguity",
+  "human_label": "lantern is foreground and blossoms are decorative ambiguity",
+  "source_contact_sheet_cell": {
+    "row": 3,
+    "col": 1,
+    "bbox_xyxy": [
+      314,
+      940,
+      625,
+      1251
+    ]
+  },
+  "expected": {
+    "target_tools": [],
+    "notes": "Expected region IDs are assigned after local evidence extraction; this case file records semantic intent only."
+  },
+  "green_input": "samples/vlm_eval/foreground_plus_background_decoration/green_input.png",
+  "green_comparison": "samples/vlm_eval/foreground_plus_background_decoration/compare_white_green.png",
+  "green_background": [
+    0,
+    200,
+    0
+  ],
+  "green_generation": {
+    "method": "replace near-white background with default ERMBG green",
+    "white_threshold_min_channel": 246,
+    "chroma_spread_max": 12,
+    "border_connected_background": true,
+    "included_internal_white_components": false,
+    "replaced_pixels": 77130,
+    "total_pixels": 96721
+  }
+}

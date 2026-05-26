@@ -81,9 +81,31 @@ tests/                pytest, 22 tests passing
 - Tests must keep passing (`pytest -q`). When adding modules, add a smoke test.
 - The python venv is **`.venv/`** (managed by uv, Python 3.12). All `.venv/bin/ermbg`, `.venv/bin/pytest`, `.venv/bin/python` commands.
 
+### Test / eval batch convention
+
+- All sample tests, visual regressions, VLM/game eval reruns, probe comparisons, and one-off debugging runs that produce artifacts must write into a **batch directory** under `out/`.
+- Do not write new eval artifacts directly into loose ad-hoc paths. Use a stable batch id such as `out/vlm_eval_game_<purpose>_<YYYYMMDD>/` or an explicit user-provided batch name.
+- Each batch should be self-contained and browsable: keep per-case outputs under the batch root and write a machine-readable summary (`summary.json`, `summary_*.json`, or `eval_report.json`) at a predictable location.
+- Web/debug tooling should discover and browse batches rather than hard-code a single result directory. New test flows should automatically register their outputs through the batch summary.
+- When re-running a specific sample such as `G02-G`, still run it through the same batch flow and record the selected sample id / variant in the summary; do not create orphan outputs.
+
 ## Default decisions (Phase 1.2 settled)
 
 - **Matting model**: `ZhengPeng7/BiRefNet-matting` (MIT, matting-trained)
 - **Background convention**: green-screen RGB (0, 200, 0) — see `ermbg.probe.prompts.GREEN_SCREEN_PROMPT`
 - **Despill default**: `chroma_cap` (auto-degrades to `local_borrow` when B has no dominant channel)
 - **QA backgrounds**: black / white / grey / cyan / magenta / checker, plus a `_lightwrap` variant for each
+
+### VLM / shadow semantic prior contract
+
+- `--vlm-prior` is already wired as a semantic constraint mechanism, not a future placeholder.
+- Current flow is:
+  1. local CV computes known-background scalar-darkening evidence;
+  2. `ermbg.vlm_semantic.extract_shadow_candidate_regions()` converts that evidence into candidate regions;
+  3. OpenAI or Comfy Qwen classifies each candidate as `shadow`, `subject`, `subject_material`, `shadow_search`, `background`, or `uncertain`;
+  4. `ermbg.matting.matte()` passes the accepted semantic masks into `ShadowPrior`;
+  5. `ermbg.shadow.estimate_shadow_alpha()` still re-measures pixel opacity locally from `C_linear ~= scale * B_linear`.
+- VLM must not generate alpha, foreground RGB, or final RGBA. It only constrains ownership/search regions.
+- Do not diagnose shadow ambiguity as "missing VLM"; first inspect whether the candidate generator gave VLM separable regions.
+- Known current limitation: if transparent/subject material and true shadow are already merged into one large scalar-darkening candidate, VLM can only classify the merged region. The next general fix is candidate over-segmentation / region splitting before VLM, not threshold tuning.
+- G02 soft shadow handoff is in `docs/g02-soft-shadow-analysis.md`; keep same-color material recovery separate from shadow acceptance unless explicitly testing material mode.

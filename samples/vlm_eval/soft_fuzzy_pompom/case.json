@@ -1,0 +1,45 @@
+{
+  "id": "soft_fuzzy_pompom",
+  "input": "samples/vlm_eval/soft_fuzzy_pompom/input.png",
+  "background": [
+    255,
+    255,
+    255
+  ],
+  "primary_ambiguity": "soft_edge_band",
+  "human_label": "hair-like fuzzy edge should remain soft",
+  "source_contact_sheet_cell": {
+    "row": 1,
+    "col": 1,
+    "bbox_xyxy": [
+      314,
+      314,
+      625,
+      625
+    ]
+  },
+  "expected": {
+    "target_tools": [
+      [
+        "preserve_soft_alpha"
+      ]
+    ],
+    "notes": "Expected region IDs are assigned after local evidence extraction; this case file records semantic intent only."
+  },
+  "green_input": "samples/vlm_eval/soft_fuzzy_pompom/green_input.png",
+  "green_comparison": "samples/vlm_eval/soft_fuzzy_pompom/compare_white_green.png",
+  "green_background": [
+    0,
+    200,
+    0
+  ],
+  "green_generation": {
+    "method": "replace near-white background with default ERMBG green",
+    "white_threshold_min_channel": 246,
+    "chroma_spread_max": 12,
+    "border_connected_background": true,
+    "included_internal_white_components": false,
+    "replaced_pixels": 53200,
+    "total_pixels": 96721
+  }
+}

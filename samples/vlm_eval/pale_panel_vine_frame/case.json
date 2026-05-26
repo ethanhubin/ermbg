@@ -1,0 +1,45 @@
+{
+  "id": "pale_panel_vine_frame",
+  "input": "samples/vlm_eval/pale_panel_vine_frame/input.png",
+  "background": [
+    255,
+    255,
+    255
+  ],
+  "primary_ambiguity": "opaque_interior",
+  "human_label": "pale panel is subject-owned opaque area",
+  "source_contact_sheet_cell": {
+    "row": 1,
+    "col": 3,
+    "bbox_xyxy": [
+      940,
+      314,
+      1251,
+      625
+    ]
+  },
+  "expected": {
+    "target_tools": [
+      [
+        "repair_opaque_interior"
+      ]
+    ],
+    "notes": "Expected region IDs are assigned after local evidence extraction; this case file records semantic intent only."
+  },
+  "green_input": "samples/vlm_eval/pale_panel_vine_frame/green_input.png",
+  "green_comparison": "samples/vlm_eval/pale_panel_vine_frame/compare_white_green.png",
+  "green_background": [
+    0,
+    200,
+    0
+  ],
+  "green_generation": {
+    "method": "replace near-white background with default ERMBG green",
+    "white_threshold_min_channel": 246,
+    "chroma_spread_max": 12,
+    "border_connected_background": true,
+    "included_internal_white_components": false,
+    "replaced_pixels": 46935,
+    "total_pixels": 96721
+  }
+}

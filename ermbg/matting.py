@@ -31,6 +31,7 @@ from .keyer import (
 )
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
+from .shadow import ShadowPrior, composite_subject_with_shadow, estimate_shadow_alpha
 from .types import MattingResult, Trimap
 
 
@@ -51,6 +52,7 @@ def matte(
     despill: str | None = None,
     use_keyer: bool | None = None,
     subject_support: np.ndarray | None = None,
+    semantic_prior: Any | None = None,
     legacy_analytic_alpha: bool = False,
 ) -> MattingResult:
     """Run the matting pipeline on one sRGB uint8 image.
@@ -96,6 +98,41 @@ def matte(
     diag = diagnoser if diagnoser is not None else BackgroundDiagnoser()
     report = diag.diagnose(image_srgb, soft)
     B_srgb = np.array(report.background_color, dtype=np.uint8)
+    semantic_subject_mask = getattr(semantic_prior, "subject_mask", None)
+    if subject_support is not None and semantic_subject_mask is not None:
+        shadow_subject_mask = np.maximum(subject_support, semantic_subject_mask)
+        shadow_prior_source = "subject_support+semantic_prior"
+    elif subject_support is not None:
+        shadow_subject_mask = subject_support
+        shadow_prior_source = "subject_support"
+    elif semantic_subject_mask is not None:
+        shadow_subject_mask = semantic_subject_mask
+        shadow_prior_source = "semantic_prior"
+    else:
+        shadow_subject_mask = None
+        shadow_prior_source = ""
+    shadow_prior = (
+        ShadowPrior(
+            subject_mask=shadow_subject_mask,
+            shadow_search_mask=getattr(semantic_prior, "shadow_search_mask", None),
+            shadow_ownership_mask=getattr(semantic_prior, "shadow_ownership_mask", None),
+            shadow_allowed=getattr(semantic_prior, "shadow_allowed", True),
+            source=shadow_prior_source,
+        )
+        if shadow_subject_mask is not None
+        or getattr(semantic_prior, "shadow_search_mask", None) is not None
+        or getattr(semantic_prior, "shadow_ownership_mask", None) is not None
+        or getattr(semantic_prior, "shadow_allowed", True) is False
+        else None
+    )
+    raw_soft = soft.copy()
+    pre_shadow_alpha, pre_shadow_info = estimate_shadow_alpha(
+        image_srgb,
+        raw_soft,
+        B_srgb,
+        prior=shadow_prior,
+    )
+    shadow_protect = pre_shadow_alpha > 0.0
 
     # ------------------------------------------------------------------ Keyer
     keyer_info: dict[str, Any] = {"used": False, "strategy_mode": strategy.keyer_mode}
@@ -148,6 +185,13 @@ def matte(
                     f"(mean α drop {gate_info['mean_drop']:.3f})"
                 )
 
+    if shadow_protect.any():
+        raised_by_keyer = shadow_protect & (soft > raw_soft)
+        if raised_by_keyer.any():
+            soft[raised_by_keyer] = raw_soft[raised_by_keyer]
+        keyer_info["shadow_protected_pixels"] = int(shadow_protect.sum())
+        keyer_info["shadow_keyer_raise_reverted_pixels"] = int(raised_by_keyer.sum())
+
     if report.verdict == "not-pure-bg":
         logger.warning(
             f"diagnose: verdict=not-pure-bg (purity_sigma={report.purity_sigma:.2f} > "
@@ -163,8 +207,31 @@ def matte(
         alpha, F_lin, trimap = _legacy_path(image_srgb, soft, C_lin, B_lin, B_srgb)
         despill_used = "legacy"
     else:
-        alpha, F_lin, trimap = _new_path(soft, C_lin, B_lin, despill_method)
+        alpha, F_lin, trimap = _new_path(
+            soft,
+            C_lin,
+            B_lin,
+            despill_method,
+            protect_mask=getattr(semantic_prior, "subject_material_mask", None),
+        )
         despill_used = despill_method
+
+    subject_alpha = alpha.copy()
+    shadow_alpha, shadow_info = estimate_shadow_alpha(
+        image_srgb,
+        subject_alpha,
+        B_srgb,
+        prior=shadow_prior,
+    )
+    if not shadow_info["detected"] and pre_shadow_info["detected"]:
+        shadow_alpha = pre_shadow_alpha
+        shadow_info = dict(pre_shadow_info)
+        shadow_info["source"] = "pre_keyer"
+    else:
+        shadow_info["source"] = "post_despill"
+    if shadow_info["detected"]:
+        alpha, F_lin = composite_subject_with_shadow(F_lin, subject_alpha, shadow_alpha)
+        trimap = _trimap_from_alpha(alpha)
 
     F_srgb = io.linear_to_srgb_u8(F_lin)
     alpha_u8 = (np.clip(alpha, 0, 1) * 255 + 0.5).astype(np.uint8)
@@ -182,6 +249,10 @@ def matte(
         diagnosis=report,
         debug={
             "soft_mask": soft,
+            "subject_alpha": subject_alpha,
+            "shadow_alpha": shadow_alpha,
+            "shadow": shadow_info,
+            "semantic_prior": semantic_prior.to_dict() if hasattr(semantic_prior, "to_dict") else {},
             "trimap_u8": trimap_to_uint8(trimap),
             "despill_method": despill_used,
             "keyer": keyer_info,
@@ -221,6 +292,22 @@ def _passthrough_result(
         diagnosis=None,
         debug={
             "soft_mask": alpha,
+            "subject_alpha": alpha,
+            "shadow_alpha": np.zeros((h, w), dtype=np.float32),
+            "shadow": {
+                "method": "none",
+                "detected": False,
+                "applied": False,
+                "pixels": 0,
+                "bbox_xyxy": [0, 0, 0, 0],
+                "mean_alpha": 0.0,
+                "p95_alpha": 0.0,
+                "max_alpha": 0.0,
+                "accepted_components": 0,
+                "component_areas": [],
+                "rejected_components": 0,
+                "reason": "rgba passthrough",
+            },
             "trimap_u8": trimap_to_uint8(trimap),
             "despill_method": "none",
             "keyer": {"used": False, "strategy_mode": None},
@@ -243,12 +330,19 @@ def _new_path(
     C_lin: np.ndarray,
     B_lin: np.ndarray,
     despill_method: str,
+    protect_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, Trimap]:
     """BiRefNet-matting alpha + chosen despill."""
     from . import despill as despill_mod
 
     alpha = soft.astype(np.float32)
-    alpha_out, F_lin = despill_mod.apply_despill(despill_method, C_lin, B_lin, alpha)
+    alpha_out, F_lin = despill_mod.apply_despill(
+        despill_method,
+        C_lin,
+        B_lin,
+        alpha,
+        protect_mask=protect_mask,
+    )
     F_lin = np.clip(F_lin, 0.0, 1.0)
     trimap = _trimap_from_alpha(alpha_out)
     return alpha_out, F_lin, trimap

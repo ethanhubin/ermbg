@@ -7,15 +7,18 @@ run ``matte_image``, preview the returned RGBA PNG, and download it.
 from __future__ import annotations
 
 import base64
+import json
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 try:
-    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-    from fastapi.responses import HTMLResponse, Response
+    from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+    from fastapi.responses import FileResponse, HTMLResponse, Response
 except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
@@ -23,6 +26,20 @@ from .api import matte_image
 from .candidates import MatteCandidate, generate_matte_candidates
 
 ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet"}
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_run_20260526"
+GAME_EVAL_PREFIX = "vlm_eval_game"
+SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+REGION_BOX_COLORS = {
+    "same_bg_enclosed_region": (0, 153, 255, 235),
+    "alpha_keyer_disagreement": (179, 92, 255, 235),
+    "hard_edge_candidate": (255, 160, 0, 235),
+}
+REGION_FILL_COLORS = {
+    "same_bg_enclosed_region": (0, 153, 255, 28),
+    "alpha_keyer_disagreement": (179, 92, 255, 24),
+    "hard_edge_candidate": (255, 160, 0, 24),
+}
 
 app = FastAPI(title="ERMBG Web", version="0.1.0")
 
@@ -88,6 +105,19 @@ def index() -> str:
       font-size: 18px;
       font-weight: 700;
       letter-spacing: 0;
+    }
+    .header-actions {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .nav-link {
+      color: #196f5a;
+      font-size: 13px;
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
     }
     main {
       width: min(1120px, 100%);
@@ -380,7 +410,10 @@ def index() -> str:
 <body>
   <header>
     <h1>ERMBG</h1>
-    <span class="status" id="strategy">就绪</span>
+    <div class="header-actions">
+      <a class="nav-link" href="/eval/game">Game Eval</a>
+      <span class="status" id="strategy">就绪</span>
+    </div>
   </header>
   <main>
     <form id="matte-form">
@@ -782,6 +815,1038 @@ def matte_candidates_endpoint(
         "background": list(result.background_color),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
     }
+
+
+def _load_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"Missing file: {path.relative_to(PROJECT_ROOT)}") from e
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Invalid JSON: {path.relative_to(PROJECT_ROOT)}") from e
+
+
+def _resolve_project_path(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _image_url(path_value: str | Path | None) -> str | None:
+    if path_value is None:
+        return None
+    path = _resolve_project_path(path_value)
+    if not path.exists() or path.suffix.lower() not in SERVABLE_IMAGE_SUFFIXES:
+        return None
+    rel = path.relative_to(PROJECT_ROOT).as_posix()
+    return f"/eval/game/file/{quote(rel, safe='/')}"
+
+
+def _candidate_result_items(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    payload = _load_json(path)
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return [payload]
+    return []
+
+
+def _candidate_tools(candidate: dict[str, object], fallback: list[str]) -> list[str]:
+    plan = candidate.get("plan")
+    if not isinstance(plan, dict):
+        return fallback
+    operations = plan.get("operations")
+    if not isinstance(operations, list):
+        return fallback
+    tools: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        tool = operation.get("tool")
+        if isinstance(tool, str) and tool not in tools:
+            tools.append(tool)
+    return tools or fallback
+
+
+def _candidate_regions(candidate_results: list[dict[str, object]]) -> list[dict[str, object]]:
+    for candidate in candidate_results:
+        regions = candidate.get("regions")
+        if isinstance(regions, list):
+            return [region for region in regions if isinstance(region, dict)]
+    return []
+
+
+def _game_sample_paths(case_id: str) -> dict[str, str]:
+    case_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / case_id / "case.json"
+    if case_path.exists():
+        payload = _load_json(case_path)
+        if isinstance(payload, dict):
+            paths = {
+                variant: path
+                for variant in ("white", "green")
+                if isinstance(path := payload.get(variant), str)
+            }
+            if paths:
+                return paths
+    return {
+        "white": f"samples/vlm_eval_game/{case_id}/white.png",
+        "green": f"samples/vlm_eval_game/{case_id}/green.png",
+    }
+
+
+def _sample_variant_from_path(path_value: object) -> str | None:
+    if not isinstance(path_value, str):
+        return None
+    stem = Path(path_value).stem.lower()
+    if stem in {"white", "green"}:
+        return stem
+    return None
+
+
+def _game_sample_ids() -> dict[str, str]:
+    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
+    manifest = _load_json(manifest_path)
+    if not isinstance(manifest, dict):
+        return {}
+    cases = manifest.get("cases")
+    if not isinstance(cases, list):
+        return {}
+    sample_ids: dict[str, str] = {}
+    for index, item in enumerate(cases, start=1):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        fallback = f"G{index:02d}"
+        sample_id = item.get("sample_id")
+        sample_ids[item["id"]] = sample_id if isinstance(sample_id, str) else fallback
+    return sample_ids
+
+
+def _game_eval_root_has_data(root: Path) -> bool:
+    if (root / "vlm_openai" / "eval_report.json").exists():
+        return True
+    return _game_matte_summary_path(root) is not None
+
+
+def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
+    out_root = PROJECT_ROOT / "out"
+    roots = [
+        path
+        for path in sorted(out_root.glob(f"{GAME_EVAL_PREFIX}*"))
+        if path.is_dir() and _game_eval_root_has_data(path)
+    ]
+    if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
+        roots.insert(0, DEFAULT_GAME_EVAL_ROOT)
+
+    selected = (selected_root or DEFAULT_GAME_EVAL_ROOT).resolve()
+    runs: list[dict[str, object]] = []
+    for root in roots:
+        runs.append(
+            {
+                "id": root.name,
+                "label": root.name,
+                "selected": root.resolve() == selected,
+                "url": f"/eval/game?run={quote(root.name, safe='')}",
+            }
+        )
+    return runs
+
+
+def _game_eval_root(run: str | None = None) -> Path:
+    if not run:
+        return DEFAULT_GAME_EVAL_ROOT
+    if "/" in run or "\\" in run or run.startswith("."):
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
+    root = (PROJECT_ROOT / "out" / run).resolve()
+    if not _is_relative_to(root, (PROJECT_ROOT / "out").resolve()):
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
+    if not root.is_dir() or not _game_eval_root_has_data(root):
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
+    return root
+
+
+def _game_matte_summary_path(root: Path) -> Path | None:
+    matte_root = root / "matte"
+    candidates = [
+        matte_root / "summary_shadow_rerun.json",
+        matte_root / "summary.json",
+    ]
+    candidates.extend(sorted(matte_root.glob("summary*.json")))
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _game_report_rows(root: Path = DEFAULT_GAME_EVAL_ROOT) -> list[dict[str, object]]:
+    report_path = root / "vlm_openai" / "eval_report.json"
+    report = _load_json(report_path)
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=500, detail="Game eval report must be a JSON object.")
+
+    rows = report.get("rows")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=500, detail="Game eval report is missing rows.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _game_case_out_dir(row: dict[str, object], root: Path = DEFAULT_GAME_EVAL_ROOT) -> Path:
+    case_id = str(row.get("case_id", "unknown"))
+    out_dir_value = row.get("out_dir")
+    return _resolve_project_path(out_dir_value) if isinstance(out_dir_value, str) else root / "vlm_openai" / case_id
+
+
+def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, object]) -> str | None:
+    for value in (summary.get("rgba"), summary.get("matte"), summary.get("output")):
+        if isinstance(value, str):
+            url = _image_url(value)
+            if url:
+                return url
+    for name in (f"{sample_variant}_rgba.png", "rgba.png"):
+        url = _image_url(out_dir / name)
+        if url:
+            return url
+    matches = sorted(out_dir.glob("*_rgba.png"))
+    return _image_url(matches[0]) if matches else None
+
+
+def _game_region_url(root: Path, case_id: str) -> str:
+    base = f"/eval/game/regions/{quote(case_id, safe='')}"
+    if root.resolve() == DEFAULT_GAME_EVAL_ROOT.resolve():
+        return base
+    return f"{base}?run={quote(root.name, safe='')}"
+
+
+def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
+    summary_path = _game_matte_summary_path(root)
+    if summary_path is None:
+        raise HTTPException(status_code=404, detail="Game eval summary not found.")
+    payload = _load_json(summary_path)
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=500, detail="Game matte summary must be a JSON list.")
+
+    sample_ids = _game_sample_ids()
+    cases: list[dict[str, object]] = []
+    for case_index, row in enumerate(item for item in payload if isinstance(item, dict)):
+        case_id = str(row.get("id") or row.get("image") or row.get("case_id") or f"case_{case_index + 1}")
+        sample_id = sample_ids.get(case_id, f"G{case_index + 1:02d}")
+        out_dir = _resolve_project_path(str(row.get("out_dir"))) if isinstance(row.get("out_dir"), str) else root / "matte" / case_id
+        input_path = row.get("input")
+        active_variant = _sample_variant_from_path(input_path) or "green"
+        sample_paths = _game_sample_paths(case_id)
+        shadow_detected = bool(row.get("shadow_detected", False))
+        shadow_pixels = int(row.get("shadow_pixels", 0) or 0)
+        strategy = str(row.get("strategy", ""))
+        matte_url = _case_matte_url(out_dir, active_variant, row)
+        candidate = {
+            "id": "matte",
+            "label": "matte result",
+            "selected": True,
+            "tools": [strategy] if strategy else [],
+            "reason": f"shadow={shadow_detected}, pixels={shadow_pixels}",
+            "url": matte_url,
+        }
+
+        for sample_variant, sample_path in sample_paths.items():
+            is_active_run = sample_variant == active_variant
+            sample_code = f"{sample_id}-{sample_variant[:1].upper()}"
+            cases.append(
+                {
+                    "caseId": case_id,
+                    "sampleId": sample_id,
+                    "sampleCode": sample_code,
+                    "sampleVariant": sample_variant,
+                    "runStatus": "ran" if is_active_run else "not-run",
+                    "category": "matte-rerun" if is_active_run else "",
+                    "verdict": strategy if is_active_run else "not-run",
+                    "expectedHit": shadow_detected if is_active_run else False,
+                    "regionCount": shadow_pixels if is_active_run else 0,
+                    "counts": {"shadow_pixels": shadow_pixels} if is_active_run else {},
+                    "selectedTools": [strategy] if is_active_run and strategy else [],
+                    "primaryAmbiguity": f"shadow mean={float(row.get('shadow_mean_alpha', 0.0) or 0.0):.3f}, p95={float(row.get('shadow_p95_alpha', 0.0) or 0.0):.3f}" if is_active_run else "",
+                    "originalUrl": _image_url(sample_path),
+                    "regionsUrl": None,
+                    "matteUrl": matte_url if is_active_run else None,
+                    "candidates": [candidate] if is_active_run and matte_url else [],
+                }
+            )
+
+    return {
+        "runId": root.name,
+        "model": "matte rerun",
+        "success": f"{sum(1 for item in cases if item.get('runStatus') == 'ran')}/{len(payload)}",
+        "expectedHit": f"{sum(1 for item in payload if isinstance(item, dict) and item.get('shadow_detected'))}/{len(payload)}",
+        "sampleRows": len(cases),
+        "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
+        "vlmRoot": "",
+        "cases": cases,
+    }
+
+
+def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
+    report_path = root / "vlm_openai" / "eval_report.json"
+    if not report_path.exists():
+        data = _game_eval_data_from_matte_summary(root)
+        data["runs"] = _game_eval_runs(root)
+        data["selectedRun"] = root.name
+        return data
+
+    report = _load_json(report_path)
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=500, detail="Game eval report must be a JSON object.")
+
+    rows = _game_report_rows(root)
+    sample_ids = _game_sample_ids()
+
+    cases: list[dict[str, object]] = []
+    for case_index, row in enumerate(rows, start=1):
+        case_id = str(row.get("case_id", "unknown"))
+        sample_id = sample_ids.get(case_id, f"G{case_index:02d}")
+        out_dir = _game_case_out_dir(row, root)
+        summary_path = out_dir / "summary.json"
+        summary = _load_json(summary_path) if summary_path.exists() else {}
+        if not isinstance(summary, dict):
+            summary = {}
+
+        fallback_tools = [tool for tool in row.get("selected_tools", []) if isinstance(tool, str)]
+        candidate_results_path = out_dir / "candidate_results.json"
+        candidate_results = _candidate_result_items(candidate_results_path)
+        candidate_paths = [path for path in summary.get("candidate_paths", []) if isinstance(path, str)]
+        if not candidate_paths:
+            selected_ids = [plan_id for plan_id in row.get("selected_plan_ids", []) if isinstance(plan_id, str)]
+            candidate_paths = [str(out_dir / "candidates" / f"{plan_id}.png") for plan_id in selected_ids]
+        if not candidate_paths:
+            candidate_paths = [str(path) for path in sorted((out_dir / "candidates").glob("*.png"))]
+
+        candidates: list[dict[str, object]] = []
+        result_by_path: dict[str, dict[str, object]] = {}
+        for candidate in candidate_results:
+            candidate_path = candidate.get("path")
+            if isinstance(candidate_path, str):
+                result_by_path[_resolve_project_path(candidate_path).as_posix()] = candidate
+
+        for index, candidate_path in enumerate(candidate_paths):
+            resolved_candidate_path = _resolve_project_path(candidate_path)
+            candidate = result_by_path.get(resolved_candidate_path.as_posix(), {})
+            plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+            candidate_id = candidate.get("id") or (plan.get("id") if isinstance(plan, dict) else None) or resolved_candidate_path.stem
+            label = candidate.get("label") or (plan.get("label") if isinstance(plan, dict) else None) or str(candidate_id)
+            candidates.append(
+                {
+                    "id": str(candidate_id),
+                    "label": str(label),
+                    "selected": bool(candidate.get("selected", index == 0)),
+                    "tools": _candidate_tools(candidate, fallback_tools),
+                    "reason": str((plan.get("reason") if isinstance(plan, dict) else "") or row.get("selected_reason", "")),
+                    "url": _image_url(resolved_candidate_path),
+                }
+            )
+
+        sample_paths = _game_sample_paths(case_id)
+        active_variant = _sample_variant_from_path(summary.get("input")) or "green"
+        for sample_variant, sample_path in sample_paths.items():
+            is_active_run = sample_variant == active_variant
+            sample_code = f"{sample_id}-{sample_variant[:1].upper()}"
+            cases.append(
+                {
+                    "caseId": case_id,
+                    "sampleId": sample_id,
+                    "sampleCode": sample_code,
+                    "sampleVariant": sample_variant,
+                    "runStatus": "ran" if is_active_run else "not-run",
+                    "category": row.get("category", ""),
+                    "verdict": row.get("diagnosis_verdict", "") if is_active_run else "not-run",
+                    "expectedHit": bool(row.get("expected_hit")) if is_active_run else False,
+                    "regionCount": row.get("region_count", 0) if is_active_run else 0,
+                    "counts": row.get("counts", {}) if is_active_run else {},
+                    "selectedTools": fallback_tools if is_active_run else [],
+                    "primaryAmbiguity": row.get("primary_ambiguity", ""),
+                    "originalUrl": _image_url(sample_path),
+                    "regionsUrl": _game_region_url(root, case_id) if is_active_run else None,
+                    "matteUrl": _image_url(summary.get("rgba") or root / "matte" / case_id / "rgba.png")
+                    if is_active_run
+                    else None,
+                    "candidates": candidates if is_active_run else [],
+                }
+            )
+
+    return {
+        "runId": report.get("run_id", root.name),
+        "model": report.get("model", ""),
+        "success": f"{report.get('ok_count', 0)}/{report.get('case_count', len(cases))}",
+        "expectedHit": f"{report.get('expected_tool_hit_count', 0)}/{report.get('case_count', len(cases))}",
+        "sampleRows": len(cases),
+        "reportPath": str(report_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
+        "vlmRoot": str((root / "vlm_openai").relative_to(PROJECT_ROOT)),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "cases": cases,
+    }
+
+
+@app.get("/eval/game/file/{rel_path:path}")
+def game_eval_file(rel_path: str) -> FileResponse:
+    path = (PROJECT_ROOT / rel_path).resolve()
+    allowed_roots = [PROJECT_ROOT / "out", PROJECT_ROOT / "samples"]
+    if not any(_is_relative_to(path, root.resolve()) for root in allowed_roots):
+        raise HTTPException(status_code=404, detail="File is outside eval output roots.")
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in SERVABLE_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=404, detail="Image not found.")
+    return FileResponse(path)
+
+
+def _draw_region_overlay(input_path: Path, regions: list[dict[str, object]]) -> bytes:
+    image = Image.open(input_path).convert("RGBA")
+    draw = ImageDraw.Draw(image, "RGBA")
+    w, h = image.size
+    line_width = max(2, min(w, h) // 220)
+
+    for region in regions:
+        bbox = region.get("bbox_xyxy")
+        kind = str(region.get("kind", "unknown"))
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [int(round(float(value))) for value in bbox]
+        except (TypeError, ValueError):
+            continue
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(0, min(w - 1, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(0, min(h - 1, y2))
+        if x2 <= x1:
+            x2 = min(w - 1, x1 + line_width)
+        if y2 <= y1:
+            y2 = min(h - 1, y1 + line_width)
+        outline = REGION_BOX_COLORS.get(kind, (255, 255, 255, 235))
+        fill = REGION_FILL_COLORS.get(kind, (255, 255, 255, 20))
+        draw.rectangle((x1, y1, x2, y2), outline=outline, fill=fill, width=line_width)
+
+    legend_items = [
+        ("same_bg", REGION_BOX_COLORS["same_bg_enclosed_region"]),
+        ("alpha_diff", REGION_BOX_COLORS["alpha_keyer_disagreement"]),
+        ("hard_edge", REGION_BOX_COLORS["hard_edge_candidate"]),
+    ]
+    legend_pad = max(8, line_width * 3)
+    row_h = 18
+    legend_w = 142
+    legend_h = legend_pad * 2 + row_h * len(legend_items)
+    draw.rounded_rectangle(
+        (legend_pad, legend_pad, legend_pad + legend_w, legend_pad + legend_h),
+        radius=6,
+        fill=(255, 255, 255, 210),
+        outline=(18, 25, 22, 90),
+        width=1,
+    )
+    y = legend_pad * 2
+    for label, color in legend_items:
+        draw.rectangle((legend_pad * 2, y + 3, legend_pad * 2 + 12, y + 15), fill=color)
+        draw.text((legend_pad * 2 + 18, y), label, fill=(18, 25, 22, 255))
+        y += row_h
+
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@app.get("/eval/game/regions/{case_id}")
+def game_eval_regions(case_id: str, run: str | None = Query(default=None)) -> Response:
+    root = _game_eval_root(run)
+    rows = _game_report_rows(root)
+    row = next((item for item in rows if item.get("case_id") == case_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Case not found.")
+    out_dir = _game_case_out_dir(row, root)
+    summary = _load_json(out_dir / "summary.json")
+    if not isinstance(summary, dict):
+        raise HTTPException(status_code=500, detail="Case summary must be a JSON object.")
+    input_path_value = summary.get("input")
+    if not isinstance(input_path_value, str):
+        raise HTTPException(status_code=404, detail="Case input image not found.")
+    input_path = _resolve_project_path(input_path_value)
+    if not _is_relative_to(input_path, (PROJECT_ROOT / "samples").resolve()) or not input_path.exists():
+        raise HTTPException(status_code=404, detail="Case input image not found.")
+    regions = _candidate_regions(_candidate_result_items(out_dir / "candidate_results.json"))
+    png = _draw_region_overlay(input_path, regions)
+    return Response(content=png, media_type="image/png")
+
+
+@app.get("/eval/game", response_class=HTMLResponse)
+def game_eval_page(run: str | None = Query(default=None)) -> str:
+    root = _game_eval_root(run)
+    data = _game_eval_data(root)
+    data_json = json.dumps(data, ensure_ascii=False)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERMBG Game Eval</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #17201c;
+      background: #f4f6f3;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; }}
+    header {{
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 0 24px;
+      border-bottom: 1px solid #d6ddd4;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(10px);
+    }}
+    h1 {{ margin: 0; font-size: 18px; letter-spacing: 0; }}
+    nav {{ display: flex; align-items: center; gap: 14px; font-size: 13px; color: #53615a; }}
+    nav a {{ color: #196f5a; font-weight: 700; text-decoration: none; }}
+    .run-picker {{
+      min-width: 280px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #53615a;
+      font-weight: 800;
+    }}
+    .run-picker select {{
+      width: min(420px, 42vw);
+      min-height: 34px;
+      padding: 0 30px 0 10px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+      font: inherit;
+      font-weight: 700;
+    }}
+    main {{ width: min(1760px, 100%); margin: 0 auto; padding: 18px 20px 28px; }}
+    .summary {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      color: #53615a;
+      font-size: 13px;
+    }}
+    .pill {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid #d1d9cf;
+      border-radius: 999px;
+      background: #ffffff;
+      white-space: nowrap;
+    }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid #d6ddd4;
+      border-radius: 8px;
+      background: #ffffff;
+    }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1280px; }}
+    th, td {{ border-bottom: 1px solid #e2e8df; vertical-align: top; }}
+    th {{
+      position: sticky;
+      top: 56px;
+      z-index: 5;
+      height: 40px;
+      padding: 0 10px;
+      background: #fbfcfa;
+      color: #53615a;
+      font-size: 12px;
+      text-align: left;
+      white-space: nowrap;
+    }}
+    td {{ padding: 10px; }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .case-col {{ width: 280px; }}
+    .original-col {{ width: 150px; }}
+    .regions-col {{ width: 170px; }}
+    .preview-col {{ width: 170px; }}
+    .case-name {{ font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }}
+    .sample-code {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      margin-bottom: 7px;
+      padding: 0 8px;
+      border-radius: 6px;
+      color: #ffffff;
+      background: #245f53;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }}
+    .sample-badge {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      margin-top: 7px;
+      padding: 0 8px;
+      border: 1px solid #cbd5c8;
+      border-radius: 999px;
+      color: #17201c;
+      background: #f7f9f6;
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }}
+    .case-meta {{ margin-top: 6px; display: grid; gap: 5px; color: #5f6c66; font-size: 12px; line-height: 1.35; }}
+    .hit {{ color: #176a56; font-weight: 800; }}
+    .miss {{ color: #a23d35; font-weight: 800; }}
+    .pending {{ color: #6b6258; font-weight: 800; }}
+    .tools {{ overflow-wrap: anywhere; }}
+    .thumb-button {{
+      width: 100%;
+      min-height: 96px;
+      max-height: 220px;
+      aspect-ratio: var(--thumb-ratio, 1 / 1);
+      display: grid;
+      place-items: center;
+      padding: 8px;
+      border: 1px solid #cad3c7;
+      border-radius: 6px;
+      cursor: zoom-in;
+      overflow: hidden;
+    }}
+    .thumb-button img {{
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+    }}
+    .thumb-button:focus-visible {{ outline: 3px solid rgba(25, 111, 90, 0.32); outline-offset: 2px; }}
+    .bg-checker {{
+      background-color: #edf1ea;
+      background-image:
+        linear-gradient(45deg, #cad3c7 25%, transparent 25%),
+        linear-gradient(-45deg, #cad3c7 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #cad3c7 75%),
+        linear-gradient(-45deg, transparent 75%, #cad3c7 75%);
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+      background-size: 20px 20px;
+    }}
+    .bg-white {{ background: #ffffff; }}
+    .bg-black {{ background: #101413; }}
+    .bg-purple {{ background: #7c3aed; }}
+    .candidate-label {{ margin-bottom: 7px; color: #53615a; font-size: 12px; font-weight: 800; overflow-wrap: anywhere; }}
+    .selected-mark {{
+      display: inline-flex;
+      margin-left: 6px;
+      color: #176a56;
+      font-weight: 900;
+    }}
+    .empty-cell {{
+      width: 100%;
+      min-height: 96px;
+      aspect-ratio: 1 / 1;
+      display: grid;
+      place-items: center;
+      border: 1px dashed #cbd5c8;
+      border-radius: 6px;
+      color: #66736c;
+      background: #f7f9f6;
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .modal {{
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      grid-template-rows: 56px 1fr;
+      background: rgba(12, 17, 15, 0.94);
+    }}
+    .modal.is-open {{ display: grid; }}
+    .modal-bar {{
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 0 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+      color: #ffffff;
+    }}
+    .modal-title {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 800; }}
+    .modal-actions {{ display: flex; align-items: center; gap: 8px; flex-shrink: 0; }}
+    .swatch, .icon-button {{
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 6px;
+      color: #ffffff;
+      background: transparent;
+      cursor: pointer;
+    }}
+    .swatch[aria-pressed="true"], .icon-button:focus-visible {{
+      outline: 2px solid #ffffff;
+      outline-offset: 2px;
+    }}
+    .icon-button {{ font-size: 18px; line-height: 1; }}
+    .modal-stage {{
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      touch-action: none;
+      cursor: grab;
+    }}
+    .modal-stage.is-dragging {{ cursor: grabbing; }}
+    .modal-stage img {{
+      max-width: 86vw;
+      max-height: 82vh;
+      object-fit: contain;
+      transform-origin: center center;
+      will-change: transform;
+      user-select: none;
+      pointer-events: none;
+    }}
+    @media (max-width: 760px) {{
+      header {{ align-items: flex-start; flex-direction: column; gap: 5px; padding: 10px 16px; }}
+      nav {{ width: 100%; flex-wrap: wrap; }}
+      .run-picker {{ width: 100%; min-width: 0; }}
+      .run-picker select {{ width: 100%; }}
+      th {{ top: 78px; }}
+      main {{ padding: 14px 12px 22px; }}
+      .modal-bar {{ min-height: 92px; align-items: flex-start; flex-direction: column; padding: 10px 12px; }}
+      .modal {{ grid-template-rows: auto 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ERMBG Game Eval</h1>
+    <nav>
+      <span id="run-id"></span>
+      <label class="run-picker" for="run-select">
+        <span>批次</span>
+        <select id="run-select" aria-label="选择测试批次"></select>
+      </label>
+      <a href="/">上传页</a>
+    </nav>
+  </header>
+  <main>
+    <section class="summary" id="summary"></section>
+    <div class="table-wrap">
+      <table aria-label="game eval result table">
+        <thead>
+          <tr>
+            <th class="case-col">case</th>
+            <th class="original-col">original</th>
+            <th class="regions-col">regions</th>
+            <th class="preview-col">checker</th>
+            <th class="preview-col">white</th>
+            <th class="preview-col">black</th>
+            <th class="preview-col">purple</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+  <div class="modal" id="modal" aria-hidden="true">
+    <div class="modal-bar">
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-actions" aria-label="preview controls">
+        <button class="swatch bg-checker" type="button" data-bg="checker" title="棋盘背景" aria-label="棋盘背景"></button>
+        <button class="swatch bg-white" type="button" data-bg="white" title="白底" aria-label="白底"></button>
+        <button class="swatch bg-black" type="button" data-bg="black" title="黑底" aria-label="黑底"></button>
+        <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
+        <button class="icon-button" type="button" id="reset-preview" title="重置视图" aria-label="重置视图">↺</button>
+        <button class="icon-button" type="button" id="close-modal" title="关闭" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div class="modal-stage bg-checker" id="modal-stage">
+      <img id="modal-img" alt="">
+    </div>
+  </div>
+  <script>
+    const data = {data_json};
+    const backgrounds = ["checker", "white", "black", "purple"];
+    const rowsEl = document.getElementById("rows");
+    const summaryEl = document.getElementById("summary");
+    const runIdEl = document.getElementById("run-id");
+    const runSelect = document.getElementById("run-select");
+    const modal = document.getElementById("modal");
+    const modalStage = document.getElementById("modal-stage");
+    const modalImg = document.getElementById("modal-img");
+    const modalTitle = document.getElementById("modal-title");
+    const closeModalButton = document.getElementById("close-modal");
+    const resetPreviewButton = document.getElementById("reset-preview");
+    const swatches = Array.from(document.querySelectorAll(".swatch"));
+    let scale = 1;
+    let panX = 0;
+    let panY = 0;
+    let dragStart = null;
+
+    function text(value) {{
+      return value === null || value === undefined || value === "" ? "—" : String(value);
+    }}
+
+    function setBackground(element, bg) {{
+      element.classList.remove(...backgrounds.map((name) => `bg-${{name}}`));
+      element.classList.add(`bg-${{bg}}`);
+    }}
+
+    function countsText(counts) {{
+      if (!counts || typeof counts !== "object") return "";
+      return Object.entries(counts).map(([key, value]) => `${{key}}=${{value}}`).join(", ");
+    }}
+
+    function makePreview(src, label, bg) {{
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "thumb-button";
+      setBackground(button, bg);
+      button.title = label;
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = label;
+      img.onload = () => {{
+        if (img.naturalWidth > 0 && img.naturalHeight > 0) {{
+          button.style.setProperty("--thumb-ratio", img.naturalWidth + " / " + img.naturalHeight);
+        }}
+      }};
+      button.appendChild(img);
+      button.addEventListener("click", () => openModal(src, label, bg));
+      return button;
+    }}
+
+    function renderRunSelect() {{
+      const runs = Array.isArray(data.runs) ? data.runs : [];
+      runSelect.innerHTML = "";
+      runs.forEach((run) => {{
+        const option = document.createElement("option");
+        option.value = run.id;
+        option.textContent = run.label || run.id;
+        option.selected = run.selected === true || run.id === data.selectedRun;
+        runSelect.appendChild(option);
+      }});
+      runSelect.disabled = runs.length <= 1;
+    }}
+
+    function renderRows() {{
+      renderRunSelect();
+      runIdEl.textContent = data.runId || "game eval";
+      summaryEl.innerHTML = "";
+      [
+        `model: ${{text(data.model)}}`,
+        `success: ${{text(data.success)}}`,
+        `expected hit: ${{text(data.expectedHit)}}`,
+        `sample rows: ${{text(data.sampleRows)}}`,
+        `report: ${{text(data.reportPath)}}`,
+        `vlm: ${{text(data.vlmRoot)}}`,
+        `matte: ${{text(data.matteRoot)}}`,
+      ].forEach((item) => {{
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = item;
+        summaryEl.appendChild(pill);
+      }});
+
+      rowsEl.innerHTML = "";
+      data.cases.forEach((caseItem) => {{
+        const candidates = caseItem.candidates && caseItem.candidates.length ? caseItem.candidates : [null];
+
+        candidates.forEach((candidate, candidateIndex) => {{
+          const row = document.createElement("tr");
+          const caseCell = document.createElement("td");
+          const sampleCode = document.createElement("div");
+          sampleCode.className = "sample-code";
+          sampleCode.textContent = caseItem.sampleCode || "G??";
+          const title = document.createElement("div");
+          title.className = "case-name";
+          title.textContent = caseItem.caseId;
+          const sampleBadge = document.createElement("div");
+          sampleBadge.className = "sample-badge";
+          sampleBadge.textContent = `${{caseItem.sampleVariant || "sample"}} · ${{caseItem.runStatus || "unknown"}}`;
+          const candidateLabel = document.createElement("div");
+          candidateLabel.className = "candidate-label";
+          candidateLabel.textContent = candidate
+            ? candidate.label || candidate.id || `candidate ${{candidateIndex + 1}}`
+            : "not run";
+          if (candidate && candidate.selected) {{
+            const selected = document.createElement("span");
+            selected.className = "selected-mark";
+            selected.textContent = "selected";
+            candidateLabel.appendChild(selected);
+          }}
+          const meta = document.createElement("div");
+          meta.className = "case-meta";
+          const hitClass = caseItem.runStatus === "not-run" ? "pending" : (caseItem.expectedHit ? "hit" : "miss");
+          const hitText = caseItem.runStatus === "not-run" ? "not run" : `expected ${{caseItem.expectedHit ? "hit" : "miss"}}`;
+          meta.innerHTML = `
+            <span>verdict: ${{text(caseItem.verdict)}} · <span class="${{hitClass}}">${{hitText}}</span></span>
+            <span>regions: ${{text(caseItem.regionCount)}}</span>
+            <span>${{text(caseItem.primaryAmbiguity)}}</span>
+            <span>${{countsText(caseItem.counts)}}</span>
+            <span class="tools">tools: ${{candidate ? (candidate.tools || []).join(", ") || "—" : "—"}}</span>
+          `;
+          caseCell.appendChild(sampleCode);
+          caseCell.appendChild(title);
+          caseCell.appendChild(sampleBadge);
+          caseCell.appendChild(candidateLabel);
+          caseCell.appendChild(meta);
+          row.appendChild(caseCell);
+
+          const originalCell = document.createElement("td");
+          if (caseItem.originalUrl) {{
+            originalCell.appendChild(makePreview(caseItem.originalUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} original`, "checker"));
+          }}
+          row.appendChild(originalCell);
+
+          const regionsCell = document.createElement("td");
+          if (caseItem.regionsUrl) {{
+            regionsCell.appendChild(makePreview(caseItem.regionsUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} regions`, "checker"));
+          }} else {{
+            const empty = document.createElement("div");
+            empty.className = "empty-cell";
+            empty.textContent = "not run";
+            regionsCell.appendChild(empty);
+          }}
+          row.appendChild(regionsCell);
+
+          backgrounds.forEach((bg) => {{
+            const cell = document.createElement("td");
+            if (candidate && candidate.url) {{
+              cell.appendChild(
+                makePreview(
+                  candidate.url,
+                  `${{caseItem.sampleCode}} · ${{caseItem.caseId}} · ${{caseItem.sampleVariant}} · ${{candidate.label || candidate.id}} · ${{bg}}`,
+                  bg,
+                ),
+              );
+            }} else {{
+              const empty = document.createElement("div");
+              empty.className = "empty-cell";
+              empty.textContent = "not run";
+              cell.appendChild(empty);
+            }}
+            row.appendChild(cell);
+          }});
+          rowsEl.appendChild(row);
+        }});
+      }});
+    }}
+
+    function clampScale(value) {{
+      return Math.min(16, Math.max(0.1, value));
+    }}
+
+    function applyTransform() {{
+      modalImg.style.transform = `translate(${{panX}}px, ${{panY}}px) scale(${{scale}})`;
+    }}
+
+    function resetTransform() {{
+      scale = 1;
+      panX = 0;
+      panY = 0;
+      dragStart = null;
+      applyTransform();
+    }}
+
+    function setModalBackground(bg) {{
+      setBackground(modalStage, bg);
+      swatches.forEach((swatch) => swatch.setAttribute("aria-pressed", String(swatch.dataset.bg === bg)));
+    }}
+
+    function openModal(src, label, bg) {{
+      modalImg.src = src;
+      modalImg.alt = label;
+      modalTitle.textContent = label;
+      setModalBackground(bg || "checker");
+      resetTransform();
+      modal.classList.add("is-open");
+      modal.setAttribute("aria-hidden", "false");
+    }}
+
+    function closeModal() {{
+      modal.classList.remove("is-open");
+      modal.setAttribute("aria-hidden", "true");
+      modalImg.removeAttribute("src");
+    }}
+
+    modalStage.addEventListener("wheel", (event) => {{
+      if (!modal.classList.contains("is-open")) return;
+      event.preventDefault();
+      const rect = modalStage.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const pointerX = event.clientX - centerX;
+      const pointerY = event.clientY - centerY;
+      const previousScale = scale;
+      const factor = event.deltaY < 0 ? 1.14 : 1 / 1.14;
+      scale = clampScale(scale * factor);
+      panX = pointerX - ((pointerX - panX) * scale) / previousScale;
+      panY = pointerY - ((pointerY - panY) * scale) / previousScale;
+      applyTransform();
+    }}, {{ passive: false }});
+
+    modalStage.addEventListener("pointerdown", (event) => {{
+      if (!modal.classList.contains("is-open")) return;
+      dragStart = {{ pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX, panY }};
+      modalStage.setPointerCapture(event.pointerId);
+      modalStage.classList.add("is-dragging");
+    }});
+
+    modalStage.addEventListener("pointermove", (event) => {{
+      if (!dragStart || dragStart.pointerId !== event.pointerId) return;
+      panX = dragStart.panX + event.clientX - dragStart.x;
+      panY = dragStart.panY + event.clientY - dragStart.y;
+      applyTransform();
+    }});
+
+    function endDrag(event) {{
+      if (!dragStart || dragStart.pointerId !== event.pointerId) return;
+      dragStart = null;
+      modalStage.classList.remove("is-dragging");
+    }}
+
+    modalStage.addEventListener("pointerup", endDrag);
+    modalStage.addEventListener("pointercancel", endDrag);
+    modalStage.addEventListener("dblclick", resetTransform);
+    closeModalButton.addEventListener("click", closeModal);
+    resetPreviewButton.addEventListener("click", resetTransform);
+    swatches.forEach((swatch) => swatch.addEventListener("click", () => setModalBackground(swatch.dataset.bg)));
+    runSelect.addEventListener("change", () => {{
+      if (runSelect.value) {{
+        window.location.href = `/eval/game?run=${{encodeURIComponent(runSelect.value)}}`;
+      }}
+    }});
+    document.addEventListener("keydown", (event) => {{
+      if (event.key === "Escape") closeModal();
+    }});
+
+    renderRows();
+  </script>
+</body>
+</html>"""
 
 
 def main() -> None:

@@ -73,6 +73,7 @@ def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path
     assert r.output_dir == out
     assert (out / "in_rgba.png").exists()
     assert (out / "in_alpha.png").exists()
+    assert (out / "in_shadow.png").exists()
     assert (out / "in_foreground.png").exists()
     assert (out / "in.report.json").exists()
 
