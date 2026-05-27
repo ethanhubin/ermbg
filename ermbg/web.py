@@ -7,16 +7,17 @@ run ``matte_image``, preview the returned RGBA PNG, and download it.
 from __future__ import annotations
 
 import base64
-import os
 import json
+import os
 import re
 import subprocess
 import sys
+import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import quote
 
 import numpy as np
@@ -30,11 +31,18 @@ except ImportError as e:  # pragma: no cover - exercised only without web extra
 
 from .api import matte_image
 from .candidates import MatteCandidate, generate_matte_candidates
+from .local_ownership import generate_local_ownership_candidate
+from .slicer import SliceBox, classify_ui_slice, crop_slice, slice_image
 
 ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet"}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_qwen_gw_v001_20260526"
+DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_qwen_gw_v009_display_safe_20260527"
 GAME_EVAL_PREFIX = "vlm_eval_game_qwen_gw_v"
+LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
+GAME_EVAL_RUN_PREFIXES = (
+    GAME_EVAL_PREFIX,
+    LOCAL_OWNERSHIP_EVAL_PREFIX,
+)
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
     "same_bg_enclosed_region": (0, 153, 255, 235),
@@ -55,6 +63,12 @@ _GAME_EVAL_JOBS_LOCK = Lock()
 def _encode_png(rgba: np.ndarray) -> bytes:
     buf = BytesIO()
     Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _encode_rgb_png(rgb: np.ndarray) -> bytes:
+    buf = BytesIO()
+    Image.fromarray(rgb, mode="RGB").save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -79,6 +93,156 @@ def health() -> dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
+    return _matte_page_html()
+
+
+def _matte_page_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERMBG</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+    .header-actions { min-width: 0; display: flex; align-items: center; gap: 14px; }
+    .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+    form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
+    form { min-width: 0; padding: 16px; display: grid; gap: 12px; }
+    label { display: grid; gap: 8px; font-size: 13px; font-weight: 600; color: #47524c; }
+    input, select, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
+    input[type="file"] { padding: 8px; }
+    button, a.download { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; border: 0; border-radius: 6px; background: #196f5a; color: #ffffff; text-decoration: none; font-weight: 700; cursor: pointer; }
+    button:disabled, a.download[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
+    .source-preview { display: none; gap: 10px; }
+    .source-preview.is-visible { display: grid; }
+    .source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; overflow: hidden; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; }
+    .source-frame img { display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; }
+    .source-meta { min-height: auto; font-size: 12px; line-height: 1.4; color: #5d6862; overflow-wrap: anywhere; }
+    .preview { min-height: 520px; display: grid; grid-template-rows: 48px 1fr 104px 56px; overflow: hidden; }
+    .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
+    .preview-actions { border-top: 1px solid #d9dfd7; border-bottom: 0; }
+    .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; flex-shrink: 0; }
+    .tab { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 700; }
+    .tab[aria-selected="true"] { background: #196f5a; color: #ffffff; }
+    .status { font-size: 13px; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .canvas, .candidate-thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); }
+    .canvas { min-height: 416px; display: grid; place-items: center; padding: 16px; overflow: hidden; touch-action: none; background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    .canvas.has-image { cursor: grab; }
+    .canvas.is-dragging { cursor: grabbing; }
+    .canvas.bg-white { background: #ffffff; }
+    .canvas.bg-black { background: #111514; }
+    .canvas.bg-gray { background: #aeb7b1; }
+    .canvas.bg-green { background: #00c853; }
+    .canvas.bg-blue { background: #4aa3ff; }
+    img { max-width: 100%; max-height: 68vh; object-fit: contain; image-rendering: auto; }
+    .result-image { transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; }
+    .empty { color: #6a746f; font-size: 14px; }
+    .candidate-panel { min-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; }
+    .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
+    .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
+    .candidate-tab { width: 92px; min-width: 92px; min-height: 76px; display: grid; grid-template-rows: 48px auto; gap: 5px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
+    .candidate-tab[aria-selected="true"] { border-color: #196f5a; box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18); color: #1c2320; }
+    .candidate-thumb { width: 100%; height: 48px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
+    .candidate-thumb img { width: 100%; height: 100%; object-fit: contain; }
+    .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
+    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .preview { min-height: 420px; grid-template-rows: auto 1fr 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 312px; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ERMBG</h1>
+    <div class="header-actions">
+      <a class="nav-link" href="/slice">切图</a>
+      <a class="nav-link" href="/eval/game">Game Eval</a>
+      <span class="status" id="strategy">就绪</span>
+    </div>
+  </header>
+  <main>
+    <form id="matte-form">
+      <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
+      <div class="source-preview" id="source-preview" aria-live="polite">
+        <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
+        <div class="source-meta" id="source-meta">未选择图片</div>
+      </div>
+      <label>后端<select id="backend" name="backend"><option value="grabcut">grabcut</option><option value="auto" selected>auto</option><option value="birefnet">birefnet</option></select></label>
+      <button id="submit" type="submit">抠图</button>
+    </form>
+    <section class="preview" aria-label="result preview">
+      <div class="preview-bar">
+        <strong>PNG 预览</strong>
+        <div class="tabs" role="tablist" aria-label="预览背景">
+          <button class="tab" type="button" role="tab" aria-selected="true" data-bg="checker">棋盘</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="white">白底</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="black">黑底</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="gray">灰底</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="green">绿幕</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="blue">蓝底</button>
+        </div>
+        <span class="status" id="status">等待上传</span>
+      </div>
+      <div class="canvas" id="canvas"><span class="empty">结果会显示在这里</span></div>
+      <div class="candidate-panel" aria-label="候选结果">
+        <span class="candidate-title">候选</span>
+        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图"><span class="empty">候选会显示在这里</span></div>
+      </div>
+      <div class="preview-actions"><span class="status" id="meta">RGBA PNG</span><a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a></div>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById("matte-form");
+    const file = document.getElementById("file");
+    const backend = document.getElementById("backend");
+    const submit = document.getElementById("submit");
+    const statusEl = document.getElementById("status");
+    const strategyEl = document.getElementById("strategy");
+    const canvas = document.getElementById("canvas");
+    const download = document.getElementById("download");
+    const candidateList = document.getElementById("candidate-list");
+    const metaEl = document.getElementById("meta");
+    const sourcePreview = document.getElementById("source-preview");
+    const sourceFrame = document.getElementById("source-frame");
+    const sourceMeta = document.getElementById("source-meta");
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    let sourceUrl = null;
+    let candidates = [];
+    let activeCandidateIndex = -1;
+    let resultImage = null;
+    let previewScale = 1;
+    let previewPanX = 0;
+    let previewPanY = 0;
+    let dragStart = null;
+
+    function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setPreviewBackground(mode) { canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.bg === mode))); }
+    function resetPreviewTransform() { previewScale = 1; previewPanX = 0; previewPanY = 0; dragStart = null; applyPreviewTransform(); }
+    function applyPreviewTransform() { if (resultImage) resultImage.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewScale})`; }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); canvas.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
+    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
+    function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); canvas.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); canvas.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); }
+    function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
+    function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; } catch (error) { statusEl.textContent = "切图载入失败"; } }
+
+    file.addEventListener("change", () => { resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); if (!file.files.length) { sourceUrl = null; sourcePreview.classList.remove("is-visible"); sourceFrame.innerHTML = '<span class="empty">选择图片后显示预览</span>'; sourceMeta.textContent = "未选择图片"; return; } const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
+    tabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
+    canvas.addEventListener("wheel", (event) => { if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
+    canvas.addEventListener("pointerdown", (event) => { if (!resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
+    canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
+    function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
+    canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => resetPreviewTransform());
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = "完成"; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    loadPendingSlice();
+  </script>
+</body>
+</html>"""
+
     return """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -146,7 +310,7 @@ def index() -> str:
       display: grid;
       gap: 16px;
     }
-    label {
+    label, .field {
       display: grid;
       gap: 8px;
       font-size: 13px;
@@ -176,10 +340,46 @@ def index() -> str:
       font-weight: 700;
       cursor: pointer;
     }
+    a.mode-button {
+      text-decoration: none;
+    }
     button:disabled, a.download[aria-disabled="true"] {
       opacity: 0.55;
       cursor: not-allowed;
       pointer-events: none;
+    }
+    .mode-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid #cfd7cc;
+      border-radius: 6px;
+      background: #f7f9f6;
+    }
+    .mode-button {
+      width: 100%;
+      min-height: 34px;
+      border: 0;
+      background: transparent;
+      color: #47524c;
+      font-size: 13px;
+    }
+    .mode-button[aria-pressed="true"] {
+      background: #196f5a;
+      color: #ffffff;
+    }
+    .slice-settings {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .slice-settings.is-visible {
+      display: grid;
+    }
+    .slice-settings input {
+      min-height: 38px;
+      padding: 0 10px;
     }
     .source-preview {
       display: none;
@@ -237,6 +437,11 @@ def index() -> str:
     .preview-actions {
       border-top: 1px solid #d9dfd7;
       border-bottom: 0;
+    }
+    .preview-actions button {
+      width: auto;
+      min-width: 108px;
+      padding: 0 14px;
     }
     .tabs {
       display: inline-flex;
@@ -385,6 +590,71 @@ def index() -> str:
       font-weight: 800;
       line-height: 1.1;
     }
+    .slice-list {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      max-height: 232px;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .slice-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 8px;
+      border: 1px solid #cfd7cc;
+      border-radius: 6px;
+      background: #ffffff;
+    }
+    .slice-thumb {
+      width: 72px;
+      height: 56px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border-radius: 4px;
+      background-color: #e9eee6;
+      background-image:
+        linear-gradient(45deg, #d3dbd0 25%, transparent 25%),
+        linear-gradient(-45deg, #d3dbd0 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #d3dbd0 75%),
+        linear-gradient(-45deg, transparent 75%, #d3dbd0 75%);
+      background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+      background-size: 12px 12px;
+    }
+    .slice-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .slice-info {
+      min-width: 0;
+      display: grid;
+      gap: 3px;
+    }
+    .slice-label {
+      font-size: 13px;
+      font-weight: 800;
+      color: #1c2320;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .slice-meta {
+      font-size: 12px;
+      color: #5d6862;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .slice-row button {
+      width: auto;
+      min-height: 34px;
+      padding: 0 12px;
+      white-space: nowrap;
+    }
     @media (max-width: 760px) {
       header { padding: 0 16px; }
       main {
@@ -435,6 +705,17 @@ def index() -> str:
         </div>
         <div class="source-meta" id="source-meta">未选择图片</div>
       </div>
+      <div class="field">
+        任务
+        <span class="mode-switch" role="group" aria-label="任务">
+          <a class="mode-button" href="/" data-task="matte" role="button" aria-pressed="true">抠图</a>
+          <a class="mode-button" href="/slice" data-task="slice" role="button" aria-pressed="false">切图</a>
+        </span>
+        <select id="task" name="task" hidden>
+          <option value="matte" selected>抠图</option>
+          <option value="slice">切图</option>
+        </select>
+      </div>
       <label>
         后端
         <select id="backend" name="backend">
@@ -443,6 +724,16 @@ def index() -> str:
           <option value="birefnet">birefnet</option>
         </select>
       </label>
+      <div class="slice-settings" id="slice-settings">
+        <label>
+          最小面积
+          <input id="slice-min-area" name="min_area" type="number" min="1" step="1" value="64">
+        </label>
+        <label>
+          边距
+          <input id="slice-padding" name="padding" type="number" min="0" step="1" value="2">
+        </label>
+      </div>
       <button id="submit" type="submit">抠图</button>
     </form>
     <section class="preview" aria-label="result preview">
@@ -469,6 +760,7 @@ def index() -> str:
       </div>
       <div class="preview-actions">
         <span class="status" id="meta">RGBA PNG</span>
+        <button id="confirm-slices" type="button" disabled hidden>生成切图</button>
         <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
       </div>
     </section>
@@ -477,7 +769,13 @@ def index() -> str:
     const form = document.getElementById("matte-form");
     const file = document.getElementById("file");
     const backend = document.getElementById("backend");
+    const task = document.getElementById("task");
+    const modeButtons = Array.from(document.querySelectorAll(".mode-button"));
+    const sliceSettings = document.getElementById("slice-settings");
+    const sliceMinArea = document.getElementById("slice-min-area");
+    const slicePadding = document.getElementById("slice-padding");
     const submit = document.getElementById("submit");
+    const confirmSlices = document.getElementById("confirm-slices");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
     const canvas = document.getElementById("canvas");
@@ -496,6 +794,7 @@ def index() -> str:
     let previewPanX = 0;
     let previewPanY = 0;
     let dragStart = null;
+    let slicePreviewPayload = null;
 
     function humanSize(bytes) {
       if (bytes < 1024) return `${bytes} B`;
@@ -506,8 +805,32 @@ def index() -> str:
     function setBusy(isBusy) {
       submit.disabled = isBusy;
       file.disabled = isBusy;
-      backend.disabled = isBusy;
-      submit.textContent = isBusy ? "处理中" : "抠图";
+      backend.disabled = isBusy || task.value === "slice";
+      task.disabled = isBusy;
+      modeButtons.forEach((button) => {
+        button.setAttribute("aria-disabled", String(isBusy));
+      });
+      sliceMinArea.disabled = isBusy;
+      slicePadding.disabled = isBusy;
+      confirmSlices.disabled = isBusy || !slicePreviewPayload;
+      submit.textContent = isBusy ? "处理中" : (task.value === "slice" ? "自动标注" : "抠图");
+    }
+
+    function setTaskMode(mode) {
+      task.value = mode;
+      modeButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.task === mode));
+      });
+      sliceSettings.classList.toggle("is-visible", mode === "slice");
+      backend.disabled = mode === "slice";
+      submit.textContent = mode === "slice" ? "自动标注" : "抠图";
+      statusEl.textContent = mode === "slice" ? "等待切图标注" : "等待抠图";
+      confirmSlices.hidden = mode !== "slice";
+      confirmSlices.disabled = !slicePreviewPayload;
+      metaEl.textContent = mode === "slice" ? "切图预览" : "RGBA PNG";
+      if (mode !== "slice") {
+        slicePreviewPayload = null;
+      }
     }
 
     function setPreviewBackground(mode) {
@@ -525,11 +848,14 @@ def index() -> str:
       candidates = [];
       activeCandidateIndex = -1;
       resultImage = null;
+      slicePreviewPayload = null;
       resetPreviewTransform();
       canvas.innerHTML = '<span class="empty">结果会显示在这里</span>';
       canvas.classList.remove("has-image", "is-dragging");
+      candidateList.className = "candidate-list";
       candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>';
       metaEl.textContent = "RGBA PNG";
+      confirmSlices.disabled = true;
       download.removeAttribute("href");
       download.setAttribute("aria-disabled", "true");
     }
@@ -638,9 +964,116 @@ def index() -> str:
       setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0);
     }
 
+    function setSlicePreviewPayload(payload) {
+      resetResult();
+      slicePreviewPayload = payload;
+      canvas.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = payload.annotated;
+      img.alt = "自动切图标注预览";
+      img.draggable = false;
+      img.className = "result-image";
+      resultImage = img;
+      canvas.classList.add("has-image");
+      canvas.appendChild(img);
+      applyPreviewTransform();
+      candidateList.innerHTML = '<span class="empty">确认标注后生成切图列表</span>';
+      confirmSlices.hidden = false;
+      confirmSlices.disabled = !payload.count;
+      metaEl.textContent = `检测到 ${payload.count || 0} 个矩形`;
+      download.removeAttribute("href");
+      download.setAttribute("aria-disabled", "true");
+    }
+
+    function dataUrlToBlob(dataUrl) {
+      const [header, base64] = dataUrl.split(",");
+      const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png";
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mime });
+    }
+
+    async function matteSlice(crop) {
+      const formData = new FormData();
+      formData.append("file", dataUrlToBlob(crop.rgb), crop.filename);
+      formData.append("backend", backend.value);
+      setBusy(true);
+      statusEl.textContent = `正在抠图 · ${crop.label}`;
+      strategyEl.textContent = crop.label;
+      try {
+        const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
+        if (!response.ok) {
+          let message = "处理失败";
+          try {
+            const payload = await response.json();
+            message = payload.detail || message;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        const payload = await response.json();
+        setCandidatePayloads(payload, crop.filename);
+        const strategy = payload.strategy || "done";
+        const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
+        statusEl.textContent = "完成";
+        strategyEl.textContent = bg ? `${crop.label} · ${strategy} · ${bg}` : `${crop.label} · ${strategy}`;
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function renderSliceCrops(payload) {
+      resetResult();
+      candidateList.className = "candidate-list slice-list";
+      if (!payload.crops || !payload.crops.length) {
+        candidateList.innerHTML = '<span class="empty">没有检测到可切割主体</span>';
+        return;
+      }
+      canvas.innerHTML = '<span class="empty">选择下方切图进入抠图流程</span>';
+      payload.crops.forEach((crop) => {
+        const row = document.createElement("div");
+        row.className = "slice-row";
+
+        const thumb = document.createElement("span");
+        thumb.className = "slice-thumb";
+        const img = document.createElement("img");
+        img.src = crop.rgb;
+        img.alt = `${crop.label} 预览`;
+        thumb.appendChild(img);
+
+        const info = document.createElement("span");
+        info.className = "slice-info";
+        const label = document.createElement("span");
+        label.className = "slice-label";
+        label.textContent = crop.label;
+        const meta = document.createElement("span");
+        meta.className = "slice-meta";
+        meta.textContent = crop.meta || "";
+        info.appendChild(label);
+        info.appendChild(meta);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "抠图";
+        button.addEventListener("click", () => matteSlice(crop));
+
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(button);
+        candidateList.appendChild(row);
+      });
+      confirmSlices.disabled = true;
+      metaEl.textContent = `已生成 ${payload.count || payload.crops.length} 张切图`;
+      statusEl.textContent = "切图完成";
+    }
+
     file.addEventListener("change", () => {
       resetResult();
-      statusEl.textContent = "等待抠图";
+      statusEl.textContent = task.value === "slice" ? "等待切图标注" : "等待抠图";
       strategyEl.textContent = backend.value;
       if (sourceUrl) URL.revokeObjectURL(sourceUrl);
       if (!file.files.length) {
@@ -666,6 +1099,19 @@ def index() -> str:
       };
       sourceFrame.appendChild(img);
     });
+
+    modeButtons.forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        resetResult();
+        setTaskMode(button.dataset.task);
+        const nextPath = button.dataset.task === "slice" ? "/slice" : "/";
+        if (window.location.pathname !== nextPath) {
+          window.history.replaceState(null, "", nextPath);
+        }
+      });
+    });
+    setTaskMode(window.location.pathname === "/slice" ? "slice" : task.value);
 
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg));
@@ -717,17 +1163,16 @@ def index() -> str:
     canvas.addEventListener("pointercancel", endDrag);
     canvas.addEventListener("dblclick", () => resetPreviewTransform());
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!file.files.length) return;
+    confirmSlices.addEventListener("click", async () => {
+      if (!file.files.length || !slicePreviewPayload) return;
       const formData = new FormData();
       formData.append("file", file.files[0]);
-      formData.append("backend", backend.value);
+      formData.append("min_area", sliceMinArea.value || "64");
+      formData.append("padding", slicePadding.value || "2");
       setBusy(true);
-      statusEl.textContent = "正在抠图";
-      strategyEl.textContent = backend.value;
+      statusEl.textContent = "正在生成切图";
       try {
-        const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
+        const response = await fetch("/api/slice-crops", { method: "POST", body: formData });
         if (!response.ok) {
           let message = "处理失败";
           try {
@@ -736,12 +1181,53 @@ def index() -> str:
           } catch (_) {}
           throw new Error(message);
         }
-        const payload = await response.json();
-        setCandidatePayloads(payload, file.files[0].name);
-        const strategy = payload.strategy || "done";
-        const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
-        statusEl.textContent = "完成";
-        strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy;
+        renderSliceCrops(await response.json());
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file.files.length) return;
+      const formData = new FormData();
+      formData.append("file", file.files[0]);
+      if (task.value === "slice") {
+        formData.append("min_area", sliceMinArea.value || "64");
+        formData.append("padding", slicePadding.value || "2");
+      } else {
+        formData.append("backend", backend.value);
+      }
+      setBusy(true);
+      statusEl.textContent = task.value === "slice" ? "正在自动标注" : "正在抠图";
+      strategyEl.textContent = backend.value;
+      try {
+        const endpoint = task.value === "slice" ? "/api/slice-preview" : "/api/matte-candidates";
+        const response = await fetch(endpoint, { method: "POST", body: formData });
+        if (!response.ok) {
+          let message = "处理失败";
+          try {
+            const payload = await response.json();
+            message = payload.detail || message;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        if (task.value === "slice") {
+          const payload = await response.json();
+          setSlicePreviewPayload(payload);
+          const bg = Array.isArray(payload.background_color) ? payload.background_color.join(",") : "";
+          statusEl.textContent = "标注完成";
+          strategyEl.textContent = bg ? `slice · ${bg}` : "slice";
+        } else {
+          const payload = await response.json();
+          setCandidatePayloads(payload, file.files[0].name);
+          const strategy = payload.strategy || "done";
+          const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
+          statusEl.textContent = "完成";
+          strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy;
+        }
       } catch (error) {
         statusEl.textContent = error.message;
       } finally {
@@ -753,8 +1239,314 @@ def index() -> str:
 </html>"""
 
 
+@app.get("/slice", response_class=HTMLResponse)
+def slice_page() -> str:
+    return _slice_page_html()
+
+
+def _slice_page_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERMBG Slice</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+    a { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+    form, .workspace { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
+    form { min-width: 0; min-height: 640px; max-height: 640px; padding: 16px; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: 12px; overflow: hidden; }
+    label { display: grid; gap: 8px; font-size: 13px; font-weight: 700; color: #47524c; }
+    input, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
+    input[type="file"] { padding: 8px; }
+    button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .preview, .thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
+    .workspace { min-height: 640px; display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
+    .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
+    .status { color: #5d6862; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .preview { min-height: 420px; display: grid; place-items: center; padding: 16px; overflow: hidden; }
+    .preview img { max-width: 100%; max-height: 72vh; object-fit: contain; }
+    .empty { color: #6a746f; font-size: 14px; }
+    .left-list { min-width: 0; min-height: 0; height: 100%; max-height: 100%; display: block; overflow-y: auto; overflow-x: hidden; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; scrollbar-gutter: stable; }
+    .row { width: 100%; min-width: 0; height: 72px; display: grid; grid-template-columns: 64px minmax(0, 1fr) 52px; gap: 8px; align-items: center; padding: 4px 6px; border: 0; border-bottom: 1px solid #d9dfd7; border-radius: 0; background: #ffffff; text-align: left; cursor: pointer; }
+    .row:last-child { border-bottom: 0; }
+    .row:hover { background: #f3f7f1; }
+    .row[aria-selected="true"] { background: #d7eadf; }
+    .thumb { width: 64px; height: 64px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
+    .thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
+    .info { min-width: 0; display: grid; gap: 2px; align-content: center; overflow: hidden; }
+    .name { min-width: 0; font-size: 12px; line-height: 1.25; font-weight: 800; color: #1c2320; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta { min-width: 0; font-size: 11px; line-height: 1.25; font-weight: 600; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-action { width: 52px; min-width: 52px; height: 30px; min-height: 30px; padding: 0; border-radius: 6px; font-size: 12px; line-height: 1; visibility: hidden; }
+    .row[aria-selected="true"] .row-action { visibility: visible; }
+    .selected-actions { display: none; gap: 8px; }
+    .selected-actions.is-visible { display: grid; }
+    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } form { min-height: 520px; } .workspace { min-height: 520px; } .preview { min-height: 320px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ERMBG 切图</h1>
+    <a href="/">返回抠图</a>
+  </header>
+  <main>
+    <form id="slice-form">
+      <label>图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
+      <div class="settings">
+        <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
+        <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
+      </div>
+      <button id="confirm" type="button" disabled>切图</button>
+      <div class="left-list" id="list"><span class="empty">切图列表会显示在这里</span></div>
+      <div class="selected-actions" id="selected-actions">
+        <button id="matte-selected" type="button">抠图</button>
+      </div>
+    </form>
+    <section class="workspace" aria-label="slice workspace">
+      <div class="bar"><strong>切图预览</strong><span class="status" id="status">等待上传</span></div>
+      <div class="preview" id="preview"><span class="empty">自动标注会显示在这里</span></div>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById("slice-form");
+    const file = document.getElementById("file");
+    const minArea = document.getElementById("min-area");
+    const padding = document.getElementById("padding");
+    const confirmButton = document.getElementById("confirm");
+    const matteSelected = document.getElementById("matte-selected");
+    const selectedActions = document.getElementById("selected-actions");
+    const statusEl = document.getElementById("status");
+    const preview = document.getElementById("preview");
+    const list = document.getElementById("list");
+    let hasPreview = false;
+    let currentCrops = [];
+    let selectedCrop = null;
+    const SLICE_STATE_KEY = "ermbgSliceWorkspace";
+
+    function setBusy(isBusy) {
+      confirmButton.disabled = isBusy || !hasPreview;
+      matteSelected.disabled = isBusy || !selectedCrop;
+      file.disabled = isBusy;
+      minArea.disabled = isBusy;
+      padding.disabled = isBusy;
+    }
+
+    function formData() {
+      const data = new FormData();
+      data.append("file", file.files[0]);
+      data.append("min_area", minArea.value || "64");
+      data.append("padding", padding.value || "2");
+      return data;
+    }
+
+    function currentSettings() {
+      return {
+        minArea: minArea.value || "64",
+        padding: padding.value || "2",
+      };
+    }
+
+    function saveSliceState(patch) {
+      let current = {};
+      try {
+        current = JSON.parse(sessionStorage.getItem(SLICE_STATE_KEY) || "{}");
+      } catch (_) {}
+      sessionStorage.setItem(
+        SLICE_STATE_KEY,
+        JSON.stringify({ ...current, ...patch, settings: currentSettings() }),
+      );
+    }
+
+    function clearSliceState() {
+      sessionStorage.removeItem(SLICE_STATE_KEY);
+    }
+
+    function showPreview(payload) {
+      hasPreview = Boolean(payload.count);
+      preview.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = payload.annotated;
+      img.alt = "自动标注预览";
+      preview.appendChild(img);
+      list.innerHTML = '<span class="empty">确认标注后生成切图列表</span>';
+      statusEl.textContent = `标注完成 · ${payload.count || 0} 个矩形`;
+      confirmButton.disabled = !hasPreview;
+      saveSliceState({ preview: payload, crops: null });
+    }
+
+    function sendToMatte(crop) {
+      saveSliceState({ selectedCropId: crop.id || crop.filename });
+      sessionStorage.setItem("ermbgPendingSlice", JSON.stringify(crop));
+      window.location.href = "/";
+    }
+
+    function selectCrop(crop) {
+      selectedCrop = crop;
+      Array.from(list.querySelectorAll(".row")).forEach((row) => {
+        row.setAttribute("aria-selected", String(row.dataset.cropId === crop.id));
+      });
+      preview.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = crop.rgb;
+      img.alt = `${crop.label} 预览`;
+      preview.appendChild(img);
+      statusEl.textContent = `已选择 ${crop.label}`;
+      saveSliceState({ selectedCropId: crop.id || crop.filename });
+    }
+
+    function renderCrops(payload) {
+      list.innerHTML = "";
+      currentCrops = payload.crops || [];
+      selectedCrop = null;
+      selectedActions.classList.remove("is-visible");
+      if (!payload.crops || !payload.crops.length) {
+        list.innerHTML = '<span class="empty">没有检测到可切割主体</span>';
+        return;
+      }
+      payload.crops.forEach((crop) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        row.dataset.cropId = crop.id;
+        row.setAttribute("aria-selected", "false");
+        const thumb = document.createElement("span");
+        thumb.className = "thumb";
+        const img = document.createElement("img");
+        img.src = crop.rgb;
+        img.alt = `${crop.label} 预览`;
+        thumb.appendChild(img);
+        const info = document.createElement("span");
+        info.className = "info";
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = crop.label;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = crop.meta || "";
+        info.appendChild(name);
+        info.appendChild(meta);
+        const action = document.createElement("button");
+        action.className = "row-action";
+        action.type = "button";
+        action.textContent = "抠图";
+        action.addEventListener("click", (event) => {
+          event.stopPropagation();
+          sendToMatte(crop);
+        });
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(action);
+        row.addEventListener("click", () => selectCrop(crop));
+        list.appendChild(row);
+      });
+      statusEl.textContent = `切图完成 · ${payload.count || payload.crops.length} 张`;
+      confirmButton.disabled = true;
+      saveSliceState({ crops: payload });
+      if (payload.crops.length === 1) {
+        selectCrop(payload.crops[0]);
+      }
+    }
+
+    file.addEventListener("change", () => {
+      hasPreview = false;
+      currentCrops = [];
+      selectedCrop = null;
+      selectedActions.classList.remove("is-visible");
+      clearSliceState();
+      confirmButton.disabled = true;
+      preview.innerHTML = '<span class="empty">自动标注会显示在这里</span>';
+      list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
+      if (file.files.length) {
+        runAnnotate();
+      } else {
+        statusEl.textContent = "等待上传";
+      }
+    });
+
+    async function runAnnotate() {
+      if (!file.files.length) return;
+      setBusy(true);
+      statusEl.textContent = "正在自动标注";
+      try {
+        const response = await fetch("/api/slice-preview", { method: "POST", body: formData() });
+        if (!response.ok) throw new Error((await response.json()).detail || "标注失败");
+        showPreview(await response.json());
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      runAnnotate();
+    });
+
+    confirmButton.addEventListener("click", async () => {
+      if (!file.files.length || !hasPreview) return;
+      setBusy(true);
+      statusEl.textContent = "正在生成切图";
+      try {
+        const response = await fetch("/api/slice-crops", { method: "POST", body: formData() });
+        if (!response.ok) throw new Error((await response.json()).detail || "切图失败");
+        renderCrops(await response.json());
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    matteSelected.addEventListener("click", () => {
+      if (!selectedCrop) return;
+      sendToMatte(selectedCrop);
+    });
+
+    function restoreSliceState() {
+      let state = null;
+      try {
+        state = JSON.parse(sessionStorage.getItem(SLICE_STATE_KEY) || "null");
+      } catch (_) {
+        state = null;
+      }
+      if (!state) return;
+      if (state.settings) {
+        minArea.value = state.settings.minArea || minArea.value;
+        padding.value = state.settings.padding || padding.value;
+      }
+      if (state.preview) {
+        showPreview(state.preview);
+      }
+      if (state.crops) {
+        renderCrops(state.crops);
+        const crop = currentCrops.find((item) => item.id === state.selectedCropId);
+        if (crop) {
+          selectCrop(crop);
+        }
+        statusEl.textContent = state.selectedCropId ? "已返回切图列表" : "切图已恢复";
+      }
+    }
+
+    restoreSliceState();
+  </script>
+</body>
+</html>"""
+
+
 def _png_data_url(rgba: np.ndarray) -> str:
     encoded = base64.b64encode(_encode_png(rgba)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _rgb_png_data_url(rgb: np.ndarray) -> str:
+    encoded = base64.b64encode(_encode_rgb_png(rgb)).decode("ascii")
     return f"data:image/png;base64,{encoded}"
 
 
@@ -774,6 +1566,67 @@ def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object
     }
 
 
+def _slice_annotated_preview(image_rgb: np.ndarray, boxes: list[SliceBox]) -> np.ndarray:
+    preview = Image.fromarray(image_rgb, mode="RGB").convert("RGBA")
+    draw = ImageDraw.Draw(preview)
+    for box in boxes:
+        x, y, w, h = box.bbox
+        color = (255, 160, 0, 255)
+        draw.rectangle((x, y, x + w - 1, y + h - 1), outline=color, width=3)
+        label = f"{box.id}"
+        text_box = draw.textbbox((x, y), label)
+        tw = text_box[2] - text_box[0]
+        th = text_box[3] - text_box[1]
+        draw.rectangle((x, y, x + tw + 8, y + th + 6), fill=(25, 111, 90, 235))
+        draw.text((x + 4, y + 3), label, fill=(255, 255, 255, 255))
+    return np.asarray(preview, dtype=np.uint8)
+
+
+def _slice_preview_payload(image_rgb: np.ndarray, stem: str, min_area: int, padding: int) -> dict[str, object]:
+    result = slice_image(image_rgb, min_area=min_area, padding=padding)
+    annotated = _slice_annotated_preview(image_rgb, result.boxes)
+    payload = result.to_dict()
+    payload.update(
+        {
+            "stem": stem,
+            "annotated": _png_data_url(annotated),
+            "boxes": [box.to_dict() for box in result.boxes],
+        }
+    )
+    return payload
+
+
+def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, min_area: int, padding: int) -> dict[str, object]:
+    result = slice_image(image_rgb, min_area=min_area, padding=padding)
+    crops = []
+    kind_counts: dict[str, int] = {}
+    for box in result.boxes:
+        crop = crop_slice(image_rgb, result.foreground_mask, box, transparent=False)
+        prediction = classify_ui_slice(crop, box, image_rgb.shape[:2], result.foreground_mask)
+        kind = prediction.kind if prediction.confidence >= 0.6 else "asset"
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        name = f"{kind}_{kind_counts[kind]:03d}"
+        x, y, w, h = box.bbox
+        crops.append(
+            {
+                "id": name,
+                "label": name,
+                "kind": kind,
+                "confidence": prediction.confidence,
+                "filename": f"{name}_rgb.png",
+                "rgb": _rgb_png_data_url(crop),
+                "bbox": [x, y, w, h],
+                "meta": f"{kind} {prediction.confidence:.2f} · {w}x{h}",
+                "features": prediction.features,
+            }
+        )
+    return {
+        "background": list(result.background_color),
+        "count": len(crops),
+        "crops": crops,
+    }
+
+
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
@@ -784,11 +1637,29 @@ def matte_endpoint(
 
     image = _load_upload_image(file)
     try:
-        result = matte_image(image, backend=backend, qa=False)
+        result = matte_image(image, backend=backend, qa=False, shadow_mode="off")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
-    png = _encode_png(result.rgba)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    selected_rgba = result.rgba
+    local_ownership_used = False
+    try:
+        local_candidate = generate_local_ownership_candidate(
+            image_rgb,
+            result.rgba,
+            result.background_color,
+            backend=backend,
+            soft_mask=result.debug.get("soft_mask"),
+            shadow_mode="off",
+        )
+    except Exception:
+        local_candidate = None
+    if local_candidate is not None:
+        selected_rgba = local_candidate.rgba
+        local_ownership_used = True
+
+    png = _encode_png(selected_rgba)
     filename = (file.filename or "ermbg").rsplit(".", 1)[0] + "_rgba.png"
     return Response(
         content=png,
@@ -797,6 +1668,7 @@ def matte_endpoint(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-ERMBG-Strategy": result.strategy_name,
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
+            "X-ERMBG-Local-Ownership": "1" if local_ownership_used else "0",
         },
     )
 
@@ -811,18 +1683,101 @@ def matte_candidates_endpoint(
 
     image = _load_upload_image(file)
     try:
-        result = matte_image(image, backend=backend, qa=False)
+        result = matte_image(image, backend=backend, qa=False, shadow_mode="off")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     candidates = generate_matte_candidates(image_rgb, result.rgba, result.background_color)
+    try:
+        local_candidate = generate_local_ownership_candidate(
+            image_rgb,
+            result.rgba,
+            result.background_color,
+            backend=backend,
+            soft_mask=result.debug.get("soft_mask"),
+            shadow_mode="off",
+        )
+    except Exception as e:
+        local_candidate = None
+        for candidate in candidates:
+            candidate.debug["local_ownership_error"] = str(e)
+    if local_candidate is not None:
+        for candidate in candidates:
+            candidate.selected = False
+        candidates.append(local_candidate)
     return {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
     }
+
+
+@app.post("/api/slice")
+def slice_endpoint(
+    file: Annotated[UploadFile, File()],
+    min_area: Annotated[int, Form()] = 64,
+    padding: Annotated[int, Form()] = 2,
+    transparent: Annotated[bool, Form()] = False,
+) -> Response:
+    image = _load_upload_image(file)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    try:
+        result = slice_image(image_rgb, min_area=min_area, padding=padding)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"slicing failed: {e}") from e
+
+    stem = (file.filename or "ermbg").rsplit(".", 1)[0]
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{stem}.slices.json", json.dumps(result.to_dict(), indent=2))
+        for box in result.boxes:
+            crop = crop_slice(image_rgb, result.foreground_mask, box, transparent=transparent)
+            png = _encode_png(crop) if transparent else _encode_rgb_png(crop)
+            suffix = "rgba" if transparent else "rgb"
+            zf.writestr(f"{stem}_{box.id:03d}_{suffix}.png", png)
+
+    filename = f"{stem}_slices.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-ERMBG-Slice-Count": str(len(result.boxes)),
+            "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
+        },
+    )
+
+
+@app.post("/api/slice-preview")
+def slice_preview_endpoint(
+    file: Annotated[UploadFile, File()],
+    min_area: Annotated[int, Form()] = 64,
+    padding: Annotated[int, Form()] = 2,
+) -> dict[str, object]:
+    image = _load_upload_image(file)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    stem = (file.filename or "ermbg").rsplit(".", 1)[0]
+    try:
+        return _slice_preview_payload(image_rgb, stem, min_area=min_area, padding=padding)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"slice preview failed: {e}") from e
+
+
+@app.post("/api/slice-crops")
+def slice_crops_endpoint(
+    file: Annotated[UploadFile, File()],
+    min_area: Annotated[int, Form()] = 64,
+    padding: Annotated[int, Form()] = 2,
+) -> dict[str, object]:
+    image = _load_upload_image(file)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    stem = (file.filename or "ermbg").rsplit(".", 1)[0]
+    try:
+        return _slice_crop_payloads(image_rgb, stem, min_area=min_area, padding=padding)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"slice crops failed: {e}") from e
 
 
 def _load_json(path: Path) -> object:
@@ -966,7 +1921,7 @@ def _game_eval_samples() -> list[dict[str, object]]:
 
 
 def _game_report_path(root: Path) -> Path | None:
-    for name in ("vlm_qwen", "vlm_openai"):
+    for name in ("vlm_qwen", "vlm_openai", "local_ownership"):
         path = root / name / "eval_report.json"
         if path.exists():
             return path
@@ -1003,7 +1958,8 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     out_root = PROJECT_ROOT / "out"
     roots = [
         path
-        for path in sorted(out_root.glob(f"{GAME_EVAL_PREFIX}*"))
+        for prefix in GAME_EVAL_RUN_PREFIXES
+        for path in sorted(out_root.glob(f"{prefix}*"))
         if path.is_dir() and _game_eval_root_has_data(path)
     ]
     if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
@@ -1024,7 +1980,12 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
 
 
 def _validate_game_eval_run_id(run_id: str) -> None:
-    if "/" in run_id or "\\" in run_id or run_id.startswith(".") or not run_id.startswith(GAME_EVAL_PREFIX):
+    if (
+        "/" in run_id
+        or "\\" in run_id
+        or run_id.startswith(".")
+        or not any(run_id.startswith(prefix) for prefix in GAME_EVAL_RUN_PREFIXES)
+    ):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
 
 
@@ -1203,7 +2164,8 @@ def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, obj
 def _default_game_eval_root() -> Path:
     roots = [
         path
-        for path in sorted((PROJECT_ROOT / "out").glob(f"{GAME_EVAL_PREFIX}*"), reverse=True)
+        for prefix in GAME_EVAL_RUN_PREFIXES
+        for path in sorted((PROJECT_ROOT / "out").glob(f"{prefix}*"), reverse=True)
         if path.is_dir() and _game_eval_root_has_data(path)
     ]
     complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
@@ -1385,6 +2347,9 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
             summary = {}
 
         fallback_tools = [tool for tool in row.get("selected_tools", []) if isinstance(tool, str)]
+        top_roles = [role for role in row.get("top_roles", []) if isinstance(role, str)]
+        if not fallback_tools and top_roles:
+            fallback_tools = top_roles
         candidate_results_path = out_dir / "candidate_results.json"
         candidate_results = _candidate_result_items(candidate_results_path)
         candidate_paths = [path for path in summary.get("candidate_paths", []) if isinstance(path, str)]
@@ -1417,6 +2382,23 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "url": _image_url(resolved_candidate_path),
                 }
             )
+        if not candidates and isinstance(row.get("ownership"), list):
+            role_counts = row.get("role_counts") if isinstance(row.get("role_counts"), dict) else {}
+            role_summary = ", ".join(
+                f"{role}={count}"
+                for role, count in sorted(role_counts.items())
+                if isinstance(role, str)
+            )
+            candidates.append(
+                {
+                    "id": "local_ownership",
+                    "label": "local ownership",
+                    "selected": True,
+                    "tools": top_roles[:8],
+                    "reason": role_summary or "Local local ownership ranking.",
+                    "url": _image_url(row.get("protected_rgba") or row.get("rgba")),
+                }
+            )
 
         sample_paths = _game_sample_paths(case_id)
         row_variant = row.get("sample_variant")
@@ -1439,8 +2421,8 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "runStatus": "ran" if is_active_run else "not-run",
                     "category": row.get("category", ""),
                     "verdict": row.get("diagnosis_verdict", "") if is_active_run else "not-run",
-                    "expectedHit": bool(row.get("expected_hit")) if is_active_run else False,
-                    "expectedAnyHit": bool(row.get("expected_any_hit", row.get("expected_hit"))) if is_active_run else False,
+                    "expectedHit": bool(row.get("expected_hit", row.get("expected_role_hit"))) if is_active_run else False,
+                    "expectedAnyHit": bool(row.get("expected_any_hit", row.get("expected_hit", row.get("expected_role_hit")))) if is_active_run else False,
                     "harmfulToolSelected": bool(row.get("harmful_tool_selected")) if is_active_run else False,
                     "harmfulTools": row.get("harmful_tools", []) if is_active_run else [],
                     "shadowPolicyRequired": bool(row.get("shadow_policy_required")) if is_active_run else False,
@@ -1449,10 +2431,10 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "regionCount": row.get("region_count", 0) if is_active_run else 0,
                     "counts": row.get("counts", {}) if is_active_run else {},
                     "selectedTools": fallback_tools if is_active_run else [],
-                    "primaryAmbiguity": row.get("primary_ambiguity", ""),
+                    "primaryAmbiguity": row.get("primary_ambiguity", row.get("expected_role", "")),
                     "originalUrl": _image_url(sample_path),
                     "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_active_run else None,
-                    "matteUrl": _image_url(summary.get("rgba") or root / "matte" / case_id / "rgba.png")
+                    "matteUrl": _image_url(summary.get("rgba") or row.get("protected_rgba") or row.get("rgba") or root / "matte" / case_id / "rgba.png")
                     if is_active_run
                     else None,
                     "candidates": candidates if is_active_run else [],
@@ -1463,8 +2445,8 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         "runId": report.get("run_id", root.name),
         "model": report.get("model", ""),
         "success": f"{report.get('ok_count', 0)}/{report.get('case_count', len(cases))}",
-        "expectedHit": f"{report.get('expected_tool_hit_count', 0)}/{report.get('case_count', len(cases))}",
-        "expectedAnyHit": f"{report.get('expected_any_tool_hit_count', report.get('expected_tool_hit_count', 0))}/{report.get('case_count', len(cases))}",
+        "expectedHit": f"{report.get('expected_tool_hit_count', report.get('expected_role_hit_count', 0))}/{report.get('case_count', len(cases))}",
+        "expectedAnyHit": f"{report.get('expected_any_tool_hit_count', report.get('expected_tool_hit_count', report.get('expected_role_hit_count', 0)))}/{report.get('case_count', len(cases))}",
         "harmfulTools": f"{report.get('harmful_tool_selected_count', 0)}/{report.get('case_count', len(cases))}",
         "shadowPolicyHit": f"{report.get('shadow_policy_hit_count', 0)}/{report.get('shadow_policy_required_count', 0)}",
         "sampleRows": len(cases),
@@ -2232,11 +3214,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
           backgrounds.forEach((bg) => {{
             const cell = document.createElement("td");
-            if (candidate && candidate.url) {{
+            const previewUrl = candidate && candidate.url ? candidate.url : (caseItem.runStatus === "ran" ? caseItem.matteUrl : "");
+            if (previewUrl) {{
               cell.appendChild(
                 makePreview(
-                  candidate.url,
-                  `${{caseItem.sampleCode}} · ${{caseItem.caseId}} · ${{caseItem.sampleVariant}} · ${{candidate.label || candidate.id}} · ${{bg}}`,
+                  previewUrl,
+                  `${{caseItem.sampleCode}} · ${{caseItem.caseId}} · ${{caseItem.sampleVariant}} · ${{candidate ? (candidate.label || candidate.id) : "matte"}} · ${{bg}}`,
                   bg,
                 ),
               );

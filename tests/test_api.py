@@ -64,6 +64,37 @@ def test_matte_image_ndarray_returns_response(_force_grabcut):
     assert r.output_dir is None
 
 
+def test_matte_image_reuses_cached_segmenter(monkeypatch):
+    import ermbg.api as api
+
+    class _CountingSegmenter:
+        def __init__(self):
+            self.calls = 0
+
+        def segment(self, image, object_prompt=None):
+            self.calls += 1
+            alpha = np.zeros(image.shape[:2], dtype=np.float32)
+            alpha[32:96, 32:96] = 1.0
+            return alpha
+
+    built: list[_CountingSegmenter] = []
+
+    def stub_build_segmenter(**kwargs):
+        seg = _CountingSegmenter()
+        built.append(seg)
+        return seg
+
+    api._SEGMENTER_CACHE.clear()
+    monkeypatch.setattr(api, "build_segmenter", stub_build_segmenter)
+
+    img = _solid_green_with_red_subject()
+    matte_image(img, backend="grabcut", matting_model="cache-test")
+    matte_image(img, backend="grabcut", matting_model="cache-test")
+
+    assert len(built) == 1
+    assert built[0].calls == 2
+
+
 def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path):
     img = _solid_green_with_red_subject()
     p = tmp_path / "in.png"

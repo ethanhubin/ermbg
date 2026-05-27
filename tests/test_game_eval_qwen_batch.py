@@ -34,16 +34,19 @@ def test_budget_regions_keeps_shadow_candidates_in_front():
     regions = [
         RiskRegion(id="hard_edge_group_0", kind="hard_edge_candidate", mask=mask),
         RiskRegion(id="same_bg_0", kind="same_bg_enclosed_region", mask=mask),
+        RiskRegion(id="translucent_0", kind="translucent_candidate", mask=mask),
         RiskRegion(id="shadow_candidate_0", kind="owned_shadow_candidate", mask=mask),
     ]
 
     budgeted = module._budget_regions(regions, max_regions=2)
 
-    assert [region.id for region in budgeted] == ["shadow_candidate_0", "same_bg_0"]
+    assert [region.id for region in budgeted] == ["shadow_candidate_0", "translucent_0"]
     assert module._region_counts(budgeted) == {
-        "same_bg_enclosed_region": 1,
+        "same_bg_enclosed_region": 0,
         "alpha_keyer_disagreement": 0,
         "hard_edge_candidate": 0,
+        "translucent_candidate": 1,
+        "glow_soft_alpha_candidate": 0,
         "owned_shadow_candidate": 1,
     }
 

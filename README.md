@@ -20,8 +20,10 @@ AI image model  ->  known background image  ->  ERMBG  ->  RGBA asset
 - **Known-B foreground recovery**:已知背景时用 linear-RGB unmix,不只靠经验 chroma 脚本。
 - **RGBA hygiene check**:脏透明 PNG 的白边/黑边/旧背景泄漏/硬二值 alpha 会被识别并重抠。
 - **Keyer + matting 融合**:补小漏检、守住 topology、修 hard edge、对同色歧义生成候选。
-- **Owned shadow 保留**:对符合 known-B scalar darkening 的源图阴影生成 shadow matte;
-  VLM 只做语义约束,强度仍由本地 CV 测量。
+- **Local ownership 归属判断**:对 hole / soft subject / shadow-like layer 做本地多假设评分,
+  默认走本地确定性证据。
+- **Owned shadow 保留**:对符合 known-B scalar darkening 的源图阴影生成 shadow matte,
+  强度由本地 CV 测量。
 - **多背景 QA**:black / white / grey / cyan / magenta / checker,并带 lightwrap 变体。
 - **多入口**:CLI、Python API、ComfyUI 节点、Web/API、OpenClaw skill。
 
@@ -67,34 +69,45 @@ uv pip install -e ".[torch,dev]"
 *_qa/on_*.png
 ```
 
-## VLM Semantic Prior
+## Local Ownership
 
-VLM 是语义约束层,不是 alpha 生成器。
+当前方向是 Local Ownership:默认用本地证据做 region ownership 判断。旧的模型规划路线已经归档,
+不再作为工程主路径。
 
 ```text
-VLM: subject / owned shadow / material-region plausibility
-CV: pixel membership, alpha, foreground RGB, shadow opacity
+known background image
+  -> local matte
+  -> local evidence regions
+  -> local multi-hypothesis ownership scoring
+  -> execution-mask arbitration
+  -> protected matte only when soft subject material needs protection
 ```
 
-`--vlm-prior` 默认是 shadow-only:
+当前角色:
+
+- `hole`:透明洞/背景区域,保持低 alpha。
+- `opaque_subject`:硬主体漏检,允许受保护的 alpha repair。
+- `subject_soft_layer`:玻璃、辉光、烟雾、柔边或半透明主体层,保护 soft alpha。
+- `shadow_like_layer`:已知背景的 scalar darkening,走 shadow matte。
+- `conservative_unknown`:证据不足,保留当前 alpha。
+
+当前 G02/G04/G06 green+white 小批次:
 
 ```bash
-.venv/bin/ermbg matte samples/vlm_eval_game/ui_hard_button_soft_shadow/green.png \
-  --vlm-prior \
-  --vlm-provider comfy-qwen \
-  --vlm-model Qwen3-VL-4B-Instruct-FP8
+.venv/bin/python scripts/10_local_ownership_batch.py \
+  --out-dir out/local_ownership_resolved2_g02_g04_g06_20260527 \
+  --sample-id G02,G04,G06 \
+  --variants green,white
 ```
 
-同色主体材质保护可以显式打开,但不要和 shadow 验收混在一起:
+结果:
 
-```bash
-.venv/bin/ermbg matte input.png --vlm-prior --vlm-prior-mode material
-```
+- `ok=6/6`
+- `expected_role_hit=6/6`
+- G02 使用 base matte,避免 material-protected rerun 误伤软阴影。
+- G04/G06 使用 protected matte,避免半透明/辉光被 keyer/repair 泛白或变硬。
 
-Provider:
-
-- `openai`
-- `comfy-qwen`:使用远端 ComfyUI `http://192.168.0.8:8000`
+详情见 [docs/local-ownership.md](docs/local-ownership.md)。
 
 ## Python API
 
@@ -168,20 +181,18 @@ checker 合成、白/黑底对比和 alpha 对比。
 # 提交/接力前全量
 .venv/bin/pytest -q
 
-# Shadow / semantic-prior 专项
-.venv/bin/pytest tests/test_shadow.py tests/test_vlm_semantic.py -q
+# Local ownership / shadow 专项
+.venv/bin/pytest tests/test_ownership.py tests/test_shadow.py tests/test_risk.py -q
 ```
 
-全量测试最近一次通过为 154 项。
+全量测试数量会随当前分支变化;接力前以本地 `.venv/bin/pytest -q` 为准。
 
 ## 文档索引
 
-- [clean_transparent_matting_engineering_plan.md](clean_transparent_matting_engineering_plan.md):
-  当前工程接力入口,pipeline、defaults、CLI、report 字段、focus。
-- [docs/g02-soft-shadow-analysis.md](docs/g02-soft-shadow-analysis.md):
-  G02 soft shadow、Qwen provider、scope correction、artifact 和下一步。
-- [docs/known-b-candidate-matting.md](docs/known-b-candidate-matting.md):
-  EvidenceRegion -> CandidatePlan 设计和 VLM planner 边界。
+- [docs/local-ownership.md](docs/local-ownership.md):
+  当前工程接力入口:local ownership、执行层仲裁、G02/G04/G06 现状和复现命令。
+- [docs/archive/](docs/archive/):
+  旧模型规划、candidate-planner、G02 单样本路线归档,只作历史参考。
 - [DEPLOY.md](DEPLOY.md):ComfyUI 部署。
 - [comfy_nodes/README.md](comfy_nodes/README.md):ComfyUI 节点用法。
 

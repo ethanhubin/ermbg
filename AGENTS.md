@@ -90,29 +90,30 @@ tests/                pytest, 22 tests passing
 
 ### Test / eval batch convention
 
-- All sample tests, visual regressions, VLM/game eval reruns, probe comparisons, and one-off debugging runs that produce artifacts must write into a **batch directory** under `out/`.
-- Do not write new eval artifacts directly into loose ad-hoc paths. Use a stable batch id such as `out/vlm_eval_game_<purpose>_<YYYYMMDD>/` or an explicit user-provided batch name.
+- All sample tests, visual regressions, local-ownership/game eval reruns, probe comparisons, and one-off debugging runs that produce artifacts must write into a **batch directory** under `out/`.
+- Do not write new eval artifacts directly into loose ad-hoc paths. Use a stable batch id such as `out/local_ownership_<purpose>_<YYYYMMDD>/` or an explicit user-provided batch name.
 - Each batch should be self-contained and browsable: keep per-case outputs under the batch root and write a machine-readable summary (`summary.json`, `summary_*.json`, or `eval_report.json`) at a predictable location.
 - Web/debug tooling should discover and browse batches rather than hard-code a single result directory. New test flows should automatically register their outputs through the batch summary.
 - When re-running a specific sample such as `G02-G`, still run it through the same batch flow and record the selected sample id / variant in the summary; do not create orphan outputs.
 
-## Default decisions (Phase 1.2 settled)
+## Default decisions
 
 - **Matting model**: `ZhengPeng7/BiRefNet-matting` (MIT, matting-trained)
 - **Background convention**: green-screen RGB (0, 200, 0) — see `ermbg.probe.prompts.GREEN_SCREEN_PROMPT`
 - **Despill default**: `chroma_cap` (auto-degrades to `local_borrow` when B has no dominant channel)
 - **QA backgrounds**: black / white / grey / cyan / magenta / checker, plus a `_lightwrap` variant for each
 
-### VLM / shadow semantic prior contract
+### Current local ownership contract
 
-- `--vlm-prior` is already wired as a semantic constraint mechanism, not a future placeholder.
+- Current active route is documented in `docs/local-ownership.md`.
+- Default direction is local, deterministic ownership scoring from measurable known-background evidence.
 - Current flow is:
-  1. local CV computes known-background scalar-darkening evidence;
-  2. `ermbg.vlm_semantic.extract_shadow_candidate_regions()` converts that evidence into candidate regions;
-  3. OpenAI or Comfy Qwen classifies each candidate as `shadow`, `subject`, `subject_material`, `shadow_search`, `background`, or `uncertain`;
-  4. `ermbg.matting.matte()` passes the accepted semantic masks into `ShadowPrior`;
-  5. `ermbg.shadow.estimate_shadow_alpha()` still re-measures pixel opacity locally from `C_linear ~= scale * B_linear`.
-- VLM must not generate alpha, foreground RGB, or final RGBA. It only constrains ownership/search regions.
-- Do not diagnose shadow ambiguity as "missing VLM"; first inspect whether the candidate generator gave VLM separable regions.
-- Known current limitation: if transparent/subject material and true shadow are already merged into one large scalar-darkening candidate, VLM can only classify the merged region. The next general fix is candidate over-segmentation / region splitting before VLM, not threshold tuning.
-- G02 soft shadow handoff is in `docs/g02-soft-shadow-analysis.md`; keep same-color material recovery separate from shadow acceptance unless explicitly testing material mode.
+  1. local matte and known-background diagnosis compute `B`, alpha, and foreground/debug outputs;
+  2. local evidence extractors produce risk/debug regions;
+  3. `ermbg.ownership.rank_regions_ownership()` ranks each region as `hole`, `opaque_subject`, `subject_soft_layer`, `shadow_like_layer`, or `conservative_unknown`;
+  4. `ermbg.ownership.resolve_execution_masks()` performs global arbitration before any role becomes an execution mask;
+  5. `ermbg.matting.matte()` uses `subject_material_mask` only as a protective constraint, restoring soft-layer alpha after destructive keyer/repair changes;
+  6. shadow opacity is still measured locally from `C_linear ~= scale * B_linear`.
+- Do not route ownership ambiguity to model planning by default. First inspect local signals, role scores, execution masks, and whether foreground/color recovery is the real failure.
+- G02/G04/G06 green+white are the current fast target set. Keep G03 out of the fast loop while this branch is focused on the local ownership path.
+- Archived model-planning and G02 single-sample documents under `docs/archive/` are historical context, not the active plan.

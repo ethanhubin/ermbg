@@ -10,6 +10,7 @@ from ermbg.risk import (
     extract_alpha_keyer_disagreement_regions,
     extract_hard_edge_candidate_regions,
     extract_same_bg_enclosed_regions,
+    extract_translucent_candidate_regions,
 )
 from ermbg.planner import RiskRegion
 
@@ -74,6 +75,34 @@ def test_extract_hard_edge_candidate_region_uses_contrast_and_anchor():
     assert info["accepted_components"] == 1
     assert regions[0].kind == "hard_edge_candidate"
     assert regions[0].mask[15:17, 10:20].all()
+
+
+def test_extract_translucent_candidate_prefers_mid_alpha_material_near_subject():
+    image = np.full((64, 64, 3), (0, 200, 0), dtype=np.uint8)
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    rgba[20:44, 20:44, :3] = (120, 210, 255)
+    rgba[20:44, 20:44, 3] = 115
+    rgba[18:20, 18:46, 3] = 220
+    rgba[44:46, 18:46, 3] = 220
+    rgba[18:46, 18:20, 3] = 220
+    rgba[18:46, 44:46, 3] = 220
+    image[20:44, 20:44] = (80, 190, 210)
+
+    regions, info = extract_translucent_candidate_regions(image, rgba, (0, 200, 0))
+
+    assert info["accepted_components"] == 1
+    assert regions[0].kind == "translucent_candidate"
+    assert regions[0].mask[24:40, 24:40].mean() > 0.80
+    assert regions[0].evidence["signal"] == "mid_alpha_chroma_shift_near_subject"
+
+
+def test_extract_translucent_candidate_rejects_plain_background_hole():
+    image, rgba, _ = _white_bg_red_ring_case()
+
+    regions, info = extract_translucent_candidate_regions(image, rgba, (255, 255, 255))
+
+    assert info["accepted_components"] == 0
+    assert regions == []
 
 
 def test_coalesce_risk_regions_merges_nearby_same_kind_fragments():

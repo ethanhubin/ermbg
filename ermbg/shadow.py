@@ -72,6 +72,7 @@ class ShadowPrior:
     """
 
     subject_mask: np.ndarray | None = None
+    subject_material_mask: np.ndarray | None = None
     shadow_search_mask: np.ndarray | None = None
     shadow_ownership_mask: np.ndarray | None = None
     shadow_allowed: bool = True
@@ -109,6 +110,11 @@ def estimate_shadow_alpha(
         (h, w),
         "ShadowPrior.subject_mask",
     )
+    subject_material = _coerce_optional_mask(
+        prior.subject_material_mask if prior is not None else None,
+        (h, w),
+        "ShadowPrior.subject_material_mask",
+    )
     shadow_search = _coerce_optional_mask(
         prior.shadow_search_mask if prior is not None else None,
         (h, w),
@@ -119,7 +125,14 @@ def estimate_shadow_alpha(
         (h, w),
         "ShadowPrior.shadow_ownership_mask",
     )
-    subject_ownership = np.maximum(alpha, subject_prior) if subject_prior is not None else alpha
+    subject_ownership = alpha
+    if subject_prior is not None:
+        subject_ownership = np.maximum(subject_ownership, subject_prior)
+    if subject_material is not None:
+        # Material ownership is a semantic exclusion domain for shadows. This
+        # generalizes glass/glow failures where scalar darkening inside the
+        # subject looks shadow-like but should remain partial-alpha material.
+        subject_ownership = np.maximum(subject_ownership, subject_material)
 
     bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
     B = io.srgb_to_linear(bg)[0, 0].astype(np.float32)
@@ -237,6 +250,9 @@ def shadow_prior_from_regions(
         if mask is None:
             continue
         if kind in {"subject_owned_region", "subject_region", "owned_region"}:
+            subject = np.maximum(subject, mask)
+            seen_subject = True
+        elif kind in {"subject_material_candidate", "translucent_candidate", "glow_soft_alpha_candidate"}:
             subject = np.maximum(subject, mask)
             seen_subject = True
         elif kind in {"shadow_search_region", "shadow_search"}:
@@ -541,6 +557,7 @@ def _prior_info(prior: ShadowPrior | None) -> dict[str, Any]:
             "source": "",
             "shadow_allowed": True,
             "has_subject_mask": False,
+            "has_subject_material_mask": False,
             "has_shadow_search_mask": False,
             "has_shadow_ownership_mask": False,
         }
@@ -548,6 +565,7 @@ def _prior_info(prior: ShadowPrior | None) -> dict[str, Any]:
         "source": prior.source,
         "shadow_allowed": bool(prior.shadow_allowed),
         "has_subject_mask": prior.subject_mask is not None,
+        "has_subject_material_mask": prior.subject_material_mask is not None,
         "has_shadow_search_mask": prior.shadow_search_mask is not None,
         "has_shadow_ownership_mask": prior.shadow_ownership_mask is not None,
     }

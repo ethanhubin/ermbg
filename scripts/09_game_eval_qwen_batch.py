@@ -203,6 +203,13 @@ def _qwen_prompt(request: VLMPlannerRequest) -> str:
         "shows foreground artwork/material that intentionally has the same color as "
         "the background. For UI frames and buttons, interior apertures are normally "
         "transparent holes, not foreground fill.\n\n"
+        "Policy for translucent_candidate and glow_soft_alpha_candidate: choose "
+        "preserve_soft_alpha and/or mark_translucent when the region is glass, "
+        "frosted material, smoke, glow, magic effects, antialiased soft material, "
+        "or any subject-owned partial-alpha area. Do not call these regions holes "
+        "merely because the background is visible through them. If a translucent "
+        "candidate overlaps shadow-like darkening, treat the material as subject "
+        "material and keep shadow interpretation outside that material.\n\n"
         + json.dumps(user_payload, ensure_ascii=False)
     )
 
@@ -275,9 +282,11 @@ def _budget_regions(regions: list[Any], max_regions: int) -> list[Any]:
         return list(regions)
     priority = {
         "owned_shadow_candidate": 0,
-        "same_bg_enclosed_region": 1,
-        "alpha_keyer_disagreement": 2,
-        "hard_edge_candidate": 3,
+        "translucent_candidate": 1,
+        "glow_soft_alpha_candidate": 1,
+        "same_bg_enclosed_region": 2,
+        "alpha_keyer_disagreement": 3,
+        "hard_edge_candidate": 4,
     }
     ranked = sorted(
         regions,
@@ -295,9 +304,11 @@ def _budget_tool_regions(regions: list[Any], max_regions: int) -> list[Any]:
     if max_regions <= 0 or len(tool_regions) <= max_regions:
         return list(tool_regions)
     priority = {
-        "same_bg_enclosed_region": 0,
-        "alpha_keyer_disagreement": 1,
-        "hard_edge_candidate": 2,
+        "translucent_candidate": 0,
+        "glow_soft_alpha_candidate": 0,
+        "same_bg_enclosed_region": 1,
+        "alpha_keyer_disagreement": 2,
+        "hard_edge_candidate": 3,
     }
     ranked = sorted(
         tool_regions,
@@ -319,6 +330,8 @@ def _region_counts(regions: list[Any]) -> dict[str, int]:
         "same_bg_enclosed_region": counts.get("same_bg_enclosed_region", 0),
         "alpha_keyer_disagreement": counts.get("alpha_keyer_disagreement", 0),
         "hard_edge_candidate": counts.get("hard_edge_candidate", 0),
+        "translucent_candidate": counts.get("translucent_candidate", 0),
+        "glow_soft_alpha_candidate": counts.get("glow_soft_alpha_candidate", 0),
         "owned_shadow_candidate": counts.get("owned_shadow_candidate", 0),
     }
 
@@ -709,6 +722,10 @@ def _harmful_tools(selected_tools: list[str], expected_options: list[Any]) -> li
     if "fill_same_color_region" in expected and "preserve_hole" not in expected:
         if "preserve_hole" in selected:
             harmful.append("preserve_hole")
+    if {"mark_translucent", "preserve_soft_alpha"} & expected and "preserve_hole" in selected:
+        # For soft-alpha material cases, choosing only hole preservation means
+        # the planner mistook see-through material for empty background.
+        harmful.append("preserve_hole")
     return harmful
 
 

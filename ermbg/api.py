@@ -38,6 +38,23 @@ from .segmenter import build_segmenter
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
 MaskLike = Union[str, Path, np.ndarray, Image.Image]
 
+_SEGMENTER_CACHE: dict[tuple[str, str, int], Any] = {}
+
+
+def _get_segmenter(backend: str, model_id: str, input_size: int):
+    """Return a process-local segmenter for repeated API/Web calls.
+
+    BiRefNet model construction dominates first-call latency and is wasteful in
+    long-lived server processes. Cache only by explicit public knobs so tests
+    and callers can still request independent backends/models/sizes.
+    """
+    key = (backend, model_id, int(input_size))
+    seg = _SEGMENTER_CACHE.get(key)
+    if seg is None:
+        seg = build_segmenter(backend=backend, model_id=model_id, input_size=input_size)
+        _SEGMENTER_CACHE[key] = seg
+    return seg
+
 
 @dataclass
 class MatteResponse:
@@ -50,6 +67,7 @@ class MatteResponse:
     background_color: tuple[int, int, int] # measured B (sRGB)
     report: dict[str, Any] = field(default_factory=dict)
     output_dir: Path | None = None         # where files were written (if any)
+    debug: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +150,12 @@ def matte_image(
     qa: bool = False,
     matting_model: str = "ZhengPeng7/BiRefNet-matting",
     backend: str = "auto",
+    input_size: int = 1024,
     bg_color: tuple[int, int, int] = (0, 200, 0),
     despill: str | None = None,
     use_keyer: bool | None = None,
     subject_mask: MaskLike | None = None,
+    shadow_mode: str = "on",
     vlm_prior: bool = False,
     vlm_provider: str = "openai",
     vlm_model: str = "gpt-4o-mini",
@@ -152,6 +172,7 @@ def matte_image(
             full halo/recomp/binarization metric block to the report.
         matting_model: HF id of BiRefNet variant.
         backend: ``auto`` | ``birefnet`` | ``grabcut``.
+        input_size: square matting-net input size for BiRefNet backends.
         bg_color: composite color used when an RGBA source is dirty enough
             that the router falls through to re-matte (since the matting net
             needs RGB on a known constant bg). Default is the green-screen
@@ -161,6 +182,8 @@ def matte_image(
         subject_mask: optional H×W ownership mask from an independent segmenter.
             When provided, ERMBG may repair keyer-supported low-alpha holes
             inside this mask without raising the subject's external soft edge.
+        shadow_mode: ``on`` preserves full shadow recovery, ``off`` skips it
+            for faster previews, ``auto`` currently preserves ``on`` behavior.
         vlm_prior: call the optional VLM semantic-prior pass before
             despill. The model only classifies CV candidate regions; local code
             still computes alpha, foreground colors, and shadow strength.
@@ -180,8 +203,9 @@ def matte_image(
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
-    seg = build_segmenter(backend=backend, model_id=matting_model)
+    seg = _get_segmenter(backend=backend, model_id=matting_model, input_size=input_size)
     semantic_prior = None
+    soft_preview = None
     if vlm_prior:
         from .diagnose import BackgroundDiagnoser
         from .shadow import estimate_shadow_alpha
@@ -193,10 +217,10 @@ def matte_image(
             extract_subject_material_candidate_regions,
         )
 
-        soft = seg.segment(rgb)
-        diag = BackgroundDiagnoser().diagnose(rgb, soft)
+        soft_preview = seg.segment(rgb)
+        diag = BackgroundDiagnoser().diagnose(rgb, soft_preview)
         B = np.asarray(diag.background_color, dtype=np.uint8)
-        shadow_alpha, _ = estimate_shadow_alpha(rgb, soft, B)
+        shadow_alpha, _ = estimate_shadow_alpha(rgb, soft_preview, B)
         mode = vlm_prior_mode.strip().lower()
         if mode not in {"shadow", "material", "all"}:
             raise ValueError(f"Unknown vlm_prior_mode: {vlm_prior_mode!r}")
@@ -205,7 +229,7 @@ def matte_image(
             regions.extend(
                 extract_shadow_candidate_regions(
                     rgb,
-                    soft,
+                    soft_preview,
                     B,
                     shadow_alpha=shadow_alpha,
                 )
@@ -214,7 +238,7 @@ def matte_image(
             regions.extend(
                 extract_subject_material_candidate_regions(
                     rgb,
-                    soft,
+                    soft_preview,
                     B,
                     shadow_alpha=shadow_alpha,
                 )
@@ -222,7 +246,7 @@ def matte_image(
         if regions:
             request = build_vlm_semantic_request(
                 image_srgb=rgb,
-                subject_alpha=soft,
+                subject_alpha=soft_preview,
                 background_color=tuple(int(c) for c in B),
                 regions=regions,
                 shadow_alpha=shadow_alpha,
@@ -249,6 +273,8 @@ def matte_image(
         use_keyer=use_keyer,
         subject_support=subject_support,
         semantic_prior=semantic_prior,
+        soft_mask=soft_preview,
+        shadow_mode=shadow_mode,
     )
 
     # Build report.
@@ -307,6 +333,7 @@ def matte_image(
         background_color=result.background_color,
         report=report,
         output_dir=out_dir,
+        debug=result.debug,
     )
 
 

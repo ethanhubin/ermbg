@@ -37,6 +37,7 @@ from ermbg.risk import (
     extract_alpha_keyer_disagreement_regions,
     extract_hard_edge_candidate_regions,
     extract_same_bg_enclosed_regions,
+    extract_translucent_candidate_regions,
 )
 from ermbg.vlm_payload import VLMPlannerRequest, build_vlm_planner_request
 from ermbg.vlm_planner import FixturePlannerClient
@@ -88,7 +89,12 @@ def extract_debug_regions(
         lum_key,
         background_color,
     )
-    raw_regions = same_regions + alpha_keyer_regions + hard_edge_regions
+    translucent_regions, translucent_info = extract_translucent_candidate_regions(
+        image_srgb,
+        base_rgba,
+        background_color,
+    )
+    raw_regions = same_regions + alpha_keyer_regions + hard_edge_regions + translucent_regions
     regions = (
         coalesce_risk_regions(raw_regions, merge_distance_px=merge_distance_px)
         if coalesce
@@ -103,6 +109,7 @@ def extract_debug_regions(
             "same_bg_enclosed_region": same_info,
             "alpha_keyer_disagreement": alpha_keyer_info,
             "hard_edge_candidate": hard_edge_info,
+            "translucent_candidate": translucent_info,
         },
     }
 
@@ -115,6 +122,7 @@ def _counts(regions: list[RiskRegion]) -> dict[str, int]:
         "same_bg_enclosed_region": counts.get("same_bg_enclosed_region", 0),
         "alpha_keyer_disagreement": counts.get("alpha_keyer_disagreement", 0),
         "hard_edge_candidate": counts.get("hard_edge_candidate", 0),
+        "translucent_candidate": counts.get("translucent_candidate", 0),
     }
 
 

@@ -52,6 +52,19 @@ def test_matte_end_to_end_synthetic():
     assert rec < 0.02
 
 
+def test_matte_reuses_precomputed_soft_mask_without_segmenter_call():
+    image, alpha_gt = _make_case()
+
+    class _ExplodingSegmenter:
+        def segment(self, image, object_prompt=None):
+            raise AssertionError("segmenter should not be called when soft_mask is provided")
+
+    result = matte(image, segmenter=_ExplodingSegmenter(), soft_mask=alpha_gt)
+
+    assert result.alpha.shape == alpha_gt.shape
+    assert np.abs(result.alpha - alpha_gt).mean() < 0.03
+
+
 def test_matte_repairs_pale_panel_on_known_white_background():
     """A pale colored panel on known white should be repaired from full-color
     known-B evidence, not require an external subject mask."""

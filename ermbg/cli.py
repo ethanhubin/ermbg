@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import typer
@@ -30,12 +29,12 @@ from .probe.generator import PROBE_COLORS
 from .probe.synthetic import SyntheticProbeGenerator
 from .qa import run_qa
 from .segmenter import build_segmenter, make_bands
-from .trimap import trimap_to_uint8
+from .slicer import save_slices, slice_image
 
 app = typer.Typer(add_completion=False, help="ERMBG: clean transparent matting toolkit.")
 
 
-def _load_object_prompt(json_path: Path) -> Optional[str]:
+def _load_object_prompt(json_path: Path) -> str | None:
     if not json_path.exists():
         return None
     try:
@@ -54,6 +53,61 @@ def _load_subject_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray:
             f"--subject-mask shape must match input image {shape}, got {mask.shape}"
         )
     return np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# slice
+# ---------------------------------------------------------------------------
+
+
+@app.command("slice")
+def slice_command(
+    input_path: Path = typer.Argument(..., help="Input image path with separated subjects"),
+    out_dir: Path = typer.Option(Path("samples/outputs/slices"), help="Output directory"),
+    bg_color: str | None = typer.Option(
+        None,
+        "--bg-color",
+        help="Optional known background as 'R,G,B'. Default: auto-estimate from image border.",
+    ),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        help="Optional OKLab distance threshold. Default: auto from border noise.",
+    ),
+    min_area: int = typer.Option(64, help="Ignore connected foreground regions smaller than this many pixels."),
+    padding: int = typer.Option(2, help="Padding around each exported rectangle, in pixels."),
+    transparent: bool = typer.Option(
+        False,
+        "--transparent/--no-transparent",
+        help="Export each rectangle as RGBA with background masked out.",
+    ),
+):
+    """Auto-detect solid background and rectangle-slice separated subjects."""
+    bg_tuple = None
+    if bg_color is not None:
+        bg_tuple = tuple(int(c) for c in bg_color.split(","))
+        if len(bg_tuple) != 3:
+            raise typer.BadParameter(f"--bg-color must be 'R,G,B', got {bg_color!r}")
+
+    image = io.load_rgb(input_path)
+    result = slice_image(
+        image,
+        background_color=bg_tuple,
+        distance_threshold=threshold,
+        min_area=min_area,
+        padding=padding,
+    )
+    paths = save_slices(
+        image,
+        result,
+        out_dir,
+        stem=input_path.stem,
+        transparent=transparent,
+    )
+    logger.info(
+        f"Saved {len(paths)} slice(s) to {out_dir}; "
+        f"background={result.background_color}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +177,7 @@ def matte(
         "ZhengPeng7/BiRefNet-matting",
         help="HF model id for the matting segmenter (default: BiRefNet-matting)",
     ),
+    input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
     despill: str = typer.Option(
         "auto",
         help="auto | unmix | chroma_cap | local_borrow | closed_form | none. Overrides router.",
@@ -132,6 +187,7 @@ def matte(
         "--keyer/--no-keyer",
         help="Run chromatic-key on top of matting α to recover small components missed by the matting net (auto-skipped when B is near-grey)",
     ),
+    shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
     bg_color: str = typer.Option(
         "0,200,0",
         help="Composite background for transparent inputs, as 'R,G,B' (default green screen)",
@@ -162,11 +218,13 @@ def matte(
     bg_tuple = tuple(int(c) for c in bg_color.split(","))
     if len(bg_tuple) != 3:
         raise typer.BadParameter(f"--bg-color must be 'R,G,B', got {bg_color!r}")
+    if shadow_mode not in {"on", "off", "auto"}:
+        raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
     image, source_alpha = io.load_image_with_alpha(input_path)
     subject_support = _load_subject_mask(subject_mask, image.shape[:2]) if subject_mask is not None else None
     object_prompt = _load_object_prompt(input_path.with_suffix(".json"))
-    seg = build_segmenter(backend=backend, model_id=matting_model)
+    seg = build_segmenter(backend=backend, model_id=matting_model, input_size=input_size)
 
     # If the source has alpha but the router decides to RE-matte (not pass-through),
     # the matting net needs to see RGB on a known constant background, otherwise
@@ -254,6 +312,8 @@ def matte(
         use_keyer=False if not use_keyer else None,
         subject_support=subject_support,
         semantic_prior=semantic_prior,
+        soft_mask=soft_preview if vlm_prior else None,
+        shadow_mode=shadow_mode,
         legacy_analytic_alpha=legacy_analytic_alpha,
     )
 
@@ -303,6 +363,8 @@ def phase1(
     input_dir: Path = typer.Option(..., help="Directory of input images"),
     out_dir: Path = typer.Option(Path("samples/outputs/phase1"), help="Output root"),
     backend: str = typer.Option("auto"),
+    input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
+    shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
     matte_only_when_ready: bool = typer.Option(
         False,
         help="If true, only run matting when diagnose verdict='ready'. Default: always matte.",
@@ -314,8 +376,10 @@ def phase1(
     if not inputs:
         logger.error(f"No images in {input_dir}")
         return
+    if shadow_mode not in {"on", "off", "auto"}:
+        raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
-    seg = build_segmenter(backend=backend)
+    seg = build_segmenter(backend=backend, input_size=input_size)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary: list[dict] = []
@@ -326,7 +390,8 @@ def phase1(
         case_dir.mkdir(parents=True, exist_ok=True)
         io.save_rgb(case_dir / "original.png", image)
 
-        diag = BackgroundDiagnoser().diagnose(image, seg.segment(image))
+        soft = seg.segment(image)
+        diag = BackgroundDiagnoser().diagnose(image, soft)
         (case_dir / "diagnose.json").write_text(json.dumps(diag.to_dict(), indent=2))
         if diag.risk_map is not None:
             io.save_mask(case_dir / "risk.png", diag.risk_map)
@@ -346,7 +411,7 @@ def phase1(
             continue
 
         try:
-            result = run_matte(image, segmenter=seg)
+            result = run_matte(image, segmenter=seg, soft_mask=soft, shadow_mode=shadow_mode)
         except Exception as e:
             logger.exception(f"matte failed for {p.stem}: {e}")
             row["error"] = str(e)

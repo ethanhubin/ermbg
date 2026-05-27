@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import zipfile
 from io import BytesIO
 
 import numpy as np
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from ermbg.api import MatteResponse
+from ermbg.candidates import MatteCandidate
 from ermbg.web import app
 
 
@@ -41,6 +43,10 @@ def test_index_serves_upload_ui():
     assert "api/matte-candidates" in response.text
     assert "source-preview" in response.text
     assert "candidate-list" in response.text
+    assert 'href="/slice">切图</a>' in response.text
+    assert '"/api/slice-preview"' not in response.text
+    assert '"/api/slice-crops"' not in response.text
+    assert "confirm-slices" not in response.text
     assert "候选缩略图" in response.text
     assert 'href="/eval/game"' in response.text
     assert 'role="tablist"' in response.text
@@ -53,12 +59,35 @@ def test_index_serves_upload_ui():
     assert "setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0)" in response.text
 
 
+def test_slice_page_serves_slice_mode_entry():
+    client = TestClient(app)
+    response = client.get("/slice")
+    assert response.status_code == 200
+    assert "ERMBG 切图" in response.text
+    assert 'href="/">返回抠图</a>' in response.text
+    assert '"/api/slice-preview"' in response.text
+    assert '"/api/slice-crops"' in response.text
+    assert 'sessionStorage.setItem("ermbgPendingSlice"' in response.text
+    assert 'const SLICE_STATE_KEY = "ermbgSliceWorkspace"' in response.text
+    assert "restoreSliceState()" in response.text
+    assert ".thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
+    assert "grid-template-columns: 64px minmax(0, 1fr) 52px" in response.text
+    assert ".thumb { width: 64px; height: 64px;" in response.text
+    assert "grid-template-rows: auto auto auto minmax(0, 1fr) auto" in response.text
+    assert "scrollbar-gutter: stable" in response.text
+    assert ".row:hover { background: #f3f7f1; }" in response.text
+    assert ".row[aria-selected=\"true\"] { background: #d7eadf; }" in response.text
+    assert ".row[aria-selected=\"true\"] .row-action { visibility: visible; }" in response.text
+    assert "overflow-x: hidden" in response.text
+    assert 'action.className = "row-action"' in response.text
+
+
 def test_game_eval_page_serves_result_table():
     client = TestClient(app)
     response = client.get("/eval/game")
     assert response.status_code == 200
     assert "ERMBG Game Eval" in response.text
-    assert "vlm_eval_game_qwen_gw_v001_20260526" in response.text
+    assert "vlm_eval_game_qwen_gw_v009_display_safe_20260527" in response.text
     assert 'id="run-select"' in response.text
     assert 'id="start-full-eval"' in response.text
     assert 'id="eval-panel"' in response.text
@@ -156,7 +185,7 @@ def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(
-        "/eval/game/file/out/vlm_eval_game_qwen_gw_v001_20260526/vlm_qwen/selected_candidates_checker_sheet.png"
+        "/eval/game/file/out/vlm_eval_game_qwen_gw_v009_display_safe_20260527/vlm_qwen/selected_candidates_checker_sheet.png"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
@@ -175,8 +204,8 @@ def test_game_eval_regions_serves_bbox_overlay():
 
 
 def test_matte_endpoint_returns_png(monkeypatch):
-    def fake_matte_image(image, backend="auto", qa=False):
-        del image, backend, qa
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del image, backend, qa, kwargs
         rgba = np.zeros((8, 8, 4), dtype=np.uint8)
         rgba[..., 0] = 220
         rgba[..., 3] = 255
@@ -203,12 +232,54 @@ def test_matte_endpoint_returns_png(monkeypatch):
     assert response.headers["content-type"] == "image/png"
     assert response.headers["x-ermbg-strategy"] == "saturated_bg"
     assert response.headers["x-ermbg-background"] == "0,200,0"
+    assert response.headers["x-ermbg-local-ownership"] == "0"
     assert Image.open(BytesIO(response.content)).mode == "RGBA"
 
 
+def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 60
+        return MatteResponse(
+            rgba=rgba,
+            alpha=rgba[..., 3].astype(np.float32) / 255.0,
+            foreground_srgb=rgba[..., :3],
+            strategy_name="saturated_bg",
+            background_color=(0, 200, 0),
+        )
+
+    def fake_local_candidate(image_rgb, base_rgba, background_color, backend="auto", **kwargs):
+        del image_rgb, base_rgba, background_color, backend, kwargs
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., :3] = (10, 20, 30)
+        rgba[..., 3] = 180
+        return MatteCandidate(id="local_ownership", label="Local Ownership", rgba=rgba, selected=True)
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    monkeypatch.setattr(web, "generate_local_ownership_candidate", fake_local_candidate)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "grabcut"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-ermbg-local-ownership"] == "1"
+    rgba = np.asarray(Image.open(BytesIO(response.content)).convert("RGBA"))
+    assert rgba[0, 0].tolist() == [10, 20, 30, 180]
+
+
 def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
-    def fake_matte_image(image, backend="auto", qa=False):
-        del backend, qa
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
@@ -249,8 +320,8 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
 
 
 def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatch):
-    def fake_matte_image(image, backend="auto", qa=False):
-        del backend, qa
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
         yy, xx = np.mgrid[0:h, 0:w]
@@ -294,6 +365,130 @@ def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatc
     filled = np.asarray(Image.open(BytesIO(filled_png)).convert("RGBA"))
     assert filled[32, 32, 3] == 255
     assert filled[32, 32, :3].tolist() == [255, 255, 255]
+
+
+def test_matte_candidates_endpoint_selects_local_ownership_candidate(monkeypatch):
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 80
+        return MatteResponse(
+            rgba=rgba,
+            alpha=rgba[..., 3].astype(np.float32) / 255.0,
+            foreground_srgb=rgba[..., :3],
+            strategy_name="saturated_bg",
+            background_color=(0, 200, 0),
+        )
+
+    def fake_local_candidate(image_rgb, base_rgba, background_color, backend="auto", **kwargs):
+        del image_rgb, base_rgba, background_color, backend, kwargs
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., :3] = (10, 20, 30)
+        rgba[..., 3] = 180
+        return MatteCandidate(
+            id="local_ownership",
+            label="Local Ownership",
+            rgba=rgba,
+            selected=True,
+            debug={"local_ownership": {"role_mask_pixels": {"subject_soft_layer": 64}}},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    monkeypatch.setattr(web, "generate_local_ownership_candidate", fake_local_candidate)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "grabcut"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    selected = [candidate for candidate in payload["candidates"] if candidate["selected"]]
+    assert [candidate["id"] for candidate in selected] == ["local_ownership"]
+    assert payload["candidates"][-1]["debug"]["local_ownership"]["role_mask_pixels"]["subject_soft_layer"] == 64
+
+
+def test_slice_endpoint_returns_zip_of_rectangular_crops():
+    img = np.full((48, 72, 3), [0, 200, 0], dtype=np.uint8)
+    img[8:22, 8:24] = [240, 30, 30]
+    img[25:42, 44:64] = [20, 40, 220]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice",
+        files={"file": ("sheet.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "1"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["x-ermbg-slice-count"] == "2"
+    with zipfile.ZipFile(BytesIO(response.content)) as zf:
+        names = sorted(zf.namelist())
+        assert names == ["sheet.slices.json", "sheet_001_rgb.png", "sheet_002_rgb.png"]
+        report = json.loads(zf.read("sheet.slices.json"))
+        assert report["background_color"] == [0, 200, 0]
+        assert report["count"] == 2
+        assert Image.open(BytesIO(zf.read("sheet_001_rgb.png"))).mode == "RGB"
+
+
+def test_slice_preview_endpoint_returns_annotated_boxes():
+    img = np.full((48, 72, 3), [0, 200, 0], dtype=np.uint8)
+    img[8:22, 8:24] = [240, 30, 30]
+    img[25:42, 44:64] = [20, 40, 220]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice-preview",
+        files={"file": ("sheet.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["background_color"] == [0, 200, 0]
+    assert payload["annotated"].startswith("data:image/png;base64,")
+    png = base64.b64decode(payload["annotated"].split(",", 1)[1])
+    assert Image.open(BytesIO(png)).mode == "RGBA"
+
+
+def test_slice_crops_endpoint_returns_list_payload():
+    img = np.full((48, 72, 3), [0, 200, 0], dtype=np.uint8)
+    img[8:22, 8:24] = [240, 30, 30]
+    img[25:42, 44:64] = [20, 40, 220]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice-crops",
+        files={"file": ("sheet.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["crops"][0]["filename"] == "icon_001_rgb.png"
+    assert payload["crops"][0]["label"] == "icon_001"
+    assert payload["crops"][0]["kind"] == "icon"
+    assert "confidence" in payload["crops"][0]
+    assert "features" in payload["crops"][0]
+    assert payload["crops"][0]["rgb"].startswith("data:image/png;base64,")
+    png = base64.b64decode(payload["crops"][0]["rgb"].split(",", 1)[1])
+    assert Image.open(BytesIO(png)).mode == "RGB"
 
 
 def test_matte_endpoint_rejects_unknown_backend():

@@ -38,6 +38,7 @@ REGION_COLORS: dict[str, tuple[int, int, int]] = {
     "soft_edge_band": (80, 160, 255),
     "opaque_interior": (80, 220, 120),
     "translucent_candidate": (180, 120, 255),
+    "glow_soft_alpha_candidate": (255, 120, 220),
     "subject_material_candidate": (40, 230, 180),
     "intentional_hole": (255, 80, 120),
     "subject_owned_region": (60, 220, 120),

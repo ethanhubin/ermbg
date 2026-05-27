@@ -58,6 +58,8 @@ def matte(
     use_keyer: bool | None = None,
     subject_support: np.ndarray | None = None,
     semantic_prior: Any | None = None,
+    soft_mask: np.ndarray | None = None,
+    shadow_mode: str = "on",
     legacy_analytic_alpha: bool = False,
 ) -> MattingResult:
     """Run the matting pipeline on one sRGB uint8 image.
@@ -79,6 +81,11 @@ def matte(
             independent segmenter. When provided, ERMBG may repair low-α
             regions inside this mask, but never uses the keyer as a direct
             whole-component alpha replacement.
+        soft_mask: optional precomputed H×W matting-net alpha. Used by batch
+            and preview flows that already ran the segmenter for diagnosis.
+        shadow_mode: ``"on"`` preserves the full two-pass shadow recovery,
+            ``"off"`` skips shadow detection/compositing for faster previews,
+            and ``"auto"`` currently maps to ``"on"`` for quality.
         legacy_analytic_alpha: run the old projection+guided-filter path.
     """
     if image_srgb.dtype != np.uint8:
@@ -87,6 +94,10 @@ def matte(
         raise ValueError("matte() expects HxWx3 image")
     if subject_support is not None and subject_support.shape != image_srgb.shape[:2]:
         raise ValueError("subject_support must have shape HxW matching image_srgb")
+    if soft_mask is not None and soft_mask.shape != image_srgb.shape[:2]:
+        raise ValueError("soft_mask must have shape HxW matching image_srgb")
+    if shadow_mode not in {"on", "off", "auto"}:
+        raise ValueError("shadow_mode must be 'on', 'off', or 'auto'")
 
     if strategy is None:
         strategy = classify_strategy(image_srgb, source_alpha=source_alpha)
@@ -97,8 +108,14 @@ def matte(
         return _passthrough_result(image_srgb, source_alpha, strategy)
 
     # ------------------------------------------------------------------ Matting net
-    seg = segmenter if segmenter is not None else build_segmenter(backend="auto")
-    soft = seg.segment(image_srgb, object_prompt=object_prompt)
+    if soft_mask is None:
+        seg = segmenter if segmenter is not None else build_segmenter(backend="auto")
+        soft = seg.segment(image_srgb, object_prompt=object_prompt)
+    else:
+        # The matting net is by far the slowest stage. Batch/semantic-prior
+        # flows may already have computed this exact alpha preview; accepting it
+        # here avoids a second BiRefNet pass without changing downstream logic.
+        soft = np.clip(soft_mask.astype(np.float32), 0.0, 1.0)
 
     diag = diagnoser if diagnoser is not None else BackgroundDiagnoser()
     report = diag.diagnose(image_srgb, soft)
@@ -119,24 +136,40 @@ def matte(
     shadow_prior = (
         ShadowPrior(
             subject_mask=shadow_subject_mask,
+            subject_material_mask=getattr(semantic_prior, "subject_material_mask", None),
             shadow_search_mask=getattr(semantic_prior, "shadow_search_mask", None),
             shadow_ownership_mask=getattr(semantic_prior, "shadow_ownership_mask", None),
             shadow_allowed=getattr(semantic_prior, "shadow_allowed", True),
             source=shadow_prior_source,
         )
         if shadow_subject_mask is not None
+        or getattr(semantic_prior, "subject_material_mask", None) is not None
         or getattr(semantic_prior, "shadow_search_mask", None) is not None
         or getattr(semantic_prior, "shadow_ownership_mask", None) is not None
         or getattr(semantic_prior, "shadow_allowed", True) is False
         else None
     )
     raw_soft = soft.copy()
-    pre_shadow_alpha, pre_shadow_info = estimate_shadow_alpha(
-        image_srgb,
-        raw_soft,
-        B_srgb,
-        prior=shadow_prior,
-    )
+    material_protect_mask = getattr(semantic_prior, "subject_material_mask", None)
+    if material_protect_mask is not None:
+        material_protect = np.asarray(material_protect_mask, dtype=np.float32) > 0.0
+        if material_protect.shape != image_srgb.shape[:2]:
+            raise ValueError("semantic_prior.subject_material_mask must have shape HxW matching image_srgb")
+    else:
+        material_protect = np.zeros(image_srgb.shape[:2], dtype=bool)
+    shadow_enabled = shadow_mode != "off"
+    if shadow_enabled:
+        pre_shadow_alpha, pre_shadow_info = estimate_shadow_alpha(
+            image_srgb,
+            raw_soft,
+            B_srgb,
+            prior=shadow_prior,
+        )
+    else:
+        pre_shadow_alpha, pre_shadow_info = _empty_shadow_result(
+            image_srgb.shape[:2],
+            reason="shadow_mode=off",
+        )
     shadow_protect = pre_shadow_alpha > 0.0
 
     # ------------------------------------------------------------------ Keyer
@@ -197,6 +230,17 @@ def matte(
         keyer_info["shadow_protected_pixels"] = int(shadow_protect.sum())
         keyer_info["shadow_keyer_raise_reverted_pixels"] = int(raised_by_keyer.sum())
 
+    if material_protect.any():
+        # Subject-owned soft layers are deliberately restored to the segmenter
+        # matte after keyer repair/gating. These regions are visually
+        # underconstrained on white backgrounds; experience-driven repair gates
+        # can otherwise turn glass/glow/smoke into opaque pale foreground.
+        changed_by_keyer = material_protect & (np.abs(soft - raw_soft) > 1e-6)
+        if changed_by_keyer.any():
+            soft[changed_by_keyer] = raw_soft[changed_by_keyer]
+        keyer_info["subject_material_protected_pixels"] = int(material_protect.sum())
+        keyer_info["subject_material_keyer_reverted_pixels"] = int(changed_by_keyer.sum())
+
     if report.verdict == "not-pure-bg":
         logger.warning(
             f"diagnose: verdict=not-pure-bg (purity_sigma={report.purity_sigma:.2f} > "
@@ -217,23 +261,31 @@ def matte(
             C_lin,
             B_lin,
             despill_method,
-            protect_mask=getattr(semantic_prior, "subject_material_mask", None),
+            protect_mask=material_protect_mask,
         )
         despill_used = despill_method
 
     subject_alpha = alpha.copy()
-    shadow_alpha_physical, shadow_info = estimate_shadow_alpha(
-        image_srgb,
-        subject_alpha,
-        B_srgb,
-        prior=shadow_prior,
-    )
-    if not shadow_info["detected"] and pre_shadow_info["detected"]:
-        shadow_alpha_physical = pre_shadow_alpha
-        shadow_info = dict(pre_shadow_info)
-        shadow_info["source"] = "pre_keyer"
+    if shadow_enabled:
+        shadow_alpha_physical, shadow_info = estimate_shadow_alpha(
+            image_srgb,
+            subject_alpha,
+            B_srgb,
+            prior=shadow_prior,
+        )
+        if not shadow_info["detected"] and pre_shadow_info["detected"]:
+            shadow_alpha_physical = pre_shadow_alpha
+            shadow_info = dict(pre_shadow_info)
+            shadow_info["source"] = "pre_keyer"
+        else:
+            shadow_info["source"] = "post_despill"
     else:
-        shadow_info["source"] = "post_despill"
+        shadow_alpha_physical, shadow_info = _empty_shadow_result(
+            image_srgb.shape[:2],
+            reason="shadow_mode=off",
+        )
+        shadow_info["source"] = "disabled"
+    shadow_info["mode"] = shadow_mode
     # The detector returns linear known-background darkening strength. For the
     # exported RGBA, convert that to a black alpha that appears correct in
     # ordinary sRGB compositors; otherwise hard shadows look much too heavy.
@@ -341,6 +393,26 @@ def _passthrough_result(
             },
         },
     )
+
+
+def _empty_shadow_result(shape: tuple[int, int], *, reason: str) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return the standard debug shape when shadow recovery is skipped."""
+    h, w = shape
+    out = np.zeros((h, w), dtype=np.float32)
+    return out, {
+        "method": "known_bg_scalar_darkening",
+        "detected": False,
+        "applied": False,
+        "pixels": 0,
+        "bbox_xyxy": [0, 0, 0, 0],
+        "mean_alpha": 0.0,
+        "p95_alpha": 0.0,
+        "max_alpha": 0.0,
+        "accepted_components": 0,
+        "component_areas": [],
+        "rejected_components": 0,
+        "reason": reason,
+    }
 
 
 def _new_path(

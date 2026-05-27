@@ -191,6 +191,30 @@ def test_subject_prior_prevents_dark_subject_interior_becoming_shadow():
     assert float(shadow_alpha[hole].max()) == 0.0
 
 
+def test_subject_material_prior_excludes_translucent_darkening_from_shadow():
+    h, w = 96, 128
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    subject_alpha = np.zeros((h, w), dtype=np.float32)
+    subject_alpha[26:62, 36:92] = 0.45
+    image[26:62, 36:92] = _scaled_background_color(bg, 0.70)
+
+    material = np.zeros((h, w), dtype=np.float32)
+    material[24:64, 34:94] = 1.0
+    prior = ShadowPrior(subject_material_mask=material, source="translucent_material")
+
+    shadow_alpha, info = estimate_shadow_alpha(
+        image,
+        subject_alpha,
+        tuple(int(c) for c in bg),
+        prior=prior,
+    )
+
+    assert info["detected"] is False
+    assert info["prior"]["has_subject_material_mask"] is True
+    assert float(shadow_alpha[material > 0].max()) == 0.0
+
+
 def test_shadow_search_prior_constrains_scalar_darkening_evidence():
     image, subject, _, bg = _green_subject_with_shadow(shadow=False)
     bg_arr = np.array(bg, dtype=np.uint8)
@@ -249,3 +273,15 @@ def test_matte_composites_detected_shadow_behind_subject():
     a = rgba[..., 3:4] / 255.0
     viewer_comp = rgba[..., :3] * a + bg_arr * (1.0 - a)
     assert np.abs(viewer_comp[shadow_core] - image.astype(np.float32)[shadow_core]).mean() < 3.0
+
+
+def test_matte_shadow_mode_off_skips_shadow_recovery():
+    image, subject, shadow_gt, _ = _green_subject_with_shadow(shadow=True)
+
+    result = matte(image, segmenter=_StubSegmenter(subject), shadow_mode="off")
+    shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
+
+    assert result.debug["shadow"]["detected"] is False
+    assert result.debug["shadow"]["mode"] == "off"
+    assert float(result.debug["shadow_alpha_physical"].max()) == 0.0
+    assert result.alpha[shadow_core].mean() < 0.05

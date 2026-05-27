@@ -13,6 +13,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from . import io
 from .colorspace import oklab_distance, srgb_to_oklab
 from .planner import RiskRegion
 
@@ -217,6 +218,101 @@ def extract_hard_edge_candidate_regions(
     )
 
 
+def extract_translucent_candidate_regions(
+    image_srgb: np.ndarray,
+    rgba: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    alpha_min: float = 0.05,
+    alpha_max: float = 0.95,
+    subject_anchor_threshold: float = 0.70,
+    bg_distance_min: float = 6.0,
+    saturation_min: float = 0.08,
+    scalar_shadow_error_max: float = 0.070,
+    scalar_shadow_strength_min: float = 0.02,
+    min_area_ratio: float = 0.0007,
+    max_area_ratio: float = 0.65,
+    anchor_dilate_px: int = 10,
+) -> tuple[list[RiskRegion], dict[str, Any]]:
+    """Find broad partial-alpha material/glow regions for planner ownership.
+
+    The empirical gates intentionally key on observable material signals: a
+    connected mid-alpha band that remains chromatically different from the
+    known background and touches confident subject support. This catches glass,
+    smoke, and glow without using sample IDs, while rejecting isolated holes
+    whose pixels are just the known background showing through.
+    """
+    if image_srgb.shape[:2] != rgba.shape[:2]:
+        raise ValueError("image_srgb and rgba must share HxW")
+
+    h, w = image_srgb.shape[:2]
+    alpha = rgba[..., 3].astype(np.float32) / 255.0
+    rgb = image_srgb.astype(np.float32) / 255.0
+    saturation = rgb.max(axis=2) - rgb.min(axis=2)
+
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)).reshape(3)
+    bg_distance = oklab_distance(lab, bg_lab).astype(np.float32)
+
+    mid_alpha = (alpha >= float(alpha_min)) & (alpha <= float(alpha_max))
+    material_color = (bg_distance >= float(bg_distance_min)) | (saturation >= float(saturation_min))
+    candidate = mid_alpha & material_color
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    B_lin = io.srgb_to_linear(bg)[0, 0].astype(np.float32)
+    C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
+    denom = float(np.dot(B_lin, B_lin))
+    if denom > 1e-6:
+        scale = np.tensordot(C_lin, B_lin, axes=([-1], [0])) / denom
+        recon = scale[..., None] * B_lin
+        err = np.sqrt(np.mean((C_lin - recon) * (C_lin - recon), axis=-1))
+        strength = np.clip(1.0 - scale, 0.0, 1.0).astype(np.float32)
+        # A soft shadow on a known background also creates mid alpha after
+        # compositing. If the observed color is well explained by scalar
+        # background darkening, leave ownership to the shadow path instead of
+        # presenting it as translucent material.
+        scalar_shadow_like = (strength >= float(scalar_shadow_strength_min)) & (
+            err <= float(scalar_shadow_error_max)
+        )
+        candidate &= ~scalar_shadow_like
+
+    # Partial-alpha material is usually spatially continuous with subject
+    # support. Requiring a nearby high-alpha anchor keeps plain transparent
+    # holes from being mislabeled as translucent material.
+    anchor = alpha >= float(subject_anchor_threshold)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (2 * int(anchor_dilate_px) + 1, 2 * int(anchor_dilate_px) + 1),
+    )
+    near_anchor = cv2.dilate(anchor.astype(np.uint8), kernel, iterations=1).astype(bool)
+    candidate &= near_anchor
+
+    smooth_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_OPEN, smooth_kernel).astype(bool)
+    candidate = cv2.morphologyEx(candidate.astype(np.uint8), cv2.MORPH_CLOSE, smooth_kernel).astype(bool)
+
+    regions, info = _component_regions(
+        candidate,
+        region_prefix="translucent",
+        kind="translucent_candidate",
+        min_area=max(16.0, float(min_area_ratio) * float(h * w)),
+        max_area=max(16.0, float(max_area_ratio) * float(h * w)),
+        reject_border=False,
+        base_evidence={
+            "alpha_min": alpha_min,
+            "alpha_max": alpha_max,
+            "subject_anchor_threshold": subject_anchor_threshold,
+            "bg_distance_min": bg_distance_min,
+            "saturation_min": saturation_min,
+            "scalar_shadow_error_max": scalar_shadow_error_max,
+            "scalar_shadow_strength_min": scalar_shadow_strength_min,
+            "anchor_dilate_px": anchor_dilate_px,
+            "signal": "mid_alpha_chroma_shift_near_subject",
+        },
+    )
+    return regions, info
+
+
 def coalesce_risk_regions(
     regions: list[RiskRegion],
     *,
@@ -294,4 +390,5 @@ __all__ = [
     "extract_alpha_keyer_disagreement_regions",
     "extract_hard_edge_candidate_regions",
     "extract_same_bg_enclosed_regions",
+    "extract_translucent_candidate_regions",
 ]
