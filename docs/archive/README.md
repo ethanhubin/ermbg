@@ -17,7 +17,6 @@ piece back.
   engineering handoff.
 - `g02-soft-shadow-analysis.md`: previous G02 soft-shadow and semantic-prior
   investigation.
-- `game-eval-qwen-gw-standard.md`: previous G/W eval batch convention.
 - `known-b-candidate-matting.md`: previous EvidenceRegion / model-planner design.
 - `sample-12-white-bg-panel-analysis.md`: older sample-12 white-background
   investigation.

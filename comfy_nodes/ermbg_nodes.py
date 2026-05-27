@@ -84,6 +84,7 @@ class ErmbgAutoMatte:
                     "STRING",
                     {"default": "ZhengPeng7/BiRefNet-matting", "multiline": False},
                 ),
+                "shadow_mode": (["on", "auto", "off"], {"default": "on"}),
             },
             "optional": {
                 "source_mask": ("MASK", {"tooltip": "If you have an existing α (e.g. from a prior segment), pass it here. The router will reuse it when clean."}),
@@ -103,6 +104,7 @@ class ErmbgAutoMatte:
         use_keyer: str,
         bg_color: str,
         matting_model: str,
+        shadow_mode: str,
         source_mask: torch.Tensor | None = None,
         subject_mask: torch.Tensor | None = None,
     ):
@@ -137,6 +139,7 @@ class ErmbgAutoMatte:
             despill=despill_arg,
             use_keyer=keyer_arg,
             subject_mask=support,
+            shadow_mode=shadow_mode,
         )
 
         # Outputs: foreground RGB (premultiplied is more compositing-friendly,

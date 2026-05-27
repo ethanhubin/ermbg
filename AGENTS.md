@@ -6,11 +6,11 @@
 
 A long-running ComfyUI server is reachable at **`http://192.168.0.8:8000`**.
 
-- **Hardware**: Windows + RTX 4090 (24 GB VRAM), 64 GB RAM, ComfyUI 0.21.1
+- **Hardware**: Windows + RTX 4090 (24 GB VRAM), 64 GB RAM, ComfyUI 0.22.2 as last verified on 2026-05-27 via `/system_stats` (re-check for version-sensitive work)
 - **Always running** — do **not** propose installing diffusers / SDXL / FLUX / RMBG models locally on the Mac. The Mac is for orchestration (CLI, lightweight CV/numpy, BiRefNet-matting via MPS) only. Heavy generation/inference goes to ComfyUI.
 - **Mac local model budget**: BiRefNet-matting (≈1 GB MPS) yes; SDXL (16+ GB MPS) no — already proven OOM on Phase 1.
 
-**Confirmed installed nodes / models** (full list cached in `/tmp/comfy_object_info.json` after `curl -s http://192.168.0.8:8000/object_info > /tmp/comfy_object_info.json`):
+**Confirmed installed nodes / models** (full list can be cached in `/tmp/comfy_object_info.json` with `curl -s http://192.168.0.8:8000/object_info > /tmp/comfy_object_info.json`; do not call `/object_info` on latency-sensitive hot paths because this install has many plugins):
 
 - Generation backends: Qwen-Image-Edit 2511 fp8, Flux Dev fp8, Flux 2 Klein 9b, FLUX schnell, Z-Image-Turbo
 - Background removal: `Image Rembg` (isnet-general-use / u2net / u2netp / silueta / isnet-anime), `BriaRemoveImageBackground`, `RemoveBackground`, `LayerMask: RmBgUltra V2`
@@ -32,6 +32,7 @@ Workflow templates live in `ermbg/probe/comfyui_*.json`, with `${variable}` plac
 
 | Task | Where |
 |---|---|
+| Full ERMBG AutoMatte / Web default matting | ComfyUI (`ErmbgAutoMatte`, backend `comfy-ermbg`) |
 | BiRefNet-matting (1 GB) | Local MPS (`ermbg.segmenter.BiRefNetSegmenter`) — already wired |
 | BRIA RMBG-2.0 (gated) | ComfyUI (`BriaRemoveImageBackground` node) |
 | RMBG-1.4 / IS-Net family | ComfyUI (`Image Rembg` with `isnet-general-use`) |
@@ -64,13 +65,14 @@ ermbg/
     synthetic.py      mask-and-paste baseline
     sdxl_inpaint.py   diffusers SDXL inpainting (OOM on Mac)
     comfyui.py        Qwen-Edit via remote ComfyUI
+    comfyui_ermbg_matte.py  full ERMBG AutoMatte via remote ComfyUI
     openai_image.py   gpt-image-1 via OpenAI API
     comfyui_*.json    workflow templates
     prompts.py        GREEN_SCREEN_RGB / GREEN_SCREEN_PROMPT
 samples/vlm_eval/            AI-generated VLM planner eval cases
 samples/legacy/inputs/       3.png 4.png ... 8.png + optional *.json prompts
 samples/legacy/outputs/      archived matte_* and green_* output trees
-tests/                pytest, 22 tests passing
+tests/                pytest suite; keep `.venv/bin/pytest -q` passing
 ```
 
 ## Conventions
@@ -96,6 +98,48 @@ tests/                pytest, 22 tests passing
 - Web/debug tooling should discover and browse batches rather than hard-code a single result directory. New test flows should automatically register their outputs through the batch summary.
 - When re-running a specific sample such as `G02-G`, still run it through the same batch flow and record the selected sample id / variant in the summary; do not create orphan outputs.
 
+### Web server update / verification contract
+
+Port **7860** has repeatedly been held by stale or LaunchAgent-managed Web processes. After any change to [ermbg/web.py](ermbg/web.py), Web UI behavior, Web API behavior, or a Web-facing backend path, an AI agent must verify that the running server is the newly updated process before asking Ethan to test in the browser.
+
+- Do **not** assume `pkill -f 'uvicorn ermbg.web:app'` is enough. First inspect the listener:
+
+  ```bash
+  lsof -nP -iTCP:7860 -sTCP:LISTEN
+  ps -p <PID> -o pid,ppid,pgid,command
+  launchctl print gui/$(id -u)/com.ethanhu.ermbg-web 2>&1 | head -n 80
+  ```
+
+- If `com.ethanhu.ermbg-web` is loaded, stop it before starting a manual test server. This LaunchAgent has previously respawned stale ERMBG Web processes and caused false Web test results, including `HTTPConnectionPool(... No route to host)` when the same ComfyUI URL worked from the terminal.
+
+  ```bash
+  launchctl bootout gui/$(id -u)/com.ethanhu.ermbg-web || true
+  ```
+
+- Start the Web server in a detached `screen` session for local browser testing; plain background `nohup ... &` can be reaped by the agent execution environment.
+
+  ```bash
+  screen -S ermbg-web -X quit >/dev/null 2>&1 || true
+  screen -dmS ermbg-web bash -lc 'cd /Users/ethanhu/Desktop/Git/ERMBG && PYTHONPATH=/Users/ethanhu/Desktop/Git/ERMBG .venv/bin/python -m uvicorn ermbg.web:app --host 127.0.0.1 --port 7860 > /tmp/ermbg-web.log 2>&1'
+  ```
+
+- After starting, verify all three layers before reporting success:
+  1. `lsof -nP -iTCP:7860 -sTCP:LISTEN` shows the expected `.venv/bin/python -m uvicorn ermbg.web:app` process.
+  2. `curl -sS http://127.0.0.1:7860/` contains a known marker from the latest change, not just any HTML response. For backend changes, verify expected option/text such as `comfy-ermbg`, `server_elapsed_sec`, or the specific UI string that was changed.
+  3. Run a real HTTP smoke test through `127.0.0.1:7860`, not only `TestClient`. For Comfy-backed matting, post a small PNG to `/api/matte-candidates` with `backend=comfy-ermbg` and confirm status 200 plus JSON `backend == "comfy-ermbg"` and `server_elapsed_sec` is present.
+
+- If Web reports a ComfyUI connection error, compare from the same shell before changing algorithm code:
+
+  ```bash
+  curl -sS --connect-timeout 3 http://192.168.0.8:8000/queue
+  .venv/bin/python - <<'PY'
+  import requests
+  print(requests.get("http://192.168.0.8:8000/system_stats", timeout=3).status_code)
+  PY
+  ```
+
+- Final status updates about Web testing must state which PID owns `7860`, how the server was started, and the result of the real HTTP smoke test. This prevents wasting time testing against an old process.
+
 ## Default decisions
 
 - **Matting model**: `ZhengPeng7/BiRefNet-matting` (MIT, matting-trained)
@@ -103,11 +147,13 @@ tests/                pytest, 22 tests passing
 - **Despill default**: `chroma_cap` (auto-degrades to `local_borrow` when B has no dominant channel)
 - **QA backgrounds**: black / white / grey / cyan / magenta / checker, plus a `_lightwrap` variant for each
 
-### Current local ownership contract
+### Current algorithm / deployment contract
 
-- Current active route is documented in `docs/local-ownership.md`.
-- Default direction is local, deterministic ownership scoring from measurable known-background evidence.
-- Current flow is:
+- Local ownership decision semantics are documented in `docs/local-ownership.md`.
+- Default algorithmic direction is local, deterministic ownership scoring from measurable known-background evidence.
+- The Web UI default backend is `comfy-ermbg`; slice-to-matte transfer also selects `comfy-ermbg`. This runs the full ERMBG pipeline in the remote ComfyUI `ErmbgAutoMatte` node and returns foreground/alpha outputs to the Mac-side Web server.
+- Do not reintroduce the old Web quick path that skipped shadow removal. Web matting should preserve `WEB_SHADOW_MODE = "on"` unless Ethan explicitly asks for a preview-only speed mode.
+- Current local ownership flow is:
   1. local matte and known-background diagnosis compute `B`, alpha, and foreground/debug outputs;
   2. local evidence extractors produce risk/debug regions;
   3. `ermbg.ownership.rank_regions_ownership()` ranks each region as `hole`, `opaque_subject`, `subject_soft_layer`, `shadow_like_layer`, or `conservative_unknown`;

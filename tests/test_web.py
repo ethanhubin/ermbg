@@ -50,13 +50,21 @@ def test_index_serves_upload_ui():
     assert "候选缩略图" in response.text
     assert 'href="/eval/game"' in response.text
     assert 'role="tablist"' in response.text
+    assert ".source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
+    assert ".source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; border:" in response.text
+    assert 'file.addEventListener("change", () => { if (!file.files.length) return; resetResult();' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>auto</option>' in response.text
+    assert '<option value="comfy-ermbg" selected>comfy-ermbg</option>' in response.text
     assert 'canvas.addEventListener("wheel"' in response.text
     assert 'canvas.addEventListener("pointerdown"' in response.text
     assert "selected: candidate.selected === true" in response.text
     assert "setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0)" in response.text
+    assert "formatElapsed(performance.now() - startedAt)" in response.text
+    assert "server_elapsed_sec" in response.text
+    assert "client ${elapsed}" in response.text
+    assert "payload.backend || backend.value" in response.text
+    assert 'backend.value = "comfy-ermbg"' in response.text
 
 
 def test_slice_page_serves_slice_mode_entry():
@@ -80,6 +88,7 @@ def test_slice_page_serves_slice_mode_entry():
     assert ".row[aria-selected=\"true\"] .row-action { visibility: visible; }" in response.text
     assert "overflow-x: hidden" in response.text
     assert 'action.className = "row-action"' in response.text
+    assert 'file.addEventListener("change", () => {\n      if (!file.files.length) return;' in response.text
 
 
 def test_game_eval_page_serves_result_table():
@@ -87,7 +96,7 @@ def test_game_eval_page_serves_result_table():
     response = client.get("/eval/game")
     assert response.status_code == 200
     assert "ERMBG Game Eval" in response.text
-    assert "vlm_eval_game_qwen_gw_v009_display_safe_20260527" in response.text
+    assert "local_ownership_full_20260527" in response.text
     assert 'id="run-select"' in response.text
     assert 'id="start-full-eval"' in response.text
     assert 'id="eval-panel"' in response.text
@@ -100,6 +109,9 @@ def test_game_eval_page_serves_result_table():
     assert "ui_glass_button_soft_shadow" in response.text
     assert '"sampleRows": 18' in response.text
     assert '"sampleId": "G01"' in response.text
+    assert '"sampleId": "G02"' in response.text
+    assert '"defaultSelected": true' in response.text
+    assert '"defaultSelected": false' in response.text
     assert '"sampleCode": "G01-W"' in response.text
     assert '"sampleCode": "G01-G"' in response.text
     assert '"sampleVariant": "white"' in response.text
@@ -107,7 +119,7 @@ def test_game_eval_page_serves_result_table():
     assert '"runStatus": "ran"' in response.text
     assert '"progress": {' in response.text
     assert '"/eval/game/regions/ui_hard_button_no_shadow?variant=green' in response.text
-    assert "comfy-qwen:Qwen3-VL-4B-Instruct-FP8" in response.text
+    assert "local_ownership" in response.text
     assert "<th class=\"regions-col\">regions</th>" in response.text
     assert "<th class=\"preview-col\">purple</th>" in response.text
     assert "<th class=\"preview-col\">green ref</th>" in response.text
@@ -116,7 +128,7 @@ def test_game_eval_page_serves_result_table():
     assert 'data-bg="green"' in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
-    assert "/eval/game/file/out/vlm_eval_game_qwen_gw_v" in response.text
+    assert "/eval/game/file/out/local_ownership_" in response.text
 
 
 def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
@@ -140,7 +152,7 @@ def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["runId"].startswith("vlm_eval_game_qwen_gw_v001_display_safe_")
+    assert payload["runId"].startswith("local_ownership_v001_web_")
     assert payload["status"] == "running"
     assert payload["progress"]["completed"] == 0
     assert payload["progress"]["total"] == 18
@@ -176,16 +188,107 @@ def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
     payload = response.json()
     assert payload["progress"]["total"] == 4
     process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
+    assert "10_local_ownership_batch.py" in process.command[1]
     assert "--sample-id" in process.command
     assert "G03,G05" in process.command
     launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
     assert json.loads(launch.read_text(encoding="utf-8"))["sample_ids"] == ["G03", "G05"]
 
 
+def test_game_eval_running_progress_counts_partial_summaries(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    run_root = tmp_path / "out" / "local_ownership_v001_web_20260527"
+    summary_dir = run_root / "local_ownership" / "ui_hard_button_soft_shadow" / "green"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "summary.json").write_text(
+        json.dumps({"status": "ok"}, indent=2),
+        encoding="utf-8",
+    )
+    error_dir = run_root / "local_ownership" / "ui_hard_button_soft_shadow" / "white"
+    error_dir.mkdir(parents=True)
+    (error_dir / "summary.json").write_text(
+        json.dumps({"status": "error"}, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    web._GAME_EVAL_JOBS.clear()
+
+    progress = web._game_eval_batch_progress(
+        run_root,
+        None,
+        expected_total=6,
+    )
+
+    assert progress["completed"] == 2
+    assert progress["ok"] == 1
+    assert progress["errors"] == 1
+    assert progress["percent"] == 33.3
+    assert web._game_eval_root_has_data(run_root) is True
+
+
+def test_game_eval_page_renders_running_partial_summary(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_hard_button_soft_shadow"
+    sample_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
+    manifest = {
+        "cases": [
+            {
+                "id": "ui_hard_button_soft_shadow",
+                "sample_id": "G02",
+                "green": "samples/vlm_eval_game/ui_hard_button_soft_shadow/green.png",
+            }
+        ]
+    }
+    (tmp_path / "samples" / "vlm_eval_game" / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    run_root = tmp_path / "out" / "local_ownership_v001_web_20260527"
+    summary_dir = run_root / "local_ownership" / "ui_hard_button_soft_shadow" / "green"
+    summary_dir.mkdir(parents=True)
+    matte_dir = run_root / "matte" / "ui_hard_button_soft_shadow" / "green"
+    matte_dir.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(matte_dir / "rgba.png")
+    (summary_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sample_id": "G02",
+                "sample_code": "G02-G",
+                "case_id": "ui_hard_button_soft_shadow",
+                "sample_variant": "green",
+                "expected_role_hit": True,
+                "expected_role": "shadow_like_layer",
+                "rgba": "out/local_ownership_v001_web_20260527/matte/ui_hard_button_soft_shadow/green/rgba.png",
+                "top_roles": ["shadow_like_layer"],
+                "role_counts": {"shadow_like_layer": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", run_root)
+    web._GAME_EVAL_JOBS.clear()
+
+    client = TestClient(app)
+    response = client.get("/eval/game?run=local_ownership_v001_web_20260527")
+
+    assert response.status_code == 200
+    assert "local ownership (running)" in response.text
+    assert '"sampleCode": "G02-G"' in response.text
+    assert '"percent": 50.0' in response.text
+
+
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(
-        "/eval/game/file/out/vlm_eval_game_qwen_gw_v009_display_safe_20260527/vlm_qwen/selected_candidates_checker_sheet.png"
+        "/eval/game/file/out/local_ownership_full_20260527/local_ownership/role_sheet.png"
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
@@ -205,6 +308,7 @@ def test_game_eval_regions_serves_bbox_overlay():
 
 def test_matte_endpoint_returns_png(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert kwargs["shadow_mode"] == "on"
         del image, backend, qa, kwargs
         rgba = np.zeros((8, 8, 4), dtype=np.uint8)
         rgba[..., 0] = 220
@@ -238,6 +342,7 @@ def test_matte_endpoint_returns_png(monkeypatch):
 
 def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert kwargs["shadow_mode"] == "on"
         del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -253,6 +358,7 @@ def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
         )
 
     def fake_local_candidate(image_rgb, base_rgba, background_color, backend="auto", **kwargs):
+        assert kwargs["shadow_mode"] == "on"
         del image_rgb, base_rgba, background_color, backend, kwargs
         rgba = np.zeros((16, 16, 4), dtype=np.uint8)
         rgba[..., :3] = (10, 20, 30)
@@ -279,6 +385,7 @@ def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
 
 def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert kwargs["shadow_mode"] == "on"
         del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -317,6 +424,49 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert data_url.startswith("data:image/png;base64,")
     png = base64.b64decode(data_url.split(",", 1)[1])
     assert Image.open(BytesIO(png)).mode == "RGBA"
+
+
+def test_matte_candidates_endpoint_serializes_comfy_ermbg_debug(monkeypatch):
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert backend == "comfy-ermbg"
+        assert kwargs["shadow_mode"] == "on"
+        del qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="comfy_ermbg",
+            background_color=(0, 200, 0),
+            debug={"soft_mask": np.ones((h, w), dtype=np.float32), "prompt_id": "prompt-1"},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "comfy-ermbg"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["strategy"] == "comfy_ermbg"
+    assert payload["backend"] == "comfy-ermbg"
+    assert isinstance(payload["server_elapsed_sec"], float)
+    assert payload["debug"]["prompt_id"] == "prompt-1"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "远端 ERMBG", True)
+    ]
+    assert payload["candidates"][0]["debug"]["remote"]["prompt_id"] == "prompt-1"
+    assert payload["candidates"][0]["debug"]["remote"]["soft_mask"]["shape"] == [16, 16]
 
 
 def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatch):
@@ -489,6 +639,38 @@ def test_slice_crops_endpoint_returns_list_payload():
     assert payload["crops"][0]["rgb"].startswith("data:image/png;base64,")
     png = base64.b64decode(payload["crops"][0]["rgb"].split(",", 1)[1])
     assert Image.open(BytesIO(png)).mode == "RGB"
+
+
+def test_slice_preview_and_crops_reuse_cached_slice_result(monkeypatch):
+    import ermbg.web as web
+
+    img = np.full((48, 72, 3), [0, 200, 0], dtype=np.uint8)
+    img[8:22, 8:24] = [240, 30, 30]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+
+    calls = {"count": 0}
+    real_slice_image = web.slice_image
+
+    def counted_slice_image(*args, **kwargs):
+        calls["count"] += 1
+        return real_slice_image(*args, **kwargs)
+
+    with web._SLICE_CACHE_LOCK:
+        web._SLICE_CACHE.clear()
+    monkeypatch.setattr(web, "slice_image", counted_slice_image)
+
+    client = TestClient(app)
+    for endpoint in ("/api/slice-preview", "/api/slice-crops"):
+        response = client.post(
+            endpoint,
+            files={"file": ("sheet.png", image_bytes, "image/png")},
+            data={"min_area": "50", "padding": "1"},
+        )
+        assert response.status_code == 200
+
+    assert calls["count"] == 1
 
 
 def test_matte_endpoint_rejects_unknown_backend():

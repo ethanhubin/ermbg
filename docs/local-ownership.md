@@ -163,6 +163,20 @@ Open work:
 
 - improve W-group foreground/color recovery so protected soft layers do not
   become pale or over-white;
+- add ambiguity candidates for large/high-impact soft subject regions where
+  local evidence supports more than one plausible execution policy. G06-G shows
+  the current failure mode: the center purple subject content is protected as a
+  `subject_soft_layer`, but its alpha remains too low, so color is lost on
+  recomposition. When local signals cannot safely distinguish "preserve
+  translucent layer" from "repair underestimated subject material", generate
+  both deterministic candidates:
+  - `preserve_translucent_layer`: keep the current soft alpha and protect it
+    from destructive keyer/repair changes;
+  - `repair_underestimated_subject_material`: raise alpha only in coherent
+    subject-owned interior material using local known-background evidence,
+    topology, and a feathered distance-field transition.
+  The base/protected matte should remain fast and local; candidate generation
+  should be optional, browsable in eval/UI, and testable without network calls.
 - turn the debug batch flow into a cleaner first-class eval command if this
   route becomes the default workflow;
 - expand beyond G02/G04/G06 once the foreground recovery path is stable.

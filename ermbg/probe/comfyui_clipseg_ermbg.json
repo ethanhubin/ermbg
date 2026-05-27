@@ -28,6 +28,7 @@
       "use_keyer": "auto (router decides)",
       "bg_color": "${bg_color}",
       "matting_model": "${matting_model}",
+      "shadow_mode": "on",
       "subject_mask": ["20", 0]
     }
   },

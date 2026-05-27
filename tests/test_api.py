@@ -80,6 +80,7 @@ def test_matte_image_reuses_cached_segmenter(monkeypatch):
     built: list[_CountingSegmenter] = []
 
     def stub_build_segmenter(**kwargs):
+        assert "url" not in kwargs
         seg = _CountingSegmenter()
         built.append(seg)
         return seg
@@ -93,6 +94,69 @@ def test_matte_image_reuses_cached_segmenter(monkeypatch):
 
     assert len(built) == 1
     assert built[0].calls == 2
+
+
+def test_matte_image_cache_separates_comfy_urls(monkeypatch):
+    import ermbg.api as api
+
+    class _Segmenter:
+        def segment(self, image, object_prompt=None):
+            alpha = np.zeros(image.shape[:2], dtype=np.float32)
+            alpha[32:96, 32:96] = 1.0
+            return alpha
+
+    built_urls: list[str] = []
+
+    def stub_build_segmenter(**kwargs):
+        built_urls.append(kwargs["url"])
+        return _Segmenter()
+
+    api._SEGMENTER_CACHE.clear()
+    monkeypatch.setattr(api, "build_segmenter", stub_build_segmenter)
+
+    img = _solid_green_with_red_subject()
+    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-a.invalid")
+    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-b.invalid")
+    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-a.invalid")
+
+    assert built_urls == ["http://comfy-a.invalid", "http://comfy-b.invalid"]
+
+
+def test_matte_image_comfy_ermbg_uses_remote_full_pipeline(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_ermbg_matte as remote_mod
+
+    def fail_build_segmenter(**kwargs):
+        raise AssertionError("comfy-ermbg should not build a local segmenter")
+
+    class _FakeRemoteResult:
+        def __init__(self):
+            self.rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+            self.rgba[..., :3] = (10, 20, 30)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones((128, 128), dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.debug = {"prompt_id": "prompt-1"}
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            assert image_srgb.shape == (128, 128, 3)
+            assert kwargs["shadow_mode"] == "off"
+            return _FakeRemoteResult()
+
+    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
+    monkeypatch.setattr(remote_mod, "ComfyUIErmbgMatteClient", _FakeClient)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(img, backend="comfy-ermbg", shadow_mode="off")
+
+    assert r.strategy_name == "comfy_ermbg"
+    assert r.rgba[0, 0].tolist() == [10, 20, 30, 255]
+    assert r.report["strategy"]["name"] == "comfy_ermbg"
+    assert r.debug["prompt_id"] == "prompt-1"
 
 
 def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path):

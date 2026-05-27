@@ -170,6 +170,36 @@ class GrabCutSegmenter:
         return np.clip(out, 0.0, 1.0)
 
 
+class ComfyRembgSegmenter:
+    """Remote ComfyUI rembg segmenter.
+
+    This uses the already-running 4090 ComfyUI server as a model host and
+    returns the alpha channel from its RGBA output. It is intentionally a
+    segmenter backend, so the local ERMBG router/keyer/despill/shadow logic
+    stays unchanged while the heavy foreground estimation moves off the Mac.
+    """
+
+    def __init__(
+        self,
+        url: str = "http://192.168.0.8:8000",
+        timeout: float = 600.0,
+        poll_interval: float = 1.0,
+    ) -> None:
+        from .probe.comfyui_rmbg import ComfyUIRembgBaseline
+
+        self.client = ComfyUIRembgBaseline(
+            url=url,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        self.url = url
+
+    def segment(self, image: np.ndarray, object_prompt: str | None = None) -> np.ndarray:
+        del object_prompt
+        rgba = self.client.matte(image)
+        return (rgba[..., 3].astype(np.float32) / 255.0).clip(0.0, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
@@ -181,8 +211,11 @@ def build_segmenter(
 ):
     """Pick a segmenter based on what's installed.
 
-    backend: 'auto' | 'birefnet' | 'grabcut'.
+    backend: 'auto' | 'birefnet' | 'grabcut' | 'comfy-rmbg'.
     """
+    if backend == "comfy-rmbg":
+        allowed = {"url", "timeout", "poll_interval"}
+        return ComfyRembgSegmenter(**{k: v for k, v in kwargs.items() if k in allowed})
     if backend in ("auto", "birefnet"):
         try:
             return BiRefNetSegmenter(**kwargs)
@@ -208,6 +241,7 @@ def segment_subject(
 __all__ = [
     "CoarseMask",
     "BiRefNetSegmenter",
+    "ComfyRembgSegmenter",
     "GrabCutSegmenter",
     "build_segmenter",
     "make_bands",

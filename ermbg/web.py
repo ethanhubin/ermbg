@@ -7,12 +7,15 @@ run ``matte_image``, preview the returned RGBA PNG, and download it.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
+from collections import OrderedDict
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +24,7 @@ from typing import Annotated, Any
 from urllib.parse import quote
 
 import numpy as np
+import cv2
 from PIL import Image, ImageDraw
 
 try:
@@ -32,17 +36,14 @@ except ImportError as e:  # pragma: no cover - exercised only without web extra
 from .api import matte_image
 from .candidates import MatteCandidate, generate_matte_candidates
 from .local_ownership import generate_local_ownership_candidate
-from .slicer import SliceBox, classify_ui_slice, crop_slice, slice_image
+from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
-ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet"}
+ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet", "comfy-rmbg", "comfy-ermbg"}
+WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "vlm_eval_game_qwen_gw_v009_display_safe_20260527"
-GAME_EVAL_PREFIX = "vlm_eval_game_qwen_gw_v"
+DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
-GAME_EVAL_RUN_PREFIXES = (
-    GAME_EVAL_PREFIX,
-    LOCAL_OWNERSHIP_EVAL_PREFIX,
-)
+FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
     "same_bg_enclosed_region": (0, 153, 255, 235),
@@ -58,6 +59,10 @@ REGION_FILL_COLORS = {
 app = FastAPI(title="ERMBG Web", version="0.1.0")
 _GAME_EVAL_JOBS: dict[str, dict[str, object]] = {}
 _GAME_EVAL_JOBS_LOCK = Lock()
+_SLICE_CACHE_MAX = 4
+_SLICE_WEB_MAX_PIXELS = 4_000_000
+_SLICE_CACHE: OrderedDict[tuple[str, int, int], SliceResult] = OrderedDict()
+_SLICE_CACHE_LOCK = Lock()
 
 
 def _encode_png(rgba: np.ndarray) -> bytes:
@@ -72,8 +77,7 @@ def _encode_rgb_png(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def _load_upload_image(upload: UploadFile) -> Image.Image:
-    data = upload.file.read()
+def _image_from_upload_bytes(data: bytes) -> Image.Image:
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
@@ -84,6 +88,15 @@ def _load_upload_image(upload: UploadFile) -> Image.Image:
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image.") from e
 
     return image.convert("RGBA" if image.mode == "RGBA" else "RGB")
+
+
+def _load_upload_image(upload: UploadFile) -> Image.Image:
+    return _image_from_upload_bytes(upload.file.read())
+
+
+def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str]:
+    data = upload.file.read()
+    return _image_from_upload_bytes(data), hashlib.sha256(data).hexdigest()
 
 
 @app.get("/health")
@@ -121,8 +134,8 @@ def _matte_page_html() -> str:
     button:disabled, a.download[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
     .source-preview { display: none; gap: 10px; }
     .source-preview.is-visible { display: grid; }
-    .source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; overflow: hidden; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; }
-    .source-frame img { display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; }
+    .source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; }
+    .source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
     .source-meta { min-height: auto; font-size: 12px; line-height: 1.4; color: #5d6862; overflow-wrap: anywhere; }
     .preview { min-height: 520px; display: grid; grid-template-rows: 48px 1fr 104px 56px; overflow: hidden; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
@@ -170,7 +183,7 @@ def _matte_page_html() -> str:
         <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
         <div class="source-meta" id="source-meta">未选择图片</div>
       </div>
-      <label>后端<select id="backend" name="backend"><option value="grabcut">grabcut</option><option value="auto" selected>auto</option><option value="birefnet">birefnet</option></select></label>
+      <label>后端<select id="backend" name="backend"><option value="comfy-ermbg" selected>comfy-ermbg</option><option value="grabcut">grabcut</option><option value="auto">auto</option><option value="birefnet">birefnet</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
       <button id="submit" type="submit">抠图</button>
     </form>
     <section class="preview" aria-label="result preview">
@@ -219,6 +232,7 @@ def _matte_page_html() -> str:
     let dragStart = null;
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
+    function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
     function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; submit.textContent = isBusy ? "处理中" : "抠图"; }
     function setPreviewBackground(mode) { canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.bg === mode))); }
     function resetPreviewTransform() { previewScale = 1; previewPanX = 0; previewPanY = 0; dragStart = null; applyPreviewTransform(); }
@@ -228,16 +242,16 @@ def _matte_page_html() -> str:
     function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); canvas.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); canvas.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); }
     function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
-    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; } catch (error) { statusEl.textContent = "切图载入失败"; } }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "comfy-ermbg"; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); if (!file.files.length) { sourceUrl = null; sourcePreview.classList.remove("is-visible"); sourceFrame.innerHTML = '<span class="empty">选择图片后显示预览</span>'; sourceMeta.textContent = "未选择图片"; return; } const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
     tabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
     canvas.addEventListener("wheel", (event) => { if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
     canvas.addEventListener("pointerdown", (event) => { if (!resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
     canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => resetPreviewTransform());
-    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = "完成"; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
     loadPendingSlice();
   </script>
 </body>
@@ -394,7 +408,6 @@ def _matte_page_html() -> str:
       min-height: 148px;
       display: grid;
       place-items: center;
-      overflow: hidden;
       border: 1px solid #d9dfd7;
       border-radius: 6px;
       background-color: #eef2ec;
@@ -408,8 +421,10 @@ def _matte_page_html() -> str:
     }
     .source-frame img {
       display: block;
-      width: 100%;
-      height: 100%;
+      width: auto;
+      height: auto;
+      max-width: 100%;
+      max-height: 100%;
       object-fit: contain;
       object-position: center;
     }
@@ -720,8 +735,10 @@ def _matte_page_html() -> str:
         后端
         <select id="backend" name="backend">
           <option value="grabcut">grabcut</option>
-          <option value="auto" selected>auto</option>
+          <option value="comfy-ermbg" selected>comfy-ermbg</option>
+          <option value="auto">auto</option>
           <option value="birefnet">birefnet</option>
+          <option value="comfy-rmbg">comfy-rmbg</option>
         </select>
       </label>
       <div class="slice-settings" id="slice-settings">
@@ -800,6 +817,10 @@ def _matte_page_html() -> str:
       if (bytes < 1024) return `${bytes} B`;
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
       return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+    }
+
+    function formatElapsed(ms) {
+      return `${(ms / 1000).toFixed(2)}s`;
     }
 
     function setBusy(isBusy) {
@@ -1003,6 +1024,7 @@ def _matte_page_html() -> str:
       setBusy(true);
       statusEl.textContent = `正在抠图 · ${crop.label}`;
       strategyEl.textContent = crop.label;
+      const startedAt = performance.now();
       try {
         const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
         if (!response.ok) {
@@ -1014,10 +1036,12 @@ def _matte_page_html() -> str:
           throw new Error(message);
         }
         const payload = await response.json();
+        const elapsed = formatElapsed(performance.now() - startedAt);
+        const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
         setCandidatePayloads(payload, crop.filename);
         const strategy = payload.strategy || "done";
         const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
-        statusEl.textContent = "完成";
+        statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`;
         strategyEl.textContent = bg ? `${crop.label} · ${strategy} · ${bg}` : `${crop.label} · ${strategy}`;
       } catch (error) {
         statusEl.textContent = error.message;
@@ -1072,17 +1096,11 @@ def _matte_page_html() -> str:
     }
 
     file.addEventListener("change", () => {
+      if (!file.files.length) return;
       resetResult();
       statusEl.textContent = task.value === "slice" ? "等待切图标注" : "等待抠图";
       strategyEl.textContent = backend.value;
       if (sourceUrl) URL.revokeObjectURL(sourceUrl);
-      if (!file.files.length) {
-        sourceUrl = null;
-        sourcePreview.classList.remove("is-visible");
-        sourceFrame.innerHTML = '<span class="empty">选择图片后显示预览</span>';
-        sourceMeta.textContent = "未选择图片";
-        return;
-      }
 
       const selected = file.files[0];
       sourceUrl = URL.createObjectURL(selected);
@@ -1203,6 +1221,7 @@ def _matte_page_html() -> str:
       setBusy(true);
       statusEl.textContent = task.value === "slice" ? "正在自动标注" : "正在抠图";
       strategyEl.textContent = backend.value;
+      const startedAt = performance.now();
       try {
         const endpoint = task.value === "slice" ? "/api/slice-preview" : "/api/matte-candidates";
         const response = await fetch(endpoint, { method: "POST", body: formData });
@@ -1222,10 +1241,12 @@ def _matte_page_html() -> str:
           strategyEl.textContent = bg ? `slice · ${bg}` : "slice";
         } else {
           const payload = await response.json();
+          const elapsed = formatElapsed(performance.now() - startedAt);
+          const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
           setCandidatePayloads(payload, file.files[0].name);
           const strategy = payload.strategy || "done";
           const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
-          statusEl.textContent = "完成";
+          statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`;
           strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy;
         }
       } catch (error) {
@@ -1454,6 +1475,7 @@ def _slice_page_html() -> str:
     }
 
     file.addEventListener("change", () => {
+      if (!file.files.length) return;
       hasPreview = false;
       currentCrops = [];
       selectedCrop = null;
@@ -1462,11 +1484,7 @@ def _slice_page_html() -> str:
       confirmButton.disabled = true;
       preview.innerHTML = '<span class="empty">自动标注会显示在这里</span>';
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
-      if (file.files.length) {
-        runAnnotate();
-      } else {
-        statusEl.textContent = "等待上传";
-      }
+      runAnnotate();
     });
 
     async function runAnnotate() {
@@ -1550,8 +1568,32 @@ def _rgb_png_data_url(rgb: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _json_safe_debug(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        summary: dict[str, object] = {
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+        }
+        if value.size:
+            summary.update(
+                {
+                    "min": float(np.min(value)),
+                    "max": float(np.max(value)),
+                    "mean": float(np.mean(value)),
+                }
+            )
+        return summary
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe_debug(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_debug(v) for v in value]
+    return value
+
+
 def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object]:
-    debug = candidate.debug
+    debug = _json_safe_debug(candidate.debug)
     return {
         "id": candidate.id,
         "label": candidate.label,
@@ -1582,8 +1624,57 @@ def _slice_annotated_preview(image_rgb: np.ndarray, boxes: list[SliceBox]) -> np
     return np.asarray(preview, dtype=np.uint8)
 
 
-def _slice_preview_payload(image_rgb: np.ndarray, stem: str, min_area: int, padding: int) -> dict[str, object]:
-    result = slice_image(image_rgb, min_area=min_area, padding=padding)
+def _cached_slice_result(
+    image_rgb: np.ndarray,
+    image_digest: str,
+    *,
+    min_area: int,
+    padding: int,
+) -> SliceResult:
+    key = (image_digest, int(min_area), int(padding))
+    with _SLICE_CACHE_LOCK:
+        cached = _SLICE_CACHE.get(key)
+        if cached is not None:
+            _SLICE_CACHE.move_to_end(key)
+            return cached
+
+    h, w = image_rgb.shape[:2]
+    pixels = h * w
+    if pixels > _SLICE_WEB_MAX_PIXELS:
+        # Web interaction only needs crop rectangles. For very large sheets,
+        # full-resolution OKLab masking dominates latency; detect boxes on a
+        # bounded preview image and map them back. This protects 4K/6K sheets
+        # from multi-second duplicate work while keeping CLI/core slicing exact.
+        scale = (_SLICE_WEB_MAX_PIXELS / float(pixels)) ** 0.5
+        small_w = max(1, int(round(w * scale)))
+        small_h = max(1, int(round(h * scale)))
+        small = cv2.resize(image_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        small_min_area = max(1, int(round(min_area * scale * scale)))
+        small_padding = max(1, int(round(padding * scale)))
+        small_result = slice_image(small, min_area=small_min_area, padding=small_padding)
+        boxes: list[SliceBox] = []
+        mask = np.zeros((h, w), dtype=np.float32)
+        for box in small_result.boxes:
+            x, y, bw, bh = box.bbox
+            x0 = max(0, int(np.floor(x / scale)) - padding)
+            y0 = max(0, int(np.floor(y / scale)) - padding)
+            x1 = min(w, int(np.ceil((x + bw) / scale)) + padding)
+            y1 = min(h, int(np.ceil((y + bh) / scale)) + padding)
+            mask[y0:y1, x0:x1] = 1.0
+            boxes.append(SliceBox(id=box.id, bbox=(x0, y0, x1 - x0, y1 - y0), area=int(box.area / max(scale * scale, 1e-6))))
+        result = SliceResult(background_color=small_result.background_color, foreground_mask=mask, boxes=boxes)
+    else:
+        result = slice_image(image_rgb, min_area=min_area, padding=padding)
+
+    with _SLICE_CACHE_LOCK:
+        _SLICE_CACHE[key] = result
+        _SLICE_CACHE.move_to_end(key)
+        while len(_SLICE_CACHE) > _SLICE_CACHE_MAX:
+            _SLICE_CACHE.popitem(last=False)
+    return result
+
+
+def _slice_preview_payload(image_rgb: np.ndarray, stem: str, result: SliceResult) -> dict[str, object]:
     annotated = _slice_annotated_preview(image_rgb, result.boxes)
     payload = result.to_dict()
     payload.update(
@@ -1596,8 +1687,7 @@ def _slice_preview_payload(image_rgb: np.ndarray, stem: str, min_area: int, padd
     return payload
 
 
-def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, min_area: int, padding: int) -> dict[str, object]:
-    result = slice_image(image_rgb, min_area=min_area, padding=padding)
+def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, result: SliceResult) -> dict[str, object]:
     crops = []
     kind_counts: dict[str, int] = {}
     for box in result.boxes:
@@ -1637,7 +1727,7 @@ def matte_endpoint(
 
     image = _load_upload_image(file)
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode="off")
+        result = matte_image(image, backend=backend, qa=False, shadow_mode=WEB_SHADOW_MODE)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
@@ -1651,8 +1741,8 @@ def matte_endpoint(
             result.background_color,
             backend=backend,
             soft_mask=result.debug.get("soft_mask"),
-            shadow_mode="off",
-        )
+            shadow_mode=WEB_SHADOW_MODE,
+        ) if backend != "comfy-ermbg" else None
     except Exception:
         local_candidate = None
     if local_candidate is not None:
@@ -1682,14 +1772,26 @@ def matte_candidates_endpoint(
         raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
 
     image = _load_upload_image(file)
+    server_started_at = time.perf_counter()
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode="off")
+        result = matte_image(image, backend=backend, qa=False, shadow_mode=WEB_SHADOW_MODE)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    candidates = generate_matte_candidates(image_rgb, result.rgba, result.background_color)
+    if backend == "comfy-ermbg":
+        candidates = [
+            MatteCandidate(
+                id="auto",
+                label="远端 ERMBG",
+                rgba=result.rgba,
+                selected=True,
+                debug={"remote": result.debug},
+            )
+        ]
+    else:
+        candidates = generate_matte_candidates(image_rgb, result.rgba, result.background_color)
     try:
         local_candidate = generate_local_ownership_candidate(
             image_rgb,
@@ -1697,8 +1799,8 @@ def matte_candidates_endpoint(
             result.background_color,
             backend=backend,
             soft_mask=result.debug.get("soft_mask"),
-            shadow_mode="off",
-        )
+            shadow_mode=WEB_SHADOW_MODE,
+        ) if backend != "comfy-ermbg" else None
     except Exception as e:
         local_candidate = None
         for candidate in candidates:
@@ -1710,6 +1812,9 @@ def matte_candidates_endpoint(
     return {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
+        "backend": backend,
+        "server_elapsed_sec": time.perf_counter() - server_started_at,
+        "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
     }
 
@@ -1721,10 +1826,10 @@ def slice_endpoint(
     padding: Annotated[int, Form()] = 2,
     transparent: Annotated[bool, Form()] = False,
 ) -> Response:
-    image = _load_upload_image(file)
+    image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     try:
-        result = slice_image(image_rgb, min_area=min_area, padding=padding)
+        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slicing failed: {e}") from e
 
@@ -1756,11 +1861,12 @@ def slice_preview_endpoint(
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
 ) -> dict[str, object]:
-    image = _load_upload_image(file)
+    image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        return _slice_preview_payload(image_rgb, stem, min_area=min_area, padding=padding)
+        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        return _slice_preview_payload(image_rgb, stem, result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice preview failed: {e}") from e
 
@@ -1771,11 +1877,12 @@ def slice_crops_endpoint(
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
 ) -> dict[str, object]:
-    image = _load_upload_image(file)
+    image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        return _slice_crop_payloads(image_rgb, stem, min_area=min_area, padding=padding)
+        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        return _slice_crop_payloads(image_rgb, stem, result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice crops failed: {e}") from e
 
@@ -1915,16 +2022,16 @@ def _game_eval_samples() -> list[dict[str, object]]:
                 "caseId": item["id"],
                 "category": item.get("category", ""),
                 "primaryAmbiguity": item.get("primary_ambiguity", ""),
+                "defaultSelected": sample_id in FAST_GAME_EVAL_SAMPLE_IDS,
             }
         )
     return samples
 
 
 def _game_report_path(root: Path) -> Path | None:
-    for name in ("vlm_qwen", "vlm_openai", "local_ownership"):
-        path = root / name / "eval_report.json"
-        if path.exists():
-            return path
+    path = root / "local_ownership" / "eval_report.json"
+    if path.exists():
+        return path
     return None
 
 
@@ -1932,11 +2039,24 @@ def _game_vlm_root(root: Path) -> Path:
     report_path = _game_report_path(root)
     if report_path is not None:
         return report_path.parent
-    return root / "vlm_qwen"
+    return root / "local_ownership"
+
+
+def _game_eval_partial_summary_paths(root: Path) -> list[Path]:
+    local_root = root / "local_ownership"
+    if not local_root.exists():
+        return []
+    return sorted(
+        path
+        for path in local_root.glob("*/*/summary.json")
+        if path.is_file()
+    )
 
 
 def _game_eval_root_has_data(root: Path) -> bool:
     if _game_report_path(root) is not None:
+        return True
+    if _game_eval_partial_summary_paths(root):
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -1958,8 +2078,7 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     out_root = PROJECT_ROOT / "out"
     roots = [
         path
-        for prefix in GAME_EVAL_RUN_PREFIXES
-        for path in sorted(out_root.glob(f"{prefix}*"))
+        for path in sorted(out_root.glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"))
         if path.is_dir() and _game_eval_root_has_data(path)
     ]
     if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
@@ -1984,7 +2103,7 @@ def _validate_game_eval_run_id(run_id: str) -> None:
         "/" in run_id
         or "\\" in run_id
         or run_id.startswith(".")
-        or not any(run_id.startswith(prefix) for prefix in GAME_EVAL_RUN_PREFIXES)
+        or not run_id.startswith(LOCAL_OWNERSHIP_EVAL_PREFIX)
     ):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
 
@@ -1997,17 +2116,17 @@ def _game_eval_run_path(run_id: str) -> Path:
     return root
 
 
-def _next_game_eval_run_id() -> str:
+def _next_game_eval_run_id(prefix: str = LOCAL_OWNERSHIP_EVAL_PREFIX) -> str:
     out_root = PROJECT_ROOT / "out"
-    version_re = re.compile(rf"^{re.escape(GAME_EVAL_PREFIX)}(\d+)")
+    version_re = re.compile(rf"^{re.escape(prefix)}(?:v)?(\d+)")
     versions = []
-    for path in out_root.glob(f"{GAME_EVAL_PREFIX}*"):
+    for path in out_root.glob(f"{prefix}*"):
         match = version_re.match(path.name)
         if match:
             versions.append(int(match.group(1)))
     version = max(versions, default=0) + 1
     stamp = datetime.now().strftime("%Y%m%d")
-    return f"{GAME_EVAL_PREFIX}{version:03d}_display_safe_{stamp}"
+    return f"{LOCAL_OWNERSHIP_EVAL_PREFIX}v{version:03d}_web_{stamp}"
 
 
 def _game_eval_expected_case_count() -> int:
@@ -2028,7 +2147,6 @@ def _game_eval_batch_progress(
     prefer_report_total: bool = False,
     expected_total: int | None = None,
 ) -> dict[str, object]:
-    del root
     total = int(expected_total) if expected_total is not None and expected_total > 0 else _game_eval_expected_case_count()
     completed = 0
     ok = 0
@@ -2046,6 +2164,20 @@ def _game_eval_batch_progress(
                 total = report_total if prefer_report_total and report_total > 0 else max(total, report_total)
             except (TypeError, ValueError):
                 pass
+    else:
+        # The batch script writes per-case summaries immediately, while the
+        # final eval_report.json appears only after every selected variant
+        # finishes. Counting these partial summaries keeps the UI visibly
+        # alive during long local matting/ownership runs.
+        for summary_path in _game_eval_partial_summary_paths(root):
+            summary = _load_json(summary_path)
+            if not isinstance(summary, dict):
+                continue
+            completed += 1
+            if summary.get("status", "ok") == "error":
+                errors += 1
+            else:
+                ok += 1
     percent = 0 if total <= 0 else round(min(100.0, completed * 100.0 / total), 1)
     return {
         "completed": completed,
@@ -2118,11 +2250,11 @@ def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
 
 def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, object]:
     selected_sample_ids = list(sample_ids or [])
-    run_id = _next_game_eval_run_id()
+    run_id = _next_game_eval_run_id(LOCAL_OWNERSHIP_EVAL_PREFIX)
     out_dir = PROJECT_ROOT / "out" / run_id
     out_dir.mkdir(parents=True, exist_ok=False)
     log_path = out_dir / "web_batch.log"
-    script_path = PROJECT_ROOT / "scripts" / "09_game_eval_qwen_batch.py"
+    script_path = PROJECT_ROOT / "scripts" / "10_local_ownership_batch.py"
     command = [
         sys.executable,
         str(script_path),
@@ -2164,8 +2296,7 @@ def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, obj
 def _default_game_eval_root() -> Path:
     roots = [
         path
-        for prefix in GAME_EVAL_RUN_PREFIXES
-        for path in sorted((PROJECT_ROOT / "out").glob(f"{prefix}*"), reverse=True)
+        for path in sorted((PROJECT_ROOT / "out").glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"), reverse=True)
         if path.is_dir() and _game_eval_root_has_data(path)
     ]
     complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
@@ -2173,8 +2304,6 @@ def _default_game_eval_root() -> Path:
         return complete_roots[0]
     if roots:
         return roots[0]
-    if DEFAULT_GAME_EVAL_ROOT.is_dir() and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
-        return DEFAULT_GAME_EVAL_ROOT
     return DEFAULT_GAME_EVAL_ROOT
 
 
@@ -2321,9 +2450,106 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
     }
 
 
+def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
+    summary_paths = _game_eval_partial_summary_paths(root)
+    if not summary_paths:
+        raise HTTPException(status_code=404, detail="Game eval summary not found.")
+
+    sample_ids = _game_sample_ids()
+    cases: list[dict[str, object]] = []
+    ok_count = 0
+    expected_role_hit_count = 0
+    expected_role_required_count = 0
+    for summary_path in summary_paths:
+        row = _load_json(summary_path)
+        if not isinstance(row, dict):
+            continue
+        case_id = str(row.get("case_id") or summary_path.parents[1].name)
+        sample_variant = str(row.get("sample_variant") or summary_path.parent.name)
+        sample_id = str(row.get("sample_id") or sample_ids.get(case_id, case_id))
+        sample_paths = _game_sample_paths(case_id)
+        sample_path = sample_paths.get(sample_variant, "")
+        status = str(row.get("status", "ok"))
+        is_ok = status != "error"
+        ok_count += 1 if is_ok else 0
+        if row.get("expected_role_hit") is not None:
+            expected_role_required_count += 1
+            expected_role_hit_count += 1 if row.get("expected_role_hit") is True else 0
+
+        top_roles = [role for role in row.get("top_roles", []) if isinstance(role, str)]
+        role_counts = row.get("role_counts") if isinstance(row.get("role_counts"), dict) else {}
+        role_summary = ", ".join(
+            f"{role}={count}"
+            for role, count in sorted(role_counts.items())
+            if isinstance(role, str)
+        )
+        preview_path = row.get("protected_rgba") or row.get("rgba")
+        candidates = []
+        if is_ok and preview_path:
+            candidates.append(
+                {
+                    "id": "local_ownership",
+                    "label": "local ownership",
+                    "selected": True,
+                    "tools": top_roles[:8],
+                    "reason": role_summary or "Local ownership ranking.",
+                    "url": _image_url(preview_path),
+                }
+            )
+
+        cases.append(
+            {
+                "caseId": case_id,
+                "sampleId": sample_id,
+                "sampleCode": str(row.get("sample_code") or f"{sample_id}-{sample_variant[:1].upper()}"),
+                "sampleVariant": sample_variant,
+                "runStatus": "ran" if is_ok else "error",
+                "category": row.get("category", ""),
+                "verdict": row.get("diagnosis_verdict", status),
+                "expectedHit": bool(row.get("expected_role_hit")) if is_ok else False,
+                "expectedAnyHit": bool(row.get("expected_role_hit")) if is_ok else False,
+                "harmfulToolSelected": False,
+                "harmfulTools": [],
+                "shadowPolicyRequired": False,
+                "shadowPolicyHit": None,
+                "shadowCandidateCount": 0,
+                "regionCount": row.get("region_count", 0) if is_ok else 0,
+                "counts": row.get("role_mask_pixels", {}) if is_ok else {},
+                "selectedTools": top_roles if is_ok else [],
+                "primaryAmbiguity": row.get("expected_role", row.get("error", "")),
+                "originalUrl": _image_url(sample_path),
+                "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_ok else None,
+                "matteUrl": _image_url(preview_path) if is_ok else None,
+                "candidates": candidates,
+            }
+        )
+
+    progress = _game_eval_batch_progress(root, None)
+    return {
+        "runId": root.name,
+        "model": "local ownership (running)",
+        "success": f"{ok_count}/{progress['total']}",
+        "expectedHit": f"{expected_role_hit_count}/{expected_role_required_count}",
+        "expectedAnyHit": f"{expected_role_hit_count}/{expected_role_required_count}",
+        "harmfulTools": f"0/{len(cases)}",
+        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": None,
+        "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
+        "vlmRoot": str((root / "local_ownership").relative_to(PROJECT_ROOT)),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "progress": progress,
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
 def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
     report_path = _game_report_path(root)
     if report_path is None:
+        if _game_eval_partial_summary_paths(root):
+            return _game_eval_data_from_partial_summaries(root)
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name
@@ -2560,12 +2786,20 @@ def game_eval_regions(
     if not isinstance(summary, dict):
         raise HTTPException(status_code=500, detail="Case summary must be a JSON object.")
     input_path_value = summary.get("input")
-    if not isinstance(input_path_value, str):
-        raise HTTPException(status_code=404, detail="Case input image not found.")
-    input_path = _resolve_project_path(input_path_value)
+    if isinstance(input_path_value, str):
+        input_path = _resolve_project_path(input_path_value)
+    else:
+        sample_paths = _game_sample_paths(case_id)
+        input_path = _resolve_project_path(sample_paths.get(str(row.get("sample_variant", variant or "")), ""))
     if not _is_relative_to(input_path, (PROJECT_ROOT / "samples").resolve()) or not input_path.exists():
         raise HTTPException(status_code=404, detail="Case input image not found.")
     regions = _candidate_regions(_candidate_result_items(out_dir / "candidate_results.json"))
+    if not regions:
+        regions = [
+            item["region"]
+            for item in summary.get("ownership", row.get("ownership", []))
+            if isinstance(item, dict) and isinstance(item.get("region"), dict)
+        ]
     png = _draw_region_overlay(input_path, regions)
     return Response(content=png, media_type="image/png")
 
@@ -3306,7 +3540,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
         checkbox.value = sample.sampleId;
-        checkbox.checked = true;
+        checkbox.checked = sample.defaultSelected === true;
         checkbox.addEventListener("change", updateSelectionCount);
         const code = document.createElement("span");
         code.textContent = sample.sampleId;

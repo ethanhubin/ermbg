@@ -59,6 +59,7 @@ def test_automatte_returns_image_mask_summary(_force_grabcut):
         use_keyer="auto (router decides)",
         bg_color="0,200,0",
         matting_model="ZhengPeng7/BiRefNet-matting",
+        shadow_mode="off",
     )
     # IMAGE convention: [B, H, W, C] float
     assert fg.shape == (1, 128, 128, 3)
@@ -88,6 +89,7 @@ def test_automatte_with_source_mask_passes_through(_force_grabcut):
         use_keyer="auto (router decides)",
         bg_color="0,200,0",
         matting_model="ZhengPeng7/BiRefNet-matting",
+        shadow_mode="off",
         source_mask=mask,
     )
     assert "rgba_passthrough" in summary

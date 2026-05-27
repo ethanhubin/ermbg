@@ -23,6 +23,7 @@ from loguru import logger
 from PIL import Image
 
 from . import io
+from .api import matte_image
 from .diagnose import BackgroundDiagnoser
 from .matting import matte as run_matte
 from .probe.generator import PROBE_COLORS
@@ -119,11 +120,12 @@ def slice_command(
 def segment(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/smoke"), help="Output directory"),
-    backend: str = typer.Option("auto", help="auto | birefnet | grabcut"),
+    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg | comfy-ermbg"),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Run coarse subject segmentation + build a rough trimap."""
     image = io.load_rgb(input_path)
-    seg = build_segmenter(backend=backend)
+    seg = build_segmenter(backend=backend, url=comfy_url)
     soft = seg.segment(image)
     bands = make_bands(soft)
 
@@ -146,11 +148,12 @@ def segment(
 def diagnose(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/diagnose"), help="Output directory"),
-    backend: str = typer.Option("auto", help="Segmenter backend"),
+    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg"),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Background diagnosis: is the image suitable for direct analytic matting?"""
     image = io.load_rgb(input_path)
-    seg = build_segmenter(backend=backend)
+    seg = build_segmenter(backend=backend, url=comfy_url)
     mask = seg.segment(image)
     report = BackgroundDiagnoser().diagnose(image, mask)
 
@@ -172,7 +175,7 @@ def diagnose(
 def matte(
     input_path: Path = typer.Argument(..., help="Input image path (clean solid-bg)"),
     out_dir: Path = typer.Option(Path("samples/outputs/matte"), help="Output directory"),
-    backend: str = typer.Option("auto", help="Segmenter backend"),
+    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg"),
     matting_model: str = typer.Option(
         "ZhengPeng7/BiRefNet-matting",
         help="HF model id for the matting segmenter (default: BiRefNet-matting)",
@@ -208,7 +211,7 @@ def matte(
         "shadow",
         help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
     ),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --vlm-provider comfy-qwen"),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg or --vlm-provider comfy-qwen"),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -221,10 +224,32 @@ def matte(
     if shadow_mode not in {"on", "off", "auto"}:
         raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
+    if backend == "comfy-ermbg":
+        response = matte_image(
+            input_path,
+            output_dir=out_dir,
+            qa=qa,
+            matting_model=matting_model,
+            backend=backend,
+            bg_color=bg_tuple,
+            despill=despill if despill != "auto" else None,
+            use_keyer=False if not use_keyer else None,
+            subject_mask=subject_mask,
+            shadow_mode=shadow_mode,
+            comfy_url=comfy_url,
+        )
+        logger.info(f"Saved remote Comfy ERMBG matte to {response.output_dir}")
+        return
+
     image, source_alpha = io.load_image_with_alpha(input_path)
     subject_support = _load_subject_mask(subject_mask, image.shape[:2]) if subject_mask is not None else None
     object_prompt = _load_object_prompt(input_path.with_suffix(".json"))
-    seg = build_segmenter(backend=backend, model_id=matting_model, input_size=input_size)
+    seg = build_segmenter(
+        backend=backend,
+        model_id=matting_model,
+        input_size=input_size,
+        url=comfy_url,
+    )
 
     # If the source has alpha but the router decides to RE-matte (not pass-through),
     # the matting net needs to see RGB on a known constant background, otherwise
@@ -365,6 +390,7 @@ def phase1(
     backend: str = typer.Option("auto"),
     input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
     shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
+    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
     matte_only_when_ready: bool = typer.Option(
         False,
         help="If true, only run matting when diagnose verdict='ready'. Default: always matte.",
@@ -379,7 +405,7 @@ def phase1(
     if shadow_mode not in {"on", "off", "auto"}:
         raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
-    seg = build_segmenter(backend=backend, input_size=input_size)
+    seg = build_segmenter(backend=backend, input_size=input_size, url=comfy_url)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary: list[dict] = []

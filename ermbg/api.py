@@ -38,20 +38,26 @@ from .segmenter import build_segmenter
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
 MaskLike = Union[str, Path, np.ndarray, Image.Image]
 
-_SEGMENTER_CACHE: dict[tuple[str, str, int], Any] = {}
+_SEGMENTER_CACHE: dict[tuple[str, str, int, str], Any] = {}
 
 
-def _get_segmenter(backend: str, model_id: str, input_size: int):
+def _get_segmenter(backend: str, model_id: str, input_size: int, comfy_url: str):
     """Return a process-local segmenter for repeated API/Web calls.
 
     BiRefNet model construction dominates first-call latency and is wasteful in
     long-lived server processes. Cache only by explicit public knobs so tests
     and callers can still request independent backends/models/sizes.
     """
-    key = (backend, model_id, int(input_size))
+    key = (backend, model_id, int(input_size), comfy_url)
     seg = _SEGMENTER_CACHE.get(key)
     if seg is None:
-        seg = build_segmenter(backend=backend, model_id=model_id, input_size=input_size)
+        kwargs: dict[str, Any] = {
+            "model_id": model_id,
+            "input_size": input_size,
+        }
+        if backend == "comfy-rmbg":
+            kwargs["url"] = comfy_url
+        seg = build_segmenter(backend=backend, **kwargs)
         _SEGMENTER_CACHE[key] = seg
     return seg
 
@@ -171,7 +177,9 @@ def matte_image(
         qa: run multi-background composite QA. Adds ~6 image saves and the
             full halo/recomp/binarization metric block to the report.
         matting_model: HF id of BiRefNet variant.
-        backend: ``auto`` | ``birefnet`` | ``grabcut``.
+        backend: ``auto`` | ``birefnet`` | ``grabcut`` | ``comfy-rmbg`` |
+            ``comfy-ermbg``. ``comfy-ermbg`` runs the full ERMBG Comfy custom
+            node remotely and only downloads the resulting images.
         input_size: square matting-net input size for BiRefNet backends.
         bg_color: composite color used when an RGBA source is dirty enough
             that the router falls through to re-matte (since the matting net
@@ -196,14 +204,37 @@ def matte_image(
     # If source has α but the router decides to re-matte, the matting net
     # needs RGB on a known bg, not the raw (possibly premul or leaky) RGB.
     strat_preview = classify_strategy(rgb, source_alpha=alpha)
-    if alpha is not None and not strat_preview.passthrough:
+    if alpha is not None and (backend == "comfy-ermbg" or not strat_preview.passthrough):
         bg_arr = np.broadcast_to(np.asarray(bg_color, dtype=np.uint8), rgb.shape[:2] + (3,))
         a4 = alpha[..., None]
         rgb_lin = ermbg_io.srgb_to_linear(rgb)
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
-    seg = _get_segmenter(backend=backend, model_id=matting_model, input_size=input_size)
+    if backend == "comfy-ermbg":
+        if vlm_prior:
+            raise ValueError("backend='comfy-ermbg' does not support local vlm_prior")
+        if subject_support is not None:
+            raise ValueError("backend='comfy-ermbg' does not support local subject_mask")
+        return _matte_image_comfy_ermbg(
+            rgb,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            matting_model=matting_model,
+            bg_color=bg_color,
+            despill=despill,
+            use_keyer=use_keyer,
+            shadow_mode=shadow_mode,
+            comfy_url=comfy_url,
+        )
+
+    seg = _get_segmenter(
+        backend=backend,
+        model_id=matting_model,
+        input_size=input_size,
+        comfy_url=comfy_url,
+    )
     semantic_prior = None
     soft_preview = None
     if vlm_prior:
@@ -334,6 +365,98 @@ def matte_image(
         report=report,
         output_dir=out_dir,
         debug=result.debug,
+    )
+
+
+def _matte_image_comfy_ermbg(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    matting_model: str,
+    bg_color: tuple[int, int, int],
+    despill: str | None,
+    use_keyer: bool | None,
+    shadow_mode: str,
+    comfy_url: str,
+) -> MatteResponse:
+    from .probe.comfyui_ermbg_matte import ComfyUIErmbgMatteClient
+
+    client = ComfyUIErmbgMatteClient(url=comfy_url)
+    remote = client.matte(
+        rgb,
+        matting_model=matting_model,
+        bg_color=bg_color,
+        despill=despill,
+        use_keyer=use_keyer,
+        shadow_mode=shadow_mode,
+    )
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(bg_color),
+        "despill_method": "remote",
+        "matting_model": matting_model,
+        "keyer": {},
+        "shadow": {"mode": shadow_mode, "source": "remote_comfy_ermbg"},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "comfy_ermbg",
+            "bg_type": "remote",
+            "image_type": "remote",
+            "keyer_mode": None,
+            "despill": "remote",
+            "passthrough": False,
+            "notes": "Full ERMBG pipeline executed by remote ComfyUI.",
+            "extras": remote.debug,
+        },
+    }
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", remote.rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", remote.alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", remote.foreground_srgb)
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=remote.rgba,
+                soft_mask=remote.alpha,
+                background_color=bg_color,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=remote.rgba,
+            soft_mask=remote.alpha,
+            background_color=bg_color,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        **remote.debug,
+        "strategy": report["strategy"],
+        "soft_mask": remote.alpha,
+        "shadow_alpha": np.zeros(remote.alpha.shape, dtype=np.float32),
+    }
+    return MatteResponse(
+        rgba=remote.rgba,
+        alpha=remote.alpha,
+        foreground_srgb=remote.foreground_srgb,
+        strategy_name="comfy_ermbg",
+        background_color=bg_color,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
     )
 
 
