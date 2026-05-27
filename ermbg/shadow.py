@@ -20,6 +20,11 @@ import numpy as np
 from . import io
 
 DISPLAY_SAFE_SHADOW_OPACITY_SCALE = 0.75
+# Display-layer component filtering is about visible 8-bit PNG artifacts, not
+# physical shadow detection. A black shadow alpha quantized above 10/255 changes
+# a white preview by more than ten code values; those components are visibly
+# inspectable and should satisfy the same area evidence gates as shadow seeds.
+DISPLAY_SHADOW_VISIBLE_ALPHA_U8 = 10
 
 
 @dataclass(frozen=True)
@@ -225,6 +230,67 @@ def estimate_shadow_alpha(
         prior=prior,
         boundary_info=boundary_info,
     )
+
+
+def exterior_scalar_darkening_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    known_background_mask: np.ndarray,
+    thresholds: ShadowThresholds | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Find background-colored darkening that is connected to exterior bg.
+
+    This is a subject-ownership guard, not a visual effect. A chromatic key sees
+    ``C ~= scale * B`` as far from the original background color, but physically
+    it is still the same known background under shadow/edge darkening. The
+    scalar-error and strength gates reuse ``ShadowThresholds`` so this guard
+    follows the same measured model as shadow recovery; the extra exterior flood
+    prevents internal green-ish subject material from being stripped merely for
+    sharing the background hue.
+    """
+    t = thresholds or ShadowThresholds()
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("exterior_scalar_darkening_mask expects sRGB uint8 image")
+    if known_background_mask.shape != image_srgb.shape[:2]:
+        raise ValueError("known_background_mask must share image HxW")
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    B = io.srgb_to_linear(bg)[0, 0].astype(np.float32)
+    denom = float(np.dot(B, B))
+    if denom < 1e-6:
+        out = np.zeros(image_srgb.shape[:2], dtype=bool)
+        return out, {
+            "used": True,
+            "pixels": 0,
+            "candidate_pixels": 0,
+            "reason": "background too dark for scalar model",
+        }
+
+    C = io.srgb_to_linear(image_srgb).astype(np.float32)
+    scale = np.tensordot(C, B, axes=([-1], [0])) / denom
+    recon = scale[..., None] * B
+    err = np.sqrt(np.mean((C - recon) * (C - recon), axis=-1))
+    strength = np.clip(1.0 - scale, 0.0, 1.0).astype(np.float32)
+
+    scalar = (
+        (strength >= float(t.min_strength))
+        & (strength <= float(t.max_strength))
+        & (err <= float(t.max_reconstruction_error))
+    )
+    known_bg = np.asarray(known_background_mask, dtype=bool)
+    exterior = _flood_exterior(known_bg | scalar)
+    out = scalar & exterior
+
+    return out.astype(bool), {
+        "used": True,
+        "pixels": int(out.sum()),
+        "candidate_pixels": int(scalar.sum()),
+        "known_background_pixels": int(known_bg.sum()),
+        "min_strength": t.min_strength,
+        "max_strength": t.max_strength,
+        "max_reconstruction_error": t.max_reconstruction_error,
+        "reason": "",
+    }
 
 
 def shadow_prior_from_regions(
@@ -495,6 +561,14 @@ def _soft_shadow_alpha_from_seeds(
         open_falloff = np.ones((h, w), dtype=np.float32)
 
     alpha = np.where(support, base_alpha * open_falloff, 0.0).astype(np.float32)
+    if boundary_mode == "soft":
+        alpha = _smooth_soft_shadow_alpha(alpha, support, sigma=float(thresholds.contact_blur_sigma))
+    min_visible_area = max(8.0, float(thresholds.min_component_area_ratio) * float(h * w))
+    alpha, visible_component_info = _remove_small_visible_shadow_components(
+        alpha,
+        min_area=min_visible_area,
+        core_alpha_threshold=float(thresholds.min_strength),
+    )
 
     boundary_info = _boundary_info(
         boundary_mode,
@@ -509,9 +583,115 @@ def _soft_shadow_alpha_from_seeds(
             "support_expansion_ratio": support_expansion_ratio,
             "seed_alpha_p75": seed_p75,
             "seed_boundary_alpha_p25": seed_boundary_p25,
+            **visible_component_info,
         }
     )
     return np.clip(alpha, 0.0, 1.0).astype(np.float32), boundary_info
+
+
+def _smooth_soft_shadow_alpha(alpha: np.ndarray, support: np.ndarray, *, sigma: float) -> np.ndarray:
+    """Denoise a measured soft shadow field without expanding its support.
+
+    Known-background shadow strength is measured per pixel from
+    ``C_linear ~= scale * B_linear``. On compressed or antialiased source art,
+    that scalar measurement contains high-frequency quantization noise even
+    when the actual soft cast shadow is spatially continuous. Use normalized
+    convolution inside the already accepted connected support so hard-shadow
+    topology and exterior ownership do not change; only the soft field is
+    smoothed.
+    """
+    if sigma <= 0.0 or not support.any():
+        return alpha.astype(np.float32)
+    support_f = support.astype(np.float32)
+    weighted = cv2.GaussianBlur(
+        alpha.astype(np.float32) * support_f,
+        (0, 0),
+        sigmaX=float(sigma),
+        sigmaY=float(sigma),
+    )
+    weights = cv2.GaussianBlur(
+        support_f,
+        (0, 0),
+        sigmaX=float(sigma),
+        sigmaY=float(sigma),
+    )
+    smoothed = np.divide(weighted, np.maximum(weights, 1e-6))
+    return np.where(support, smoothed, 0.0).astype(np.float32)
+
+
+def _remove_small_visible_shadow_components(
+    alpha: np.ndarray,
+    *,
+    min_area: float,
+    core_alpha_threshold: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Drop tiny shadow islands that would survive 8-bit alpha export.
+
+    The seed filter already rejects tiny strict-shadow components, but loose
+    support and normalized smoothing can leave isolated visible islands in the
+    final alpha. Build components from the same minimum physical shadow
+    strength used for strict evidence, so sub-threshold bridges cannot connect
+    a tiny visible dot to a real shadow body.
+    """
+    visible = alpha >= float(core_alpha_threshold)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        visible.astype(np.uint8),
+        connectivity=8,
+    )
+    out = alpha.copy()
+    removed_components = 0
+    removed_pixels = 0
+    for label_idx in range(1, n_labels):
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        if area < float(min_area):
+            comp = labels == label_idx
+            removed_components += 1
+            removed_pixels += int(comp.sum())
+            out[comp] = 0.0
+    return out.astype(np.float32), {
+        "small_visible_components_removed": int(removed_components),
+        "small_visible_pixels_removed": int(removed_pixels),
+        "small_visible_min_area": float(min_area),
+        "small_visible_core_alpha_threshold": float(core_alpha_threshold),
+    }
+
+
+def remove_small_display_shadow_components(
+    alpha: np.ndarray,
+    *,
+    min_area: float,
+    visible_alpha_u8: int = DISPLAY_SHADOW_VISIBLE_ALPHA_U8,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Drop tiny display-visible shadow islands after sRGB alpha mapping.
+
+    Physical shadow filtering happens before converting to display alpha. The
+    sRGB-safe conversion can still leave a few detached pixels that differ from
+    a white preview by several 8-bit levels. Treat components below the same
+    evidence area floor as display artifacts, while preserving coherent shadow
+    bodies and all sub-visible feather values.
+    """
+    alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    visible = alpha_u8 > max(0, int(visible_alpha_u8))
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        visible.astype(np.uint8),
+        connectivity=8,
+    )
+    out = alpha.copy()
+    removed_components = 0
+    removed_pixels = 0
+    for label_idx in range(1, n_labels):
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        if area < float(min_area):
+            comp = labels == label_idx
+            removed_components += 1
+            removed_pixels += int(comp.sum())
+            out[comp] = 0.0
+    return out.astype(np.float32), {
+        "display_small_components_removed": int(removed_components),
+        "display_small_pixels_removed": int(removed_pixels),
+        "display_small_min_area": float(min_area),
+        "display_visible_alpha_u8": int(visible_alpha_u8),
+    }
 
 
 def _boundary_info(
@@ -582,6 +762,28 @@ def _touches_border(mask: np.ndarray) -> bool:
     return bool(mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any())
 
 
+def _flood_exterior(mask: np.ndarray) -> np.ndarray:
+    """Return pixels connected to the image border inside ``mask``."""
+    h, w = mask.shape
+    flood = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    work = mask.astype(np.uint8).copy()
+
+    seeds: list[tuple[int, int]] = []
+    _, xs = np.nonzero(work[0:1, :])
+    seeds.extend((int(x), 0) for x in xs)
+    _, xs = np.nonzero(work[-1:, :])
+    seeds.extend((int(x), h - 1) for x in xs)
+    ys, _ = np.nonzero(work[:, 0:1])
+    seeds.extend((0, int(y)) for y in ys)
+    ys, _ = np.nonzero(work[:, -1:])
+    seeds.extend((w - 1, int(y)) for y in ys)
+
+    for x, y in seeds:
+        if work[y, x]:
+            cv2.floodFill(work, flood, (x, y), 2)
+    return work == 2
+
+
 def _shadow_info(
     shadow_alpha: np.ndarray,
     accepted_components: list[np.ndarray],
@@ -629,6 +831,8 @@ __all__ = [
     "DISPLAY_SAFE_SHADOW_OPACITY_SCALE",
     "composite_subject_with_shadow",
     "estimate_shadow_alpha",
+    "exterior_scalar_darkening_mask",
     "shadow_alpha_to_display_alpha",
+    "remove_small_display_shadow_components",
     "shadow_prior_from_regions",
 ]

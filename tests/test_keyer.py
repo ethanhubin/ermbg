@@ -12,6 +12,8 @@ from ermbg.keyer import (
     luminance_key_alpha,
     merge_alpha_components,
     repair_hard_edge_alpha,
+    repair_opaque_interior_with_known_bg_key,
+    resolve_hard_edge_alpha_with_known_bg_key,
     repair_alpha_with_known_bg_key,
     repair_alpha_with_subject_support,
 )
@@ -253,6 +255,128 @@ def test_known_bg_repair_rejects_external_fringe():
 
     assert info["accepted_components"] == 0
     np.testing.assert_array_equal(repaired[20:22, 20:60], matting[20:22, 20:60])
+
+
+def test_opaque_interior_repair_snaps_under_opaque_known_bg_surface():
+    """Known-B evidence can distinguish an opaque UI/product interior from
+    genuine soft edge: key-supported pixels away from exterior and anchored to
+    confident foreground should not remain semi-transparent."""
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[22:74, 22:74] = 0.82
+    matting[34:62, 34:62] = 1.0
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:76, 20:76] = 1.0
+
+    repaired, info = repair_opaque_interior_with_known_bg_key(matting, key)
+
+    assert info["source"] == "known_bg_opaque_interior"
+    assert info["accepted_components"] == 1
+    assert info["accepted_pixels"] > 0
+    assert repaired[26:70, 26:70].min() >= 0.98
+    assert repaired[20:22, 20:76].max() == 0.0
+
+
+def test_opaque_interior_repair_preserves_external_antialiasing_fringe():
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[24:72, 24:72] = 1.0
+    matting[20:24, 20:76] = 0.65
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:76, 20:76] = 1.0
+
+    repaired, info = repair_opaque_interior_with_known_bg_key(matting, key, exterior_margin_px=4)
+
+    assert info["accepted_components"] == 0
+    np.testing.assert_array_equal(repaired[20:24, 20:76], matting[20:24, 20:76])
+
+
+def test_opaque_interior_repair_respects_shadow_protect_mask():
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:76, 20:76] = 1.0
+    matting[46:68, 30:66] = 0.72
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:76, 20:76] = 1.0
+    shadow = np.zeros((h, w), dtype=bool)
+    shadow[46:68, 30:66] = True
+
+    repaired, info = repair_opaque_interior_with_known_bg_key(matting, key, shadow_protect_mask=shadow)
+
+    assert info["accepted_components"] == 0
+    np.testing.assert_array_equal(repaired[46:68, 30:66], matting[46:68, 30:66])
+
+
+def test_resolve_hard_edge_key_uses_transition_band_as_only_soft_region():
+    """With a clean known-B hard edge, the center is opaque; only the narrow
+    key transition at the exterior contour remains soft."""
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[18:78, 18:78] = 0.65
+    matting[24:72, 24:72] = 0.90
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[18:78, 18:78] = 1.0
+    key[18:20, 18:78] = 0.28
+    key[76:78, 18:78] = 0.28
+    key[18:78, 18:20] = 0.28
+    key[18:78, 76:78] = 0.28
+
+    resolved, info = resolve_hard_edge_alpha_with_known_bg_key(matting, key)
+
+    assert info["applied"] is True
+    assert info["raised_pixels"] > 0
+    assert info["lowered_pixels"] > 0
+    assert resolved[24:72, 24:72].min() >= 0.99
+    np.testing.assert_allclose(resolved[18:20, 24:72], 0.28, atol=1e-6)
+
+
+def test_resolve_hard_edge_key_rejects_broad_soft_transition():
+    h, w = 96, 96
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[20:76, 20:76] = 0.7
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[20:76, 20:76] = 1.0
+    key[20:36, 20:76] = 0.45
+    key[60:76, 20:76] = 0.45
+
+    resolved, info = resolve_hard_edge_alpha_with_known_bg_key(matting, key)
+
+    assert info["applied"] is False
+    assert info["reason"] == "broad key transition"
+    np.testing.assert_array_equal(resolved, matting)
+
+
+def test_resolve_hard_edge_key_limits_green_spill_on_exterior_white_rim():
+    """Known-B compositing should lower alpha on a green-contaminated white
+    exterior rim so recovered foreground does not keep the screen channel."""
+    h, w = 72, 72
+    bg = np.array((0, 200, 0), dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    image[16:56, 16:56] = (255, 255, 255)
+    image[16:18, 18:54] = (155, 226, 154)
+
+    matting = np.zeros((h, w), dtype=np.float32)
+    matting[16:56, 16:56] = 1.0
+    matting[16:18, 18:54] = 0.96
+
+    key = np.zeros((h, w), dtype=np.float32)
+    key[16:56, 16:56] = 1.0
+
+    resolved, info = resolve_hard_edge_alpha_with_known_bg_key(
+        matting,
+        key,
+        image_srgb=image,
+        background_color=bg,
+    )
+
+    assert info["spill_limited_pixels"] > 0
+    assert resolved[16:18, 20:52].mean() < 0.60
+    assert resolved[24:48, 24:48].min() >= 0.99
 
 
 def test_hard_edge_repair_restores_thin_dark_outline():

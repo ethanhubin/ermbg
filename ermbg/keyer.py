@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from . import io
 from .colorspace import oklab_distance, srgb_to_oklab
 
 
@@ -326,6 +327,298 @@ def repair_alpha_with_known_bg_key(
     return repaired, info
 
 
+def repair_opaque_interior_with_known_bg_key(
+    matting_alpha: np.ndarray,
+    full_color_key_alpha: np.ndarray,
+    *,
+    key_fg_threshold: float = 0.92,
+    support_threshold: float = 0.50,
+    min_alpha_threshold: float = 0.78,
+    target_alpha_floor: float = 0.98,
+    fg_anchor_threshold: float = 0.90,
+    exterior_margin_px: int = 3,
+    min_component_area_ratio: float = 0.0001,
+    max_repair_area_ratio: float = 0.70,
+    shadow_protect_mask: np.ndarray | None = None,
+    material_protect_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Snap under-opaque known-B subject interiors toward full alpha.
+
+    This is deliberately separate from low-alpha hole repair. On solid known
+    backgrounds, a matting net can keep a hard UI/product surface at α≈0.75–0.9
+    even when color evidence says those pixels are fully foreground. The
+    general signal is not a filename or icon size; it is a key-supported
+    component with an interior distance from exterior background and an anchor
+    of high-confidence matte foreground.
+
+    Guards:
+      - only inside the keyer's foreground support;
+      - only pixels away from the support exterior, preserving antialiasing;
+      - require a nearby high-alpha anchor within the same support component;
+      - never repair supplied shadow/material protection masks.
+    """
+    m = matting_alpha.astype(np.float32)
+    k = full_color_key_alpha.astype(np.float32)
+    if m.shape != k.shape:
+        raise ValueError("matting_alpha and full_color_key_alpha must have the same HxW shape")
+    if shadow_protect_mask is not None and shadow_protect_mask.shape != m.shape:
+        raise ValueError("shadow_protect_mask must have the same HxW shape")
+    if material_protect_mask is not None and material_protect_mask.shape != m.shape:
+        raise ValueError("material_protect_mask must have the same HxW shape")
+
+    support = k >= support_threshold
+    if not support.any():
+        return m.copy(), {
+            "used": True,
+            "accepted_components": 0,
+            "accepted_pixels": 0,
+            "rejected_components": 0,
+            "component_areas": [],
+        }
+
+    exterior = _flood_exterior(~support)
+    if exterior_margin_px > 0:
+        dist_to_exterior = cv2.distanceTransform((~exterior).astype(np.uint8), cv2.DIST_L2, 3)
+        interior = dist_to_exterior >= float(exterior_margin_px)
+    else:
+        interior = ~exterior
+
+    protect = np.zeros_like(support, dtype=bool)
+    if shadow_protect_mask is not None:
+        protect |= np.asarray(shadow_protect_mask, dtype=bool)
+    if material_protect_mask is not None:
+        protect |= np.asarray(material_protect_mask, dtype=bool)
+
+    candidate = (
+        support
+        & interior
+        & ~protect
+        & (k >= key_fg_threshold)
+        & (m >= min_alpha_threshold)
+        & (m < target_alpha_floor)
+    )
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), connectivity=8)
+    h, w = m.shape
+    img_area = float(h * w)
+    min_area = max(1.0, min_component_area_ratio * img_area)
+    max_repair_area = max(min_area, max_repair_area_ratio * img_area)
+    accepted = np.zeros_like(candidate)
+    accepted_areas: list[int] = []
+    rejected = 0
+
+    for i in range(1, n_labels):
+        support_comp = labels == i
+        comp_candidate = candidate & support_comp
+        area = int(comp_candidate.sum())
+        if area <= 0:
+            continue
+        if area < min_area or area > max_repair_area:
+            rejected += 1
+            continue
+        if not ((m >= fg_anchor_threshold) & support_comp & interior & ~protect).any():
+            rejected += 1
+            continue
+        accepted |= comp_candidate
+        accepted_areas.append(area)
+
+    repaired = m.copy()
+    if accepted.any():
+        target = np.maximum(k, float(target_alpha_floor))
+        repaired[accepted] = np.maximum(repaired[accepted], target[accepted])
+
+    return np.clip(repaired, 0.0, 1.0).astype(np.float32), {
+        "used": True,
+        "source": "known_bg_opaque_interior",
+        "accepted_components": len(accepted_areas),
+        "accepted_pixels": int(accepted.sum()),
+        "rejected_components": rejected,
+        "component_areas": accepted_areas,
+        "key_fg_threshold": key_fg_threshold,
+        "support_threshold": support_threshold,
+        "min_alpha_threshold": min_alpha_threshold,
+        "target_alpha_floor": target_alpha_floor,
+        "exterior_margin_px": exterior_margin_px,
+    }
+
+
+def resolve_hard_edge_alpha_with_known_bg_key(
+    matting_alpha: np.ndarray,
+    full_color_key_alpha: np.ndarray,
+    *,
+    image_srgb: np.ndarray | None = None,
+    background_color: tuple[int, int, int] | np.ndarray | None = None,
+    key_bg_threshold: float = 0.02,
+    key_fg_threshold: float = 0.98,
+    shadow_protect_mask: np.ndarray | None = None,
+    material_protect_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Resolve clean hard-edge alpha from known-background key topology.
+
+    For a solid-screen UI/product/logo asset, center pixels are not ambiguous:
+    only the exterior contour should be soft. The generic preconditions are
+    topological, not pixel-size tuned: the key must have exterior background,
+    a non-empty opaque core, a transition band smaller than that core, and every
+    transition pixel must be shallower than the core's median inward distance.
+    Broad hair/fur/smoke transitions therefore stay with the matting net.
+    """
+    m = matting_alpha.astype(np.float32)
+    k = full_color_key_alpha.astype(np.float32)
+    if m.shape != k.shape:
+        raise ValueError("matting_alpha and full_color_key_alpha must have the same HxW shape")
+    if image_srgb is not None and image_srgb.shape[:2] != m.shape:
+        raise ValueError("image_srgb must share image HxW")
+    if shadow_protect_mask is not None and shadow_protect_mask.shape != m.shape:
+        raise ValueError("shadow_protect_mask must have the same HxW shape")
+    if material_protect_mask is not None and material_protect_mask.shape != m.shape:
+        raise ValueError("material_protect_mask must have the same HxW shape")
+
+    h, w = m.shape
+    area = float(h * w)
+    support = k > float(key_bg_threshold)
+    support_pixels = int(support.sum())
+    support_ratio = support_pixels / max(area, 1.0)
+    if support_pixels == 0:
+        return m.copy(), {
+            "used": True,
+            "applied": False,
+            "raised_pixels": 0,
+            "lowered_pixels": 0,
+            "reason": "no key support",
+            "support_ratio": support_ratio,
+        }
+
+    exterior_bg = _flood_exterior(~support)
+    exterior_pixels = int(exterior_bg.sum())
+    exterior_ratio = float(exterior_pixels) / max(area, 1.0)
+    if exterior_pixels == 0:
+        return m.copy(), {
+            "used": True,
+            "applied": False,
+            "raised_pixels": 0,
+            "lowered_pixels": 0,
+            "reason": "no exterior background",
+            "support_ratio": support_ratio,
+            "exterior_bg_ratio": exterior_ratio,
+        }
+
+    dist_to_exterior = cv2.distanceTransform((~exterior_bg).astype(np.uint8), cv2.DIST_L2, 3)
+    core = k >= float(key_fg_threshold)
+    core_pixels = int(core.sum())
+    if core_pixels == 0:
+        return m.copy(), {
+            "used": True,
+            "applied": False,
+            "raised_pixels": 0,
+            "lowered_pixels": 0,
+            "reason": "no opaque key core",
+            "support_ratio": support_ratio,
+            "exterior_bg_ratio": exterior_ratio,
+        }
+
+    transition = support & ~core
+    transition_pixels = int(transition.sum())
+    transition_fraction = float(transition.sum()) / max(float(support_pixels), 1.0)
+    transition_width_px = float(dist_to_exterior[transition].max()) if transition.any() else 0.0
+    core_median_depth_px = float(np.median(dist_to_exterior[core]))
+    transition_is_outer_band = transition_pixels < core_pixels and transition_width_px < core_median_depth_px
+    if transition_pixels and not transition_is_outer_band:
+        return m.copy(), {
+            "used": True,
+            "applied": False,
+            "raised_pixels": 0,
+            "lowered_pixels": 0,
+            "reason": "broad key transition",
+            "support_ratio": support_ratio,
+            "exterior_bg_ratio": exterior_ratio,
+            "transition_fraction": transition_fraction,
+            "transition_width_px": transition_width_px,
+            "core_median_depth_px": core_median_depth_px,
+            "core_pixels": core_pixels,
+            "transition_pixels": transition_pixels,
+        }
+
+    protect = np.zeros_like(support, dtype=bool)
+    if shadow_protect_mask is not None:
+        protect |= np.asarray(shadow_protect_mask, dtype=bool)
+    if material_protect_mask is not None:
+        protect |= np.asarray(material_protect_mask, dtype=bool)
+
+    target = np.where(transition, k, np.maximum(m, k))
+    spill_limit = np.ones_like(m, dtype=np.float32)
+    spill_limited = np.zeros_like(support, dtype=bool)
+    if image_srgb is not None and background_color is not None:
+        spill_limit = _dominant_screen_spill_alpha_limit(
+            image_srgb,
+            background_color,
+            fallback_shape=m.shape,
+        )
+        exterior_band = support & (dist_to_exterior < core_median_depth_px)
+        spill_limited = exterior_band & (spill_limit < target - 1.0 / 255.0)
+        target[spill_limited] = spill_limit[spill_limited]
+
+    change_mask = support & ~protect & (np.abs(target - m) > 1.0 / 255.0)
+    raise_mask = change_mask & (target > m)
+    lower_mask = change_mask & (target < m)
+    out = m.copy()
+    out[change_mask] = target[change_mask]
+
+    return np.clip(out, 0.0, 1.0).astype(np.float32), {
+        "used": True,
+        "applied": bool(change_mask.any()),
+        "raised_pixels": int(raise_mask.sum()),
+        "lowered_pixels": int(lower_mask.sum()),
+        "spill_limited_pixels": int(spill_limited.sum()),
+        "transition_pixels": transition_pixels,
+        "core_pixels": core_pixels,
+        "support_ratio": support_ratio,
+        "exterior_bg_ratio": exterior_ratio,
+        "transition_fraction": transition_fraction,
+        "transition_width_px": transition_width_px,
+        "core_median_depth_px": core_median_depth_px,
+        "key_bg_threshold": key_bg_threshold,
+        "key_fg_threshold": key_fg_threshold,
+    }
+
+
+def _dominant_screen_spill_alpha_limit(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    fallback_shape: tuple[int, int],
+) -> np.ndarray:
+    """Alpha ceiling that makes recovered F no longer screen-channel dominated.
+
+    For a saturated known screen, an antialiased foreground edge should satisfy
+    ``C = alpha*F + (1-alpha)*B``. If the observed pixel's dominant screen
+    channel is still too high, solve that equation for the largest alpha that
+    would make the recovered foreground's screen channel no greater than at
+    least one non-screen channel. Pixels without a saturated dominant screen
+    receive a neutral limit of 1.
+    """
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    B = io.srgb_to_linear(bg)[0, 0].astype(np.float32)
+    order = np.argsort(B)[::-1]
+    d = int(order[0])
+    if B[d] <= B[int(order[1])] + 1e-6:
+        return np.ones(fallback_shape, dtype=np.float32)
+
+    C = io.srgb_to_linear(image_srgb).astype(np.float32)
+    caps: list[np.ndarray] = []
+    for c in range(3):
+        if c == d:
+            continue
+        denom = float(B[d] - B[c])
+        if denom <= 1e-6:
+            continue
+        cap = (C[..., c] - B[c] - C[..., d] + B[d]) / denom
+        caps.append(cap.astype(np.float32))
+    if not caps:
+        return np.ones(fallback_shape, dtype=np.float32)
+    limit = np.maximum.reduce(caps)
+    return np.clip(limit, 0.0, 1.0).astype(np.float32)
+
+
 def repair_hard_edge_alpha(
     image_srgb: np.ndarray,
     matting_alpha: np.ndarray,
@@ -511,6 +804,8 @@ __all__ = [
     "key_alpha",
     "gate_alpha_by_keyer",
     "repair_hard_edge_alpha",
+    "repair_opaque_interior_with_known_bg_key",
+    "resolve_hard_edge_alpha_with_known_bg_key",
     "repair_alpha_with_known_bg_key",
     "repair_alpha_with_subject_support",
     "merge_alpha_components",

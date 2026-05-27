@@ -19,6 +19,7 @@ from PIL import Image
 _DEFAULT_WORKFLOW = Path(__file__).parent / "comfyui_ermbg_matte.json"
 _FOREGROUND_NODE = "30"
 _ALPHA_NODE = "50"
+_RGBA_RGB_NODE = "60"
 
 
 @dataclass(frozen=True)
@@ -212,14 +213,28 @@ class ComfyUIErmbgMatteClient:
         step_start = time.perf_counter()
         alpha_rgb = self._download_node_image(history, _ALPHA_NODE, "L")
         timings["download_alpha_sec"] = time.perf_counter() - step_start
+        step_start = time.perf_counter()
+        try:
+            rgba_rgb = self._download_node_image(history, _RGBA_RGB_NODE, "RGB")
+            timings["download_rgba_rgb_sec"] = time.perf_counter() - step_start
+            rgba_rgb_source = _RGBA_RGB_NODE
+        except RuntimeError:
+            # Older deployed workflows saved only foreground+alpha. Keep the
+            # client compatible, but modern ERMBG nodes separate clean
+            # foreground RGB from the shadow-composited RGB used by final RGBA.
+            rgba_rgb = foreground
+            timings["download_rgba_rgb_sec"] = time.perf_counter() - step_start
+            rgba_rgb_source = _FOREGROUND_NODE
 
         if foreground.shape[:2] != (h, w):
             foreground = cv2.resize(foreground, (w, h), interpolation=cv2.INTER_LANCZOS4)
+        if rgba_rgb.shape[:2] != (h, w):
+            rgba_rgb = cv2.resize(rgba_rgb, (w, h), interpolation=cv2.INTER_LANCZOS4)
         if alpha_rgb.shape != (h, w):
             alpha_rgb = cv2.resize(alpha_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
 
         alpha = alpha_rgb.astype(np.float32) / 255.0
-        rgba = np.dstack([foreground, alpha_rgb])
+        rgba = np.dstack([rgba_rgb, alpha_rgb])
         timings["total_sec"] = time.perf_counter() - total_start
         return ComfyErmbgMatteResult(
             rgba=rgba.astype(np.uint8),
@@ -231,6 +246,7 @@ class ComfyUIErmbgMatteClient:
                 "server_image": server_name,
                 "foreground_node": _FOREGROUND_NODE,
                 "alpha_node": _ALPHA_NODE,
+                "rgba_rgb_node": rgba_rgb_source,
                 "timings": timings,
             },
         )

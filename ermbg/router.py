@@ -280,12 +280,46 @@ def _bg_lab_stats(image_srgb: np.ndarray, source_alpha: np.ndarray | None) -> tu
         return 50.0, 0.0, 0.0
 
     pixels = image_srgb[edge]
+    edge_sigma = float(np.std(pixels.astype(np.float32), axis=0).mean())
+    if source_alpha is None and edge_sigma > 18.0:
+        corner_pixels = _stable_corner_bg_pixels(image_srgb)
+        if corner_pixels is not None:
+            pixels = corner_pixels
     median = np.median(pixels, axis=0).astype(np.uint8)
     sigma = float(np.std(pixels.astype(np.float32), axis=0).mean())
     lab = srgb_to_oklab(median.reshape(1, 1, 3)).reshape(3)
     L = float(lab[0]) * 100.0
     C = float(np.sqrt(lab[1] ** 2 + lab[2] ** 2)) * 100.0
     return L, C, sigma
+
+
+def _stable_corner_bg_pixels(image_srgb: np.ndarray) -> np.ndarray | None:
+    """Return corner samples when they are a cleaner bg estimate than the edge.
+
+    Real game/UI icons often fill most of a tiny sprite and touch the image
+    border, so a whole-edge sample mixes subject rim colors into the measured
+    background. These empirical gates key on a different signal: all four
+    corner patches agree with each other and are internally low-variance. That
+    protects small corner-visible solid-background assets without treating a
+    noisy photo edge as a keyable screen.
+    """
+    h, w = image_srgb.shape[:2]
+    size = max(2, min(8, int(round(min(h, w) * 0.06))))
+    if h < size * 2 or w < size * 2:
+        return None
+    patches = [
+        image_srgb[:size, :size],
+        image_srgb[:size, -size:],
+        image_srgb[-size:, :size],
+        image_srgb[-size:, -size:],
+    ]
+    medians = np.asarray([np.median(p.reshape(-1, 3), axis=0) for p in patches], dtype=np.float32)
+    pixels = np.concatenate([p.reshape(-1, 3) for p in patches], axis=0)
+    corner_agreement = float(np.std(medians, axis=0).mean())
+    corner_sigma = float(np.std(pixels.astype(np.float32), axis=0).mean())
+    if corner_agreement <= 6.0 and corner_sigma <= 10.0:
+        return pixels
+    return None
 
 
 def _detect_image_type(image_srgb: np.ndarray) -> str:

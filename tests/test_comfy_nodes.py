@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 # as a package. For tests, add the repo root so the import resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from comfy_nodes.ermbg_nodes import ErmbgAutoMatte, ErmbgClassify, _mask_to_numpy  # noqa: E402
+from comfy_nodes.ermbg_nodes import ErmbgAutoMatte, ErmbgClassify, _dev_reload_ermbg_modules, _mask_to_numpy  # noqa: E402
 
 
 def _green_with_red_subject(h=128, w=128):
@@ -53,7 +53,7 @@ def test_classify_node_returns_strings():
 def test_automatte_returns_image_mask_summary(_force_grabcut):
     img = _to_comfy_image(_green_with_red_subject())
     node = ErmbgAutoMatte()
-    fg, alpha, summary = node.run(
+    fg, alpha, summary, rgba_rgb = node.run(
         image=img,
         despill="auto (router decides)",
         use_keyer="auto (router decides)",
@@ -64,9 +64,21 @@ def test_automatte_returns_image_mask_summary(_force_grabcut):
     # IMAGE convention: [B, H, W, C] float
     assert fg.shape == (1, 128, 128, 3)
     assert fg.dtype == torch.float32
+    assert rgba_rgb.shape == (1, 128, 128, 3)
+    assert rgba_rgb.dtype == torch.float32
     # MASK convention: [B, H, W] float
     assert alpha.shape == (1, 128, 128)
     assert "saturated_bg" in summary
+
+
+def test_dev_reload_is_opt_in(monkeypatch):
+    monkeypatch.delenv("ERMBG_DEV_RELOAD", raising=False)
+    assert _dev_reload_ermbg_modules() == ""
+
+    monkeypatch.setenv("ERMBG_DEV_RELOAD", "1")
+    note = _dev_reload_ermbg_modules()
+    assert note.startswith("dev_reload=")
+    assert "matting" in note
 
 
 def test_automatte_with_source_mask_passes_through(_force_grabcut):
@@ -83,7 +95,7 @@ def test_automatte_with_source_mask_passes_through(_force_grabcut):
     mask = torch.from_numpy(a).unsqueeze(0)
 
     node = ErmbgAutoMatte()
-    _, _, summary = node.run(
+    _, _, summary, _ = node.run(
         image=img,
         despill="auto (router decides)",
         use_keyer="auto (router decides)",

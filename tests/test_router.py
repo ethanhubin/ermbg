@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+from PIL import Image
 
 from ermbg.router import assess_source_alpha, classify_strategy
 
@@ -175,6 +178,16 @@ def test_classify_extremely_noisy_bg():
     assert s.bg_type == "noisy"
     assert s.keyer_mode is None
     assert s.despill == "local_borrow"
+
+
+def test_small_ui_icon_with_clean_green_corners_is_not_noisy():
+    """Tiny UI sprites can have subject rims on the edge but clean bg corners."""
+    path = Path(__file__).resolve().parents[1] / "samples" / "regression" / "small_ui_icon_green" / "input.png"
+    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    s = classify_strategy(img)
+    assert s.bg_type == "saturated"
+    assert s.keyer_mode == "chromatic"
+    assert s.extras["bg_sigma"] < 2.0
 
 
 def test_strategy_thresholds_tighter_for_graphic():

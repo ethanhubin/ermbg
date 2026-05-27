@@ -57,10 +57,12 @@ def chroma_cap(
 
     For non-saturated B (black/grey/white) this is a no-op (returns input).
 
-    ``strength`` in [0,1] interpolates between input and capped output. ``alpha``
-    is unused here but kept in the signature for API uniformity.
+    ``strength`` in [0,1] interpolates between input and capped output. When
+    alpha is provided, cap strength is additionally scaled by the measured
+    background contribution ``1 - alpha``: near-opaque subject pixels should not
+    have their own color rewritten just because the screen channel is high,
+    while translucent edge pixels still receive stronger spill cleanup.
     """
-    del alpha
     F = image_linear.astype(np.float32)
     d = has_dominant_screen_channel(background_linear)
     if d is None:
@@ -70,7 +72,10 @@ def chroma_cap(
     cap = np.maximum(F[..., other[0]], F[..., other[1]])
     new_d = np.minimum(F[..., d], cap)
     out = F.copy()
-    out[..., d] = (1.0 - strength) * F[..., d] + strength * new_d
+    cap_strength: float | np.ndarray = float(strength)
+    if alpha is not None:
+        cap_strength = float(strength) * (1.0 - np.clip(alpha.astype(np.float32), 0.0, 1.0))
+    out[..., d] = (1.0 - cap_strength) * F[..., d] + cap_strength * new_d
     if protect_mask is not None:
         protect = np.clip(protect_mask.astype(np.float32), 0.0, 1.0)[..., None]
         out = out * (1.0 - protect) + F * protect
@@ -148,7 +153,15 @@ def local_foreground_borrow(
     w_color = np.exp(-(color_dist ** 2) / (2 * color_sigma ** 2))
     w = w_space * w_color
     w_sum = w.sum(axis=1, keepdims=True)
-    w_sum = np.where(w_sum < 1e-8, 1.0, w_sum)
+    collapsed = w_sum < 1e-8
+    if collapsed.any():
+        # If the translucent pixel is heavily background-contaminated, its
+        # observed color can be far from every sure foreground seed and the
+        # color Gaussian collapses to zero. Spatial borrowing is still a better
+        # estimate than exporting black or an arbitrary inverse-composite hue.
+        w = np.where(collapsed, w_space, w)
+        w_sum = w.sum(axis=1, keepdims=True)
+        w_sum = np.where(w_sum < 1e-8, 1.0, w_sum)
     borrowed = (neighbor_colors * w[..., None]).sum(axis=1) / w_sum
     F[sub_ys, sub_xs] = borrowed.astype(np.float32)
 
@@ -214,6 +227,8 @@ def unmix_foreground(
     alpha: np.ndarray,
     alpha_floor: float = 0.05,
     fallback_method: str = "local_borrow",
+    unstable_alpha_high: float = 0.55,
+    unstable_oog_margin: float = 0.03,
 ) -> np.ndarray:
     """Closed-form F given known B and α: ``F = (C - (1-α)·B) / α``.
 
@@ -223,7 +238,16 @@ def unmix_foreground(
       1. Pixels with α < ``alpha_floor`` cannot give a stable F (division
          blows up); for those we fall back to ``fallback_method`` (default:
          local KDTree borrow from sure_fg neighbors).
-      2. The result is clipped to [0, 1] in linear RGB before return so a
+      2. Low/mid-α edge pixels whose inverse composite goes out of gamut are
+         also unstable. That is a feature signal, not a sample-specific rule:
+         a small α error on a known saturated B amplifies residual background
+         into negative foreground, which then clips to black speckles. Borrow
+         those edge colors from nearby sure foreground instead.
+      3. Background-dominated pixels (α < 0.5) are underconstrained even when
+         the inverse stays in gamut: many foreground colors can explain the
+         same mostly-background observation. Use nearby sure foreground color
+         there to avoid arbitrary purple/black edge speckles.
+      4. The result is clipped to [0, 1] in linear RGB before return so a
          tiny B-measurement error doesn't produce out-of-gamut F values.
     """
     C = image_linear.astype(np.float32)
@@ -235,14 +259,20 @@ def unmix_foreground(
 
     if fallback_method:
         low_alpha = a[..., 0] < alpha_floor
-        if low_alpha.any():
+        out_of_gamut = (F.min(axis=-1) < -float(unstable_oog_margin)) | (
+            F.max(axis=-1) > 1.0 + float(unstable_oog_margin)
+        )
+        unstable_edge = (a[..., 0] < float(unstable_alpha_high)) & out_of_gamut
+        background_dominated = (a[..., 0] > 0.0) & (a[..., 0] < 0.5)
+        fallback_mask = low_alpha | unstable_edge | background_dominated
+        if fallback_mask.any():
             if fallback_method == "local_borrow":
-                F_fallback = local_foreground_borrow(C, B, alpha)
+                F_fallback = local_foreground_borrow(C, B, alpha, band_alpha_low=0.0)
             elif fallback_method == "background":
                 F_fallback = np.broadcast_to(B, C.shape).copy()
             else:
                 raise ValueError(f"Unknown fallback_method: {fallback_method!r}")
-            F[low_alpha] = F_fallback[low_alpha]
+            F[fallback_mask] = F_fallback[fallback_mask]
 
     return np.clip(F, 0.0, 1.0)
 

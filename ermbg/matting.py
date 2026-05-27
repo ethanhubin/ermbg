@@ -26,15 +26,20 @@ from .keyer import (
     key_alpha,
     merge_alpha_components,
     repair_hard_edge_alpha,
+    repair_opaque_interior_with_known_bg_key,
+    resolve_hard_edge_alpha_with_known_bg_key,
     repair_alpha_with_known_bg_key,
     repair_alpha_with_subject_support,
 )
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
 from .shadow import (
+    ShadowThresholds,
     ShadowPrior,
     composite_subject_with_shadow,
     estimate_shadow_alpha,
+    exterior_scalar_darkening_mask,
+    remove_small_display_shadow_components,
     shadow_alpha_to_display_alpha,
 )
 from .types import MattingResult, Trimap
@@ -45,6 +50,51 @@ def _trimap_from_alpha(alpha: np.ndarray, fg_th: float = 0.95, bg_th: float = 0.
     sure_bg = alpha <= bg_th
     unknown = ~sure_fg & ~sure_bg
     return Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
+
+
+def _stabilize_foreground_for_export(
+    foreground_linear: np.ndarray,
+    subject_alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fill weakly constrained straight-foreground RGB from sure foreground.
+
+    A straight foreground layer stores color independent of alpha. Where the
+    subject contribution is smaller than the background contribution
+    (``subject_alpha < 0.5``), the inverse-composited RGB is underdetermined:
+    tiny alpha/background errors can turn into black, green, or magenta RGB
+    speckles even though those pixels are nearly invisible after compositing.
+    For export, extend the nearest sure-foreground material color into that
+    weak region. Alpha remains the ownership signal. The shadow-composited RGB
+    used by ``rgba`` is kept separately; ``foreground_srgb`` is the clean
+    subject-color layer for inspection and downstream color borrowing.
+    """
+    fg = foreground_linear.astype(np.float32, copy=True)
+    a = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    sure_fg = a >= 0.95  # Same semantic threshold as the trimap sure-foreground gate.
+    weak_foreground = a < 0.5  # Below this, known-background contribution dominates the color equation.
+
+    info: dict[str, Any] = {
+        "used": True,
+        "sure_foreground_pixels": int(sure_fg.sum()),
+        "filled_pixels": 0,
+        "reason": "",
+    }
+    if not sure_fg.any():
+        info["reason"] = "no sure foreground seed"
+        return fg, info
+    fill = weak_foreground & ~sure_fg
+    if not fill.any():
+        return fg, info
+
+    from scipy import ndimage
+
+    # distance_transform_edt returns the nearest zero-valued pixel. Passing the
+    # inverse seed mask gives a deterministic nearest-material extension without
+    # choosing a fixed pixel radius.
+    _, nearest = ndimage.distance_transform_edt(~sure_fg, return_indices=True)
+    fg[fill] = fg[nearest[0][fill], nearest[1][fill]]
+    info["filled_pixels"] = int(fill.sum())
+    return fg, info
 
 
 def matte(
@@ -189,6 +239,70 @@ def matte(
                 logger.info(f"keyer: patched {info['patched_components']} component(s) missed by matting net")
         else:
             keyer_info.update({"used": True, "patched_components": 0})
+        if strategy.bg_type == "saturated" and shadow_enabled:
+            # Saturated-screen assets can fail as one large key component whose
+            # upper half has enough matting-net coverage that component-level
+            # merge decides "already present" while a lower UI/body region is
+            # still missing. This topology repair uses known-B color evidence
+            # only to restore low-alpha pixels inside key-supported, anchored
+            # subject regions; it avoids exterior fringe pixels so ordinary
+            # green-screen antialiasing and shadows are not filled wholesale.
+            # Keep it tied to shadow-enabled runs because dark cast shadows can
+            # also be far from saturated B; the pre-shadow pass below provides
+            # the measurable guard that distinguishes those from missed subject.
+            soft, repair_info = repair_alpha_with_known_bg_key(
+                soft,
+                key,
+                key_fg_threshold=0.65,
+                matting_low_threshold=0.70,
+                support_threshold=0.35,
+                fg_anchor_threshold=0.85,
+                exterior_margin_px=1,
+                target_alpha_floor=0.92,
+            )
+            keyer_info["saturated_known_bg_repair"] = repair_info
+            if repair_info["accepted_components"]:
+                logger.info(
+                    f"keyer: repaired {repair_info['accepted_components']} saturated known-B hole(s) "
+                    f"({repair_info['accepted_pixels']} px)"
+                )
+            # Separate from hole filling: hard UI/product interiors on a known
+            # saturated screen can remain α≈0.75–0.9 even though OKLab distance
+            # says they are definitely not background. Snap only key-supported
+            # interior pixels that are anchored to confident foreground, while
+            # preserving outer antialiasing and measured shadow candidates.
+            soft, opaque_info = repair_opaque_interior_with_known_bg_key(
+                soft,
+                key,
+                shadow_protect_mask=shadow_protect,
+                material_protect_mask=material_protect,
+            )
+            keyer_info["saturated_opaque_interior_repair"] = opaque_info
+            if opaque_info["accepted_components"]:
+                logger.info(
+                    f"keyer: snapped {opaque_info['accepted_pixels']} saturated known-B interior px "
+                    f"across {opaque_info['accepted_components']} component(s)"
+                )
+            # For a clean solid-screen hard edge, the only ambiguous pixels
+            # should be the narrow exterior antialiasing band. Once the keyer
+            # proves that topology (connected exterior bg + small transition
+            # fraction), it can safely raise under-opaque edge/interior alpha
+            # without eroding soft photographic details.
+            soft, hard_edge_key_info = resolve_hard_edge_alpha_with_known_bg_key(
+                soft,
+                key,
+                image_srgb=image_srgb,
+                background_color=B_srgb,
+                shadow_protect_mask=shadow_protect,
+                material_protect_mask=material_protect,
+            )
+            keyer_info["saturated_hard_edge_key_resolve"] = hard_edge_key_info
+            if hard_edge_key_info["raised_pixels"] or hard_edge_key_info["lowered_pixels"]:
+                logger.info(
+                    f"keyer: resolved saturated hard-edge alpha "
+                    f"(+{hard_edge_key_info['raised_pixels']} / -{hard_edge_key_info['lowered_pixels']} px) "
+                    "from clean known-B key"
+                )
         if strategy.bg_type in {"white", "black"} and strategy.image_type == "graphic":
             full_color_key = key_alpha(image_srgb, B_srgb, mode="chromatic", thresholds=strategy.keyer_thresholds)
             soft, repair_info = repair_alpha_with_known_bg_key(soft, full_color_key)
@@ -241,6 +355,24 @@ def matte(
         keyer_info["subject_material_protected_pixels"] = int(material_protect.sum())
         keyer_info["subject_material_keyer_reverted_pixels"] = int(changed_by_keyer.sum())
 
+    if shadow_enabled and strategy.bg_type == "saturated" and "key" in locals():
+        scalar_exterior, scalar_info = exterior_scalar_darkening_mask(
+            image_srgb,
+            B_srgb,
+            known_background_mask=key <= 0.02,
+        )
+        scalar_exterior &= ~material_protect
+        if scalar_exterior.any():
+            # Chromatic distance alone mistakes ``C ~= scale * B`` for
+            # foreground on saturated screens. For hard-edged assets this
+            # creates black rims after unmix+chroma-cap. Reclassify only
+            # scalar-darkened pixels connected to exterior known background;
+            # interior subject material with a similar hue is not reachable
+            # through the exterior flood and remains protected as subject.
+            soft[scalar_exterior] = 0.0
+        scalar_info["pixels"] = int(scalar_exterior.sum())
+        keyer_info["exterior_scalar_darkening_reclassified"] = scalar_info
+
     if report.verdict == "not-pure-bg":
         logger.warning(
             f"diagnose: verdict=not-pure-bg (purity_sigma={report.purity_sigma:.2f} > "
@@ -266,6 +398,7 @@ def matte(
         despill_used = despill_method
 
     subject_alpha = alpha.copy()
+    foreground_linear, foreground_export_info = _stabilize_foreground_for_export(F_lin, subject_alpha)
     if shadow_enabled:
         shadow_alpha_physical, shadow_info = estimate_shadow_alpha(
             image_srgb,
@@ -290,29 +423,41 @@ def matte(
     # exported RGBA, convert that to a black alpha that appears correct in
     # ordinary sRGB compositors; otherwise hard shadows look much too heavy.
     shadow_alpha = shadow_alpha_to_display_alpha(shadow_alpha_physical, B_srgb)
+    display_shadow_filter_info: dict[str, Any] = {}
     if shadow_info["detected"]:
+        default_shadow_thresholds = ShadowThresholds()
+        min_display_shadow_area = float(
+            max(8.0, float(default_shadow_thresholds.min_total_area_ratio) * float(alpha.size))
+        )
+        shadow_alpha, display_shadow_filter_info = remove_small_display_shadow_components(
+            shadow_alpha,
+            min_area=min_display_shadow_area,
+        )
         physical_mask = shadow_alpha_physical > 0.0
         shadow_info["display_safe"] = {
             "enabled": True,
             "mean_alpha": float(shadow_alpha[physical_mask].mean()) if physical_mask.any() else 0.0,
             "p95_alpha": float(np.percentile(shadow_alpha[physical_mask], 95.0)) if physical_mask.any() else 0.0,
             "max_alpha": float(shadow_alpha[physical_mask].max()) if physical_mask.any() else 0.0,
+            **display_shadow_filter_info,
         }
+    rgba_rgb_linear = foreground_linear
     if shadow_info["detected"]:
-        alpha, F_lin = composite_subject_with_shadow(F_lin, subject_alpha, shadow_alpha)
+        alpha, rgba_rgb_linear = composite_subject_with_shadow(foreground_linear, subject_alpha, shadow_alpha)
         trimap = _trimap_from_alpha(alpha)
 
-    F_srgb = io.linear_to_srgb_u8(F_lin)
+    rgba_rgb_srgb = io.linear_to_srgb_u8(rgba_rgb_linear)
+    foreground_srgb = io.linear_to_srgb_u8(foreground_linear)
     alpha_u8 = (np.clip(alpha, 0, 1) * 255 + 0.5).astype(np.uint8)
-    rgba = np.dstack([F_srgb, alpha_u8])
+    rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
 
     from .trimap import trimap_to_uint8
 
     return MattingResult(
         rgba=rgba,
         alpha=alpha,
-        foreground_srgb=F_srgb,
-        foreground_linear=F_lin,
+        foreground_srgb=foreground_srgb,
+        foreground_linear=foreground_linear,
         trimap=trimap,
         background_color=report.background_color,
         diagnosis=report,
@@ -322,6 +467,7 @@ def matte(
             "shadow_alpha": shadow_alpha,
             "shadow_alpha_physical": shadow_alpha_physical,
             "shadow": shadow_info,
+            "foreground_export": foreground_export_info,
             "semantic_prior": semantic_prior.to_dict() if hasattr(semantic_prior, "to_dict") else {},
             "trimap_u8": trimap_to_uint8(trimap),
             "despill_method": despill_used,

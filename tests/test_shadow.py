@@ -11,7 +11,10 @@ from ermbg.matting import matte
 from ermbg.planner import RiskRegion
 from ermbg.shadow import (
     ShadowPrior,
+    _remove_small_visible_shadow_components,
     estimate_shadow_alpha,
+    exterior_scalar_darkening_mask,
+    remove_small_display_shadow_components,
     shadow_alpha_to_display_alpha,
     shadow_prior_from_regions,
 )
@@ -105,6 +108,72 @@ def test_estimate_shadow_alpha_detects_scalar_darkening_shadow():
     assert shadow_alpha[shadow_edge].mean() < shadow_alpha[shadow_core].mean()
     assert ((shadow_alpha > 0.0) & (shadow_alpha < 0.08)).sum() > 0
     assert info["boundary"]["boundary_mode"] == "soft"
+
+
+def test_estimate_shadow_alpha_smooths_soft_shadow_measurement_noise():
+    """Soft cast-shadow opacity should be a coherent field, not salt noise.
+
+    The dark salt pixel is still scalar-darkened known background, but it is a
+    measurement outlier inside an otherwise soft shadow. The recovered alpha
+    should keep the soft shadow while suppressing the isolated spike.
+    """
+    h, w = 96, 128
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    fg = np.array([220, 30, 30], dtype=np.uint8)
+    subject = np.zeros((h, w), dtype=np.float32)
+    subject[26:58, 38:88] = 1.0
+
+    shadow_alpha = np.zeros((h, w), dtype=np.float32)
+    cv2.ellipse(shadow_alpha, (68, 66), (38, 12), 0.0, 0.0, 360.0, 1.0, -1)
+    shadow_alpha = cv2.GaussianBlur(shadow_alpha, (13, 13), sigmaX=4.0) * 0.18
+    shadow_alpha[72, 78] = 0.75
+    shadow_alpha[subject > 0] = 0.0
+
+    B_lin = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0]
+    F_lin = io.srgb_to_linear(fg.reshape(1, 1, 3))[0, 0]
+    bg_shadow = (1.0 - shadow_alpha[..., None]) * B_lin
+    image = io.linear_to_srgb_u8(subject[..., None] * F_lin + (1.0 - subject[..., None]) * bg_shadow)
+
+    recovered, info = estimate_shadow_alpha(image, subject, tuple(int(c) for c in bg))
+
+    local = recovered[70:75, 76:81]
+    assert info["detected"] is True
+    assert info["boundary"]["boundary_mode"] == "soft"
+    assert float(recovered[72, 78]) < 0.35
+    assert float(local.max() - local.mean()) < 0.08
+
+
+def test_estimate_shadow_alpha_removes_tiny_visible_shadow_islands():
+    """Final visible shadow alpha should not contain tiny detached islands."""
+    alpha = np.zeros((32, 48), dtype=np.float32)
+    alpha[14:22, 16:34] = 0.25
+    alpha[4:6, 4:6] = 0.25
+
+    filtered, info = _remove_small_visible_shadow_components(
+        alpha,
+        min_area=8.0,
+        core_alpha_threshold=0.08,
+    )
+
+    assert info["small_visible_components_removed"] == 1
+    assert info["small_visible_pixels_removed"] == 4
+    assert float(filtered[4:6, 4:6].max()) == 0.0
+    assert float(filtered[14:22, 16:34].mean()) == 0.25
+
+
+def test_display_shadow_filter_removes_tiny_visible_islands():
+    alpha = np.zeros((32, 48), dtype=np.float32)
+    alpha[14:22, 16:34] = 20.0 / 255.0
+    alpha[4:6, 4:6] = 20.0 / 255.0
+    alpha[5:10, 6] = 2.0 / 255.0  # sub-visible bridge should not connect the island.
+
+    filtered, info = remove_small_display_shadow_components(alpha, min_area=8.0)
+
+    assert info["display_small_components_removed"] == 1
+    assert info["display_small_pixels_removed"] == 4
+    assert float(filtered[4:6, 4:6].max()) == 0.0
+    assert float(filtered[5:10, 6].max()) > 0.0
+    assert float(filtered[14:22, 16:34].mean()) == pytest.approx(20.0 / 255.0)
 
 
 def test_estimate_shadow_alpha_preserves_hard_shadow_boundary_mode():
@@ -231,6 +300,26 @@ def test_shadow_search_prior_constrains_scalar_darkening_evidence():
     assert info["detected"] is False
     assert info["prior"]["has_shadow_search_mask"] is True
     assert float(shadow_alpha[dark_patch].max()) == 0.0
+
+
+def test_exterior_scalar_darkening_mask_keeps_internal_subject_material():
+    h, w = 64, 80
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    exterior_shadow = np.zeros((h, w), dtype=bool)
+    exterior_shadow[50:56, 10:70] = True
+    image[exterior_shadow] = _scaled_background_color(bg, 0.55)
+    internal_material = np.zeros((h, w), dtype=bool)
+    internal_material[24:36, 30:48] = True
+    image[internal_material] = _scaled_background_color(bg, 0.55)
+
+    known_bg = np.ones((h, w), dtype=bool)
+    known_bg[18:44, 24:56] = False
+    mask, info = exterior_scalar_darkening_mask(image, tuple(int(c) for c in bg), known_bg)
+
+    assert info["pixels"] > 0
+    assert mask[exterior_shadow].mean() > 0.95
+    assert not mask[internal_material].any()
 
 
 def test_shadow_prior_from_planner_regions_maps_semantic_masks():

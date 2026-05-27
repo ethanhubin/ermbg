@@ -77,4 +77,34 @@ curl -s http://192.168.0.8:8000/object_info | \
 
 ## 升级
 
-代码改动后,重复步骤 1–5。pip install 会覆盖 site-packages 里旧的 ermbg。custom_nodes 里只放 `comfy_nodes/` 的内容,改这里也只需要重启。
+日常迭代不要再走打包 + scp + pip 覆盖。先把远端装成 editable:
+
+```bash
+ERMBG_SSH_PASSWORD='...' scripts/sync_comfy_ssh.sh \
+  --clean \
+  --install-editable \
+  --smoke
+```
+
+之后普通算法改动直接 SSH 增量同步源码:
+
+```bash
+ERMBG_SSH_PASSWORD='...' scripts/sync_comfy_ssh.sh --smoke
+```
+
+只有 `comfy_nodes/` 节点接口或 wrapper 变动时才同步节点目录并重启 ComfyUI:
+
+```bash
+ERMBG_SSH_PASSWORD='...' scripts/sync_comfy_ssh.sh --nodes
+```
+
+脚本默认同步到 `C:/Users/darkv/ermbg_src`,远端 ComfyUI Python 为
+`E:/ComfyUI/.venv/Scripts/python.exe`。可用环境变量覆盖:
+
+```bash
+ERMBG_COMFY_SSH=darkv@192.168.0.8 \
+ERMBG_REMOTE_ROOT=C:/Users/darkv/ermbg_src \
+ERMBG_REMOTE_COMFY=E:/ComfyUI \
+ERMBG_REMOTE_PYTHON=E:/ComfyUI/.venv/Scripts/python.exe \
+scripts/sync_comfy_ssh.sh --smoke
+```

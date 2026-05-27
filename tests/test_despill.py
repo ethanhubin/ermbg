@@ -54,6 +54,18 @@ def test_chroma_cap_respects_semantic_protect_mask():
     np.testing.assert_allclose(out, C_arr, atol=1e-6)
 
 
+def test_chroma_cap_scales_with_background_contribution_from_alpha():
+    """Near-opaque subject pixels should not be recolored like translucent spill."""
+    C_lin, _, B_lin, _ = _make_polluted_pixel(fg_srgb=(170, 230, 170), alpha=1.0)
+    C_arr = C_lin.reshape(1, 1, 3)
+
+    opaque = chroma_cap(C_arr, B_lin, alpha=np.ones((1, 1), dtype=np.float32))[0, 0]
+    translucent = chroma_cap(C_arr, B_lin, alpha=np.full((1, 1), 0.25, dtype=np.float32))[0, 0]
+
+    np.testing.assert_allclose(opaque, C_arr[0, 0], atol=1e-6)
+    assert translucent[1] < opaque[1]
+
+
 def test_chroma_cap_no_op_on_black_bg():
     """Black bg has no dominant channel; chroma cap returns input."""
     C_lin, _, B_lin, _ = _make_polluted_pixel(fg_srgb=(200, 80, 60), bg_srgb=(0, 0, 0))
@@ -85,6 +97,29 @@ def test_local_borrow_fills_band_with_fg_color():
     assert diff_out < diff_in / 3, f"borrow only reduced from {diff_in:.3f} to {diff_out:.3f}"
 
 
+def test_local_borrow_falls_back_to_spatial_weights_when_color_weights_collapse():
+    """A heavily background-colored edge may be far from every sure-FG color;
+    borrowing should still return a nearby foreground color, not black."""
+    h, w = 48, 48
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    fg = np.array([235, 215, 185], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    image[8:28, 8:40] = fg
+    image[30:34, 8:40] = [80, 150, 70]
+    C_lin = io.srgb_to_linear(image)
+    B_lin = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0]
+    alpha = np.zeros((h, w), dtype=np.float32)
+    alpha[8:28, 8:40] = 1.0
+    alpha[30:34, 8:40] = 0.35
+
+    out = local_foreground_borrow(C_lin, B_lin, alpha, band_alpha_low=0.0)
+    borrowed = io.linear_to_srgb_u8(out[30:34, 10:38])
+
+    assert borrowed.mean(axis=(0, 1))[0] > 180
+    assert borrowed.mean(axis=(0, 1))[1] > 160
+    assert borrowed.mean(axis=(0, 1))[2] > 130
+
+
 def test_apply_despill_dispatches():
     """All three method names should be accepted and produce sensible shapes."""
     h, w = 32, 32
@@ -111,6 +146,53 @@ def test_unmix_recovers_original_F():
 
     F_recovered = unmix_foreground(C, B, alpha)
     np.testing.assert_allclose(F_recovered, F_img, atol=1e-5)
+
+
+def test_unmix_borrows_unstable_low_alpha_edge_instead_of_clipping_black():
+    """If α is underestimated on a known-B edge, inverse compositing can go
+    out of gamut and clip to black. Use that out-of-gamut signal to borrow a
+    stable foreground color rather than exporting black speckles."""
+    h, w = 48, 48
+    F_target = np.array([0.75, 0.12, 0.08], dtype=np.float32)
+    B = np.array([0.0, 0.58, 0.0], dtype=np.float32)
+    C = np.broadcast_to(B, (h, w, 3)).copy()
+    alpha_est = np.zeros((h, w), dtype=np.float32)
+
+    C[10:38, 10:38] = F_target
+    alpha_est[10:38, 10:38] = 1.0
+
+    true_alpha = 0.50
+    estimated_alpha = 0.20
+    C[22:26, 10:38] = true_alpha * F_target + (1.0 - true_alpha) * B
+    alpha_est[22:26, 10:38] = estimated_alpha
+
+    recovered = unmix_foreground(C, B, alpha_est)
+    strip = recovered[22:26, 12:36]
+
+    assert strip[..., 1].mean() > 0.05  # not clipped to black
+    np.testing.assert_allclose(strip.mean(axis=(0, 1)), F_target, atol=0.08)
+
+
+def test_unmix_borrows_background_dominated_in_gamut_edge_colors():
+    """Even in-gamut inverse compositing is unreliable when B dominates C."""
+    h, w = 48, 48
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    fg = np.array([235, 215, 185], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    image[8:28, 8:40] = fg
+    image[30:34, 8:40] = [90, 153, 78]
+    C = io.srgb_to_linear(image)
+    B = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0]
+    alpha = np.zeros((h, w), dtype=np.float32)
+    alpha[8:28, 8:40] = 1.0
+    alpha[30:34, 8:40] = 0.35
+
+    recovered = io.linear_to_srgb_u8(unmix_foreground(C, B, alpha))
+    strip = recovered[30:34, 10:38]
+
+    assert strip[..., 0].mean() > 180
+    assert strip[..., 1].mean() > 160
+    assert strip[..., 2].mean() > 130
 
 
 def test_unmix_handles_low_alpha_with_fallback():

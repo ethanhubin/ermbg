@@ -29,6 +29,7 @@ def test_comfy_ermbg_workflow_renders_automatte_inputs():
     assert workflow["20"]["inputs"]["use_keyer"] == "force_off"
     assert workflow["20"]["inputs"]["shadow_mode"] == "off"
     assert workflow["50"]["inputs"]["images"] == ["40", 0]
+    assert workflow["60"]["inputs"]["images"] == ["20", 3]
 
 
 def test_comfy_ermbg_client_combines_foreground_and_alpha(monkeypatch):
@@ -43,11 +44,14 @@ def test_comfy_ermbg_client_combines_foreground_and_alpha(monkeypatch):
         if node_id == "30":
             assert mode == "RGB"
             return np.full((6, 8, 3), (10, 20, 30), dtype=np.uint8)
-        assert node_id == "50"
-        assert mode == "L"
-        alpha = np.zeros((6, 8), dtype=np.uint8)
-        alpha[2:4, 3:5] = 255
-        return alpha
+        if node_id == "50":
+            assert mode == "L"
+            alpha = np.zeros((6, 8), dtype=np.uint8)
+            alpha[2:4, 3:5] = 255
+            return alpha
+        assert node_id == "60"
+        assert mode == "RGB"
+        return np.full((6, 8, 3), (40, 50, 60), dtype=np.uint8)
 
     monkeypatch.setattr(client, "_download_node_image", fake_download)
 
@@ -56,7 +60,7 @@ def test_comfy_ermbg_client_combines_foreground_and_alpha(monkeypatch):
 
     assert result.rgba.shape == (6, 8, 4)
     assert result.foreground_srgb[0, 0].tolist() == [10, 20, 30]
-    assert result.rgba[3, 4].tolist() == [10, 20, 30, 255]
+    assert result.rgba[3, 4].tolist() == [40, 50, 60, 255]
     assert result.alpha[3, 4] == 1.0
     assert result.debug["backend"] == "comfy-ermbg"
 

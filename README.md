@@ -129,6 +129,10 @@ print(s.bg_type, s.image_type, s.notes)
 
 ## ComfyUI
 
+正式 Web 抠图路径是 **`comfy-ermbg`**:Mac 侧负责上传、HTTP 编排和轻量诊断,
+远端 ComfyUI `ErmbgAutoMatte` 节点运行完整 ERMBG pipeline。后续算法更新
+不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
+
 `comfy_nodes/` 提供:
 
 - **ERMBG AutoMatte**:IMAGE 加可选 source/subject mask -> foreground、alpha、debug summary。
@@ -140,7 +144,8 @@ print(s.bg_type, s.image_type, s.notes)
 KSampler -> VAEDecode -> ERMBG AutoMatte -> SaveImage(RGBA)
 ```
 
-详见 [comfy_nodes/README.md](comfy_nodes/README.md) 和 [DEPLOY.md](DEPLOY.md)。
+开发/迭代验证流程见 [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md)。
+节点部署见 [comfy_nodes/README.md](comfy_nodes/README.md) 和 [DEPLOY.md](DEPLOY.md)。
 
 ## OpenClaw
 
@@ -183,14 +188,23 @@ checker 合成、白/黑底对比和 alpha 对比。
 
 # Local ownership / shadow 专项
 .venv/bin/pytest tests/test_ownership.py tests/test_shadow.py tests/test_risk.py -q
+
+# Comfy/Web 正式路径相关变更
+.venv/bin/pytest tests/test_api.py tests/test_comfy_ermbg_matte.py tests/test_comfy_nodes.py tests/test_web.py -q
 ```
 
 全量测试数量会随当前分支变化;接力前以本地 `.venv/bin/pytest -q` 为准。
+
+真实回归样本放在 `samples/regression/`。例如
+`samples/regression/small_ui_icon_green/` 覆盖小尺寸 UI 图标、主体贴边、
+角落绿幕稳定但整圈边缘被主体污染的场景。
 
 ## 文档索引
 
 - [docs/local-ownership.md](docs/local-ownership.md):
   当前工程接力入口:local ownership、执行层仲裁、G02/G04/G06 现状和复现命令。
+- [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md):
+  正式 `comfy-ermbg` 路径的开发、同步、远端 smoke 和 Web 验证流程。
 - [docs/archive/](docs/archive/):
   旧模型规划、candidate-planner、G02 单样本路线归档,只作历史参考。
 - [DEPLOY.md](DEPLOY.md):ComfyUI 部署。

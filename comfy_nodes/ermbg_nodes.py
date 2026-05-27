@@ -10,12 +10,17 @@ Inputs:
                             without re-running the matting net.
 
 Outputs:
-  IMAGE  — clean foreground RGB (despilled)
+  IMAGE  — clean subject foreground RGB (despilled; not shadow-composited)
   MASK   — final α
   STRING — one-line summary "strategy_name | despill | notes"
+  IMAGE  — RGB companion for final RGBA compositing, including shadow color
 """
 
 from __future__ import annotations
+
+import importlib
+import os
+import sys
 
 import numpy as np
 import torch
@@ -62,6 +67,48 @@ def _numpy_mask_to_tensor(arr: np.ndarray) -> torch.Tensor:
     return t.unsqueeze(0)
 
 
+def _dev_reload_ermbg_modules() -> str:
+    """Reload algorithm modules when ERMBG_DEV_RELOAD=1 is set.
+
+    ComfyUI keeps custom nodes and imported Python modules alive between
+    prompts. During ERMBG algorithm work, synced source files on disk are
+    otherwise invisible until a full ComfyUI restart. This opt-in path reloads
+    pure Python decision/matting modules while leaving the API module and its
+    segmenter cache alive, so iteration stays fast and model weights are not
+    reloaded for ordinary threshold/topology changes.
+    """
+    if os.environ.get("ERMBG_DEV_RELOAD", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return ""
+
+    module_names = [
+        "ermbg.colorspace",
+        "ermbg.io",
+        "ermbg.diagnose",
+        "ermbg.keyer",
+        "ermbg.despill",
+        "ermbg.shadow",
+        "ermbg.router",
+        "ermbg.matting",
+    ]
+    reloaded: list[str] = []
+    for name in module_names:
+        module = sys.modules.get(name)
+        if module is not None:
+            importlib.reload(module)
+            reloaded.append(name.rsplit(".", 1)[-1])
+
+    api = sys.modules.get("ermbg.api")
+    router = sys.modules.get("ermbg.router")
+    matting = sys.modules.get("ermbg.matting")
+    if api is not None and router is not None and matting is not None:
+        # Keep ermbg.api imported once so _SEGMENTER_CACHE survives dev reloads,
+        # but refresh the function references that api.py bound at import time.
+        api.classify_strategy = router.classify_strategy
+        api._matte_internal = matting.matte
+
+    return f"dev_reload={','.join(reloaded)}" if reloaded else "dev_reload=none"
+
+
 class ErmbgAutoMatte:
     """Auto-routed matting. Strategy is decided per-image; user only chooses
     overrides if they really want to."""
@@ -92,8 +139,8 @@ class ErmbgAutoMatte:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("foreground", "alpha", "summary")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "IMAGE")
+    RETURN_NAMES = ("foreground", "alpha", "summary", "rgba_rgb")
     FUNCTION = "run"
     CATEGORY = "ERMBG"
 
@@ -108,6 +155,7 @@ class ErmbgAutoMatte:
         source_mask: torch.Tensor | None = None,
         subject_mask: torch.Tensor | None = None,
     ):
+        reload_note = _dev_reload_ermbg_modules()
         rgb = _image_to_numpy(image)
         alpha = _mask_to_numpy(source_mask)
         support = _mask_to_numpy(subject_mask)
@@ -142,17 +190,21 @@ class ErmbgAutoMatte:
             shadow_mode=shadow_mode,
         )
 
-        # Outputs: foreground RGB (premultiplied is more compositing-friendly,
-        # but ComfyUI IMAGE convention is straight, so we return the despilled
-        # foreground straight and α as a separate MASK).
+        # Outputs keep two RGB semantics separate. ``foreground`` is clean
+        # subject color for inspection/decontamination; ``rgba_rgb`` is the
+        # color layer that must be paired with ``alpha`` to preserve shadows in
+        # the final transparent result.
         fg_tensor = _numpy_image_to_tensor(result.foreground_srgb)
+        rgba_rgb_tensor = _numpy_image_to_tensor(result.rgba[..., :3])
         alpha_tensor = _numpy_mask_to_tensor(result.alpha)
 
         notes = result.report.get("strategy", {}).get("notes", "")
         despill_used = result.report.get("despill_method", "?")
         summary = f"{result.strategy_name} | despill={despill_used} | {notes}"
+        if reload_note:
+            summary = f"{summary} | {reload_note}"
 
-        return (fg_tensor, alpha_tensor, summary)
+        return (fg_tensor, alpha_tensor, summary, rgba_rgb_tensor)
 
 
 class ErmbgClassify:
