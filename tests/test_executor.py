@@ -123,6 +123,42 @@ def test_preserve_soft_alpha_protects_overlap_from_fill():
     assert result.operation_results[1]["protected_pixels"] == int(soft_mask.sum())
 
 
+def test_external_protected_mask_blocks_alpha_repair():
+    image = np.full((12, 12, 3), 255, dtype=np.uint8)
+    image[3:9, 3:9] = (80, 80, 80)
+    rgba = np.zeros((12, 12, 4), dtype=np.uint8)
+    rgba[3:9, 3:9, :3] = (0, 0, 0)
+    rgba[3:9, 3:9, 3] = 96
+    repair_mask = np.zeros((12, 12), dtype=bool)
+    repair_mask[3:9, 3:9] = True
+    protected_mask = np.zeros((12, 12), dtype=bool)
+    protected_mask[4:8, 4:8] = True
+    region = RiskRegion(id="alpha_keyer_0", kind="alpha_keyer_disagreement", mask=repair_mask)
+    plan = CandidatePlan(
+        id="repair",
+        label="Repair",
+        operations=[
+            PlanOperation(
+                tool="repair_opaque_interior",
+                region_id="alpha_keyer_0",
+                parameters={"alpha_floor": 0.9},
+            )
+        ],
+    )
+
+    result = execute_plan(
+        plan,
+        [region],
+        image,
+        rgba,
+        background_color=(255, 255, 255),
+        protected_mask=protected_mask,
+    )
+
+    np.testing.assert_array_equal(result.rgba[protected_mask], rgba[protected_mask])
+    assert result.operation_results[0]["protected_pixels"] == int(protected_mask.sum())
+
+
 def test_mark_translucent_protects_overlap_from_hard_edge_snap():
     h, w = 24, 24
     image = np.full((h, w, 3), 255, dtype=np.uint8)

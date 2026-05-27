@@ -92,6 +92,9 @@ def _save_matte_outputs(
     io.save_rgba(out_dir / "rgba.png", result.rgba)
     io.save_mask(out_dir / "alpha.png", result.alpha)
     io.save_mask(out_dir / "shadow.png", result.debug["shadow_alpha"])
+    # shadow.png is display-safe for visual review; shadow_physical.png keeps
+    # the measured linear darkening strength for debugging thresholds.
+    io.save_mask(out_dir / "shadow_physical.png", result.debug["shadow_alpha_physical"])
     io.save_rgb(out_dir / "foreground.png", result.foreground_srgb)
     io.save_mask(out_dir / "trimap.png", result.debug["trimap_u8"])
     report = {
@@ -105,12 +108,14 @@ def _save_matte_outputs(
         "strategy": result.debug.get("strategy", {}),
     }
     (out_dir / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    shadow_alpha_physical = np.asarray(result.debug["shadow_alpha_physical"], dtype=np.float32)
     return {
         "input": _rel(input_path),
         "out_dir": _rel(out_dir),
         "rgba": _rel(out_dir / "rgba.png"),
         "alpha": _rel(out_dir / "alpha.png"),
         "shadow": _rel(out_dir / "shadow.png"),
+        "shadow_physical": _rel(out_dir / "shadow_physical.png"),
         "foreground": _rel(out_dir / "foreground.png"),
         "trimap": _rel(out_dir / "trimap.png"),
         "report": _rel(out_dir / "report.json"),
@@ -119,7 +124,7 @@ def _save_matte_outputs(
         "despill_method": report["despill_method"],
         "keyer": report["keyer"],
         "strategy": report["strategy"],
-    }, result.rgba
+    }, result.rgba, shadow_alpha_physical > 0.0
 
 
 def _contact_sheet(request: VLMPlannerRequest) -> np.ndarray:
@@ -240,6 +245,29 @@ def _run_qwen_planner(
         "elapsed_sec": elapsed,
         "model": qwen_model,
     }, payload
+
+
+def _drop_unknown_region_operations(plans: list[Any], regions: list[Any]) -> list[dict[str, Any]]:
+    valid_region_ids = {str(region.id) for region in regions}
+    dropped: list[dict[str, Any]] = []
+    for plan in plans:
+        kept_ops = []
+        for op in plan.operations:
+            if op.region_id in valid_region_ids:
+                kept_ops.append(op)
+                continue
+            # Qwen can occasionally enumerate a visual label outside the budgeted
+            # planner region set. The batch should keep valid operations and
+            # record the invalid reference instead of failing the whole run.
+            dropped.append(
+                {
+                    "plan_id": plan.id,
+                    "tool": op.tool,
+                    "region_id": op.region_id,
+                }
+            )
+        plan.operations = kept_ops
+    return dropped
 
 
 def _budget_regions(regions: list[Any], max_regions: int) -> list[Any]:
@@ -456,11 +484,29 @@ def _shadow_policy_eval(
     }
 
 
+def _accepted_shadow_mask(
+    shadow_regions: list[Any],
+    semantic_regions: list[dict[str, Any]],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    accepted_ids = {
+        str(item.get("region_id"))
+        for item in semantic_regions
+        if str(item.get("role", "")).lower() == "shadow"
+    }
+    mask = np.zeros(shape, dtype=bool)
+    for region in shadow_regions:
+        if str(region.id) in accepted_ids:
+            mask |= np.asarray(region.mask, dtype=bool)
+    return mask
+
+
 def _run_variant_vlm(
     *,
     input_path: Path,
     image_srgb: np.ndarray,
     base_rgba: np.ndarray,
+    base_shadow_mask: np.ndarray,
     background_color: tuple[int, int, int],
     target_policy: list[Any],
     out_dir: Path,
@@ -522,6 +568,12 @@ def _run_variant_vlm(
         timeout=timeout,
     )
     del qwen_payload
+    dropped_invalid_operations = _drop_unknown_region_operations(plans, tool_regions)
+    if dropped_invalid_operations:
+        qwen_info = {
+            **qwen_info,
+            "dropped_invalid_operations": dropped_invalid_operations,
+        }
     semantic_regions, shadow_qwen_info = _run_qwen_shadow_semantic(
         image_srgb=image_srgb,
         subject_alpha=subject_alpha,
@@ -537,11 +589,27 @@ def _run_variant_vlm(
         semantic_regions=semantic_regions,
         shadow_candidate_count=len(shadow_region_ids),
     )
+    # Accepted owned shadows are review/display pixels, not opaque foreground.
+    # Protect them from VLM-selected repair tools that intentionally raise alpha.
+    protected_shadow_mask = _accepted_shadow_mask(
+        shadow_regions,
+        semantic_regions,
+        base_rgba.shape[:2],
+    )
+    if shadow_policy.get("shadow_policy_hit"):
+        protected_shadow_mask |= np.asarray(base_shadow_mask, dtype=bool)
     (out_dir / "candidate_plans.json").write_text(
         json.dumps([plan.to_dict() for plan in plans], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    results = execute_plans(plans, tool_regions, image_srgb, base_rgba, background_color=background_color)
+    results = execute_plans(
+        plans,
+        tool_regions,
+        image_srgb,
+        base_rgba,
+        background_color=background_color,
+        protected_mask=protected_shadow_mask,
+    )
     candidate_dir = out_dir / "candidates"
     candidate_dir.mkdir(parents=True, exist_ok=True)
     candidate_payloads: list[dict[str, Any]] = []
@@ -574,6 +642,7 @@ def _run_variant_vlm(
         "all_region_count": len(all_regions),
         "shadow_candidate_count": len(shadow_region_ids),
         "shadow_candidate_ids": sorted(shadow_region_ids),
+        "protected_shadow_pixels": int(protected_shadow_mask.sum()),
         "semantic_regions": semantic_regions,
         **shadow_policy,
         "attachment_count": len(manifest),
@@ -692,21 +761,47 @@ def run(args: argparse.Namespace) -> None:
     matte_root.mkdir(parents=True, exist_ok=True)
     vlm_root.mkdir(parents=True, exist_ok=True)
 
+    existing_rows_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    if args.resume_existing:
+        report_path = vlm_root / "eval_report.json"
+        if report_path.exists():
+            existing_report = json.loads(report_path.read_text(encoding="utf-8"))
+            for row in existing_report.get("rows", []):
+                if isinstance(row, dict):
+                    key = (str(row.get("sample_id", "")), str(row.get("sample_variant", "")))
+                    existing_rows_by_key[key] = row
+
     segmenter = build_segmenter(backend=args.backend, model_id=args.matting_model)
+    matte_summary_path = matte_root / "summary.json"
     matte_rows: list[dict[str, Any]] = []
-    report_rows: list[dict[str, Any]] = []
+    if args.resume_existing and matte_summary_path.exists():
+        matte_rows = json.loads(matte_summary_path.read_text(encoding="utf-8"))
+    report_rows_by_key = dict(existing_rows_by_key)
     total = len(cases) * len(variants)
     index = 0
     for case in cases:
         case_id = str(case["id"])
-        sample_id = str(case.get("sample_id") or f"G{len(report_rows) + 1:02d}")
+        sample_id = str(case.get("sample_id") or f"G{index + 1:02d}")
         for variant in variants:
             index += 1
+            row_key = (sample_id, variant)
             sample_code = f"{sample_id}-{variant[:1].upper()}"
             input_path = PROJECT_ROOT / str(case[variant])
             matte_dir = matte_root / case_id / variant
             vlm_dir = vlm_root / case_id / variant
             print(f"[{index}/{total}] {sample_code} {case_id}/{variant}", flush=True)
+            existing_row = existing_rows_by_key.get(row_key)
+            summary_path = vlm_dir / "summary.json"
+            candidate_results_path = vlm_dir / "candidate_results.json"
+            if (
+                args.resume_existing
+                and existing_row
+                and existing_row.get("status") == "ok"
+                and summary_path.exists()
+                and candidate_results_path.exists()
+            ):
+                print("  SKIP: existing ok", flush=True)
+                continue
             row_base: dict[str, Any] = {
                 "case_id": case_id,
                 "sample_id": sample_id,
@@ -722,7 +817,7 @@ def run(args: argparse.Namespace) -> None:
             }
             try:
                 image_srgb = io.load_rgb(input_path)
-                matte_summary, rgba = _save_matte_outputs(
+                matte_summary, rgba, base_shadow_mask = _save_matte_outputs(
                     input_path=input_path,
                     image_srgb=image_srgb,
                     segmenter=segmenter,
@@ -743,6 +838,7 @@ def run(args: argparse.Namespace) -> None:
                     input_path=input_path,
                     image_srgb=image_srgb,
                     base_rgba=rgba,
+                    base_shadow_mask=base_shadow_mask,
                     background_color=bg,
                     target_policy=row_base["target_policy"],
                     out_dir=vlm_dir,
@@ -801,10 +897,12 @@ def run(args: argparse.Namespace) -> None:
                     "expected_hit": False,
                 }
                 print(f"  ERROR: {exc}", flush=True)
-            report_rows.append(report_row)
+            report_rows_by_key[row_key] = report_row
+            report_rows = _ordered_report_rows(cases, variants, report_rows_by_key)
             (matte_root / "summary.json").write_text(json.dumps(matte_rows, indent=2, ensure_ascii=False))
             _write_eval_report(args, report_rows, out_root, matte_root, vlm_root)
 
+    report_rows = _ordered_report_rows(cases, variants, report_rows_by_key)
     _write_selected_sheet(report_rows, vlm_root / "selected_candidates_checker_sheet.png")
     _write_eval_report(args, report_rows, out_root, matte_root, vlm_root)
     ok = sum(1 for row in report_rows if row.get("status") == "ok")
@@ -816,6 +914,21 @@ def run(args: argparse.Namespace) -> None:
         f"expected_any_hit={any_hits}/{len(report_rows)} harmful={harmful}/{len(report_rows)}"
     )
     print(f"Report: {vlm_root / 'eval_report.json'}")
+
+
+def _ordered_report_rows(
+    cases: list[dict[str, Any]],
+    variants: tuple[str, ...],
+    rows_by_key: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, case in enumerate(cases):
+        sample_id = str(case.get("sample_id") or f"G{idx + 1:02d}")
+        for variant in variants:
+            row = rows_by_key.get((sample_id, variant))
+            if row is not None:
+                rows.append(row)
+    return rows
 
 
 def _write_eval_report(
@@ -897,6 +1010,7 @@ def main() -> None:
     p.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. G03")
     p.add_argument("--case-id", default="", help="Comma-separated case ids")
     p.add_argument("--variants", default="green,white", help="Comma-separated variants: green,white")
+    p.add_argument("--resume-existing", action="store_true", help="Skip completed ok rows in an existing out-dir")
     args = p.parse_args()
     run(args)
 

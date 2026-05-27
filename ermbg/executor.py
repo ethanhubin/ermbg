@@ -35,17 +35,23 @@ def execute_plan(
     base_rgba: np.ndarray,
     *,
     background_color: tuple[int, int, int] | None = None,
+    protected_mask: np.ndarray | None = None,
 ) -> PlanExecutionResult:
     """Execute one validated candidate plan using registered local tools."""
     validate_candidate_plans([plan], regions)
     region_by_id = {region.id: region for region in regions}
     rgba = base_rgba.copy()
     operation_results: list[dict[str, Any]] = []
-    protected_mask = np.zeros(base_rgba.shape[:2], dtype=bool)
+    if protected_mask is None:
+        protected = np.zeros(base_rgba.shape[:2], dtype=bool)
+    else:
+        protected = np.asarray(protected_mask, dtype=bool).copy()
+        if protected.shape != base_rgba.shape[:2]:
+            raise ValueError("protected_mask shape must match image size")
 
     for op in plan.operations:
         if op.tool in {"preserve_hole", "preserve_soft_alpha", "mark_translucent"}:
-            protected_mask |= region_by_id[op.region_id].mask
+            protected |= region_by_id[op.region_id].mask
 
     for op in plan.operations:
         mask = region_by_id[op.region_id].mask
@@ -81,7 +87,7 @@ def execute_plan(
             )
             continue
         if op.tool == "fill_same_color_region":
-            editable_mask = mask & ~protected_mask
+            editable_mask = mask & ~protected
             alpha_floor = float(op.parameters.get("alpha_floor", 1.0))
             alpha_u8 = int(np.clip(alpha_floor, 0.0, 1.0) * 255 + 0.5)
             rgba[editable_mask, :3] = image_srgb[editable_mask]
@@ -91,14 +97,14 @@ def execute_plan(
                     "tool": op.tool,
                     "region_id": op.region_id,
                     "applied_pixels": int(editable_mask.sum()),
-                    "protected_pixels": int((mask & protected_mask).sum()),
+                    "protected_pixels": int((mask & protected).sum()),
                 }
             )
             continue
         if op.tool == "repair_opaque_interior":
             if background_color is None:
                 raise ValueError("repair_opaque_interior requires background_color")
-            editable_mask = mask & ~protected_mask
+            editable_mask = mask & ~protected
             alpha_floor = float(op.parameters.get("alpha_floor", 0.9))
             bg = tuple(int(c) for c in background_color)
             alpha = rgba[..., 3].astype(np.float32) / 255.0
@@ -118,7 +124,7 @@ def execute_plan(
                     "tool": op.tool,
                     "region_id": op.region_id,
                     "applied_pixels": int(changed.sum()),
-                    "protected_pixels": int((mask & protected_mask).sum()),
+                    "protected_pixels": int((mask & protected).sum()),
                     "repair_info": info,
                 }
             )
@@ -126,7 +132,7 @@ def execute_plan(
         if op.tool == "snap_hard_edge":
             if background_color is None:
                 raise ValueError("snap_hard_edge requires background_color")
-            editable_mask = mask & ~protected_mask
+            editable_mask = mask & ~protected
             alpha_floor = float(op.parameters.get("alpha_floor", 0.95))
             bg = tuple(int(c) for c in background_color)
             alpha = rgba[..., 3].astype(np.float32) / 255.0
@@ -148,7 +154,7 @@ def execute_plan(
                     "tool": op.tool,
                     "region_id": op.region_id,
                     "applied_pixels": int(changed.sum()),
-                    "protected_pixels": int((mask & protected_mask).sum()),
+                    "protected_pixels": int((mask & protected).sum()),
                     "repair_info": info,
                 }
             )
@@ -170,6 +176,7 @@ def execute_plans(
     base_rgba: np.ndarray,
     *,
     background_color: tuple[int, int, int] | None = None,
+    protected_mask: np.ndarray | None = None,
 ) -> list[PlanExecutionResult]:
     """Validate and execute a variable-length candidate plan list."""
     validate_candidate_plans(plans, regions)
@@ -180,6 +187,7 @@ def execute_plans(
             image_srgb,
             base_rgba,
             background_color=background_color,
+            protected_mask=protected_mask,
         )
         for plan in plans
     ]

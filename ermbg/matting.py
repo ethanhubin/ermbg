@@ -31,7 +31,12 @@ from .keyer import (
 )
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
-from .shadow import ShadowPrior, composite_subject_with_shadow, estimate_shadow_alpha
+from .shadow import (
+    ShadowPrior,
+    composite_subject_with_shadow,
+    estimate_shadow_alpha,
+    shadow_alpha_to_display_alpha,
+)
 from .types import MattingResult, Trimap
 
 
@@ -217,18 +222,30 @@ def matte(
         despill_used = despill_method
 
     subject_alpha = alpha.copy()
-    shadow_alpha, shadow_info = estimate_shadow_alpha(
+    shadow_alpha_physical, shadow_info = estimate_shadow_alpha(
         image_srgb,
         subject_alpha,
         B_srgb,
         prior=shadow_prior,
     )
     if not shadow_info["detected"] and pre_shadow_info["detected"]:
-        shadow_alpha = pre_shadow_alpha
+        shadow_alpha_physical = pre_shadow_alpha
         shadow_info = dict(pre_shadow_info)
         shadow_info["source"] = "pre_keyer"
     else:
         shadow_info["source"] = "post_despill"
+    # The detector returns linear known-background darkening strength. For the
+    # exported RGBA, convert that to a black alpha that appears correct in
+    # ordinary sRGB compositors; otherwise hard shadows look much too heavy.
+    shadow_alpha = shadow_alpha_to_display_alpha(shadow_alpha_physical, B_srgb)
+    if shadow_info["detected"]:
+        physical_mask = shadow_alpha_physical > 0.0
+        shadow_info["display_safe"] = {
+            "enabled": True,
+            "mean_alpha": float(shadow_alpha[physical_mask].mean()) if physical_mask.any() else 0.0,
+            "p95_alpha": float(np.percentile(shadow_alpha[physical_mask], 95.0)) if physical_mask.any() else 0.0,
+            "max_alpha": float(shadow_alpha[physical_mask].max()) if physical_mask.any() else 0.0,
+        }
     if shadow_info["detected"]:
         alpha, F_lin = composite_subject_with_shadow(F_lin, subject_alpha, shadow_alpha)
         trimap = _trimap_from_alpha(alpha)
@@ -251,6 +268,7 @@ def matte(
             "soft_mask": soft,
             "subject_alpha": subject_alpha,
             "shadow_alpha": shadow_alpha,
+            "shadow_alpha_physical": shadow_alpha_physical,
             "shadow": shadow_info,
             "semantic_prior": semantic_prior.to_dict() if hasattr(semantic_prior, "to_dict") else {},
             "trimap_u8": trimap_to_uint8(trimap),

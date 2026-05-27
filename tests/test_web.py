@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from io import BytesIO
 
 import numpy as np
@@ -59,6 +60,14 @@ def test_game_eval_page_serves_result_table():
     assert "ERMBG Game Eval" in response.text
     assert "vlm_eval_game_qwen_gw_v001_20260526" in response.text
     assert 'id="run-select"' in response.text
+    assert 'id="start-full-eval"' in response.text
+    assert 'id="eval-panel"' in response.text
+    assert 'id="sample-list"' in response.text
+    assert "选择测试样本" in response.text
+    assert "全选" in response.text
+    assert "取消全选" in response.text
+    assert 'role="progressbar"' in response.text
+    assert 'id="batch-progress"' in response.text
     assert "ui_glass_button_soft_shadow" in response.text
     assert '"sampleRows": 18' in response.text
     assert '"sampleId": "G01"' in response.text
@@ -67,16 +76,81 @@ def test_game_eval_page_serves_result_table():
     assert '"sampleVariant": "white"' in response.text
     assert '"sampleVariant": "green"' in response.text
     assert '"runStatus": "ran"' in response.text
-    assert '"regionsUrl": "/eval/game/regions/ui_hard_button_no_shadow?variant=green"' in response.text
+    assert '"progress": {' in response.text
+    assert '"/eval/game/regions/ui_hard_button_no_shadow?variant=green' in response.text
     assert "comfy-qwen:Qwen3-VL-4B-Instruct-FP8" in response.text
     assert "<th class=\"regions-col\">regions</th>" in response.text
     assert "<th class=\"preview-col\">purple</th>" in response.text
+    assert "<th class=\"preview-col\">green ref</th>" in response.text
     assert "<th class=\"preview-col\">gray</th>" not in response.text
-    assert "<th class=\"preview-col\">green</th>" not in response.text
     assert "<th class=\"preview-col\">blue</th>" not in response.text
+    assert 'data-bg="green"' in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
-    assert "/eval/game/file/out/vlm_eval_game_qwen_gw_v001_20260526/" in response.text
+    assert "/eval/game/file/out/vlm_eval_game_qwen_gw_v" in response.text
+
+
+def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            self.command = command
+            self.kwargs = kwargs
+            self.pid = 12345
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web.subprocess, "Popen", FakePopen)
+    web._GAME_EVAL_JOBS.clear()
+
+    client = TestClient(app)
+    response = client.post("/eval/game/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runId"].startswith("vlm_eval_game_qwen_gw_v001_display_safe_")
+    assert payload["status"] == "running"
+    assert payload["progress"]["completed"] == 0
+    assert payload["progress"]["total"] == 18
+    assert (tmp_path / "out" / payload["runId"] / "web_launch.json").exists()
+
+    status_response = client.get(payload["statusUrl"])
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["status"] == "running"
+    assert status_payload["progress"]["percent"] == 0
+
+
+def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            self.command = command
+            self.kwargs = kwargs
+            self.pid = 12345
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web.subprocess, "Popen", FakePopen)
+    web._GAME_EVAL_JOBS.clear()
+
+    client = TestClient(app)
+    response = client.post("/eval/game/run", json={"sample_ids": ["G03", "G05"]})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["progress"]["total"] == 4
+    process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
+    assert "--sample-id" in process.command
+    assert "G03,G05" in process.command
+    launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
+    assert json.loads(launch.read_text(encoding="utf-8"))["sample_ids"] == ["G03", "G05"]
 
 
 def test_game_eval_file_serves_eval_image():

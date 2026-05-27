@@ -7,9 +7,15 @@ run ``matte_image``, preview the returned RGBA PNG, and download it.
 from __future__ import annotations
 
 import base64
+import os
 import json
+import re
+import subprocess
+import sys
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from threading import Lock
 from typing import Annotated
 from urllib.parse import quote
 
@@ -17,7 +23,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 try:
-    from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+    from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
     from fastapi.responses import FileResponse, HTMLResponse, Response
 except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
@@ -42,6 +48,8 @@ REGION_FILL_COLORS = {
 }
 
 app = FastAPI(title="ERMBG Web", version="0.1.0")
+_GAME_EVAL_JOBS: dict[str, dict[str, object]] = {}
+_GAME_EVAL_JOBS_LOCK = Lock()
 
 
 def _encode_png(rgba: np.ndarray) -> bytes:
@@ -932,6 +940,31 @@ def _game_sample_ids() -> dict[str, str]:
     return sample_ids
 
 
+def _game_eval_samples() -> list[dict[str, object]]:
+    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    manifest = _load_json(manifest_path)
+    cases = manifest.get("cases") if isinstance(manifest, dict) else None
+    if not isinstance(cases, list):
+        return []
+    samples: list[dict[str, object]] = []
+    for index, item in enumerate(cases, start=1):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        sample_id = item.get("sample_id")
+        sample_id = sample_id if isinstance(sample_id, str) else f"G{index:02d}"
+        samples.append(
+            {
+                "sampleId": sample_id,
+                "caseId": item["id"],
+                "category": item.get("category", ""),
+                "primaryAmbiguity": item.get("primary_ambiguity", ""),
+            }
+        )
+    return samples
+
+
 def _game_report_path(root: Path) -> Path | None:
     for name in ("vlm_qwen", "vlm_openai"):
         path = root / name / "eval_report.json"
@@ -990,6 +1023,183 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     return runs
 
 
+def _validate_game_eval_run_id(run_id: str) -> None:
+    if "/" in run_id or "\\" in run_id or run_id.startswith(".") or not run_id.startswith(GAME_EVAL_PREFIX):
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
+
+
+def _game_eval_run_path(run_id: str) -> Path:
+    _validate_game_eval_run_id(run_id)
+    root = (PROJECT_ROOT / "out" / run_id).resolve()
+    if not _is_relative_to(root, (PROJECT_ROOT / "out").resolve()):
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
+    return root
+
+
+def _next_game_eval_run_id() -> str:
+    out_root = PROJECT_ROOT / "out"
+    version_re = re.compile(rf"^{re.escape(GAME_EVAL_PREFIX)}(\d+)")
+    versions = []
+    for path in out_root.glob(f"{GAME_EVAL_PREFIX}*"):
+        match = version_re.match(path.name)
+        if match:
+            versions.append(int(match.group(1)))
+    version = max(versions, default=0) + 1
+    stamp = datetime.now().strftime("%Y%m%d")
+    return f"{GAME_EVAL_PREFIX}{version:03d}_display_safe_{stamp}"
+
+
+def _game_eval_expected_case_count() -> int:
+    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
+    if not manifest_path.exists():
+        return 18
+    manifest = _load_json(manifest_path)
+    cases = manifest.get("cases") if isinstance(manifest, dict) else None
+    if isinstance(cases, list) and cases:
+        return len(cases) * 2
+    return 18
+
+
+def _game_eval_batch_progress(
+    root: Path,
+    report_path: Path | None,
+    *,
+    prefer_report_total: bool = False,
+    expected_total: int | None = None,
+) -> dict[str, object]:
+    del root
+    total = int(expected_total) if expected_total is not None and expected_total > 0 else _game_eval_expected_case_count()
+    completed = 0
+    ok = 0
+    errors = 0
+    if report_path is not None:
+        report = _load_json(report_path)
+        rows = report.get("rows") if isinstance(report, dict) else None
+        if isinstance(rows, list):
+            completed = len(rows)
+            ok = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "ok")
+            errors = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "error")
+        if isinstance(report, dict):
+            try:
+                report_total = int(report.get("case_count", 0))
+                total = report_total if prefer_report_total and report_total > 0 else max(total, report_total)
+            except (TypeError, ValueError):
+                pass
+    percent = 0 if total <= 0 else round(min(100.0, completed * 100.0 / total), 1)
+    return {
+        "completed": completed,
+        "total": total,
+        "ok": ok,
+        "errors": errors,
+        "percent": percent,
+        "reportPath": str(report_path.relative_to(PROJECT_ROOT)) if report_path is not None else None,
+    }
+
+
+def _game_eval_batch_status(run_id: str) -> dict[str, object]:
+    root = _game_eval_run_path(run_id)
+    report_path = _game_report_path(root)
+    with _GAME_EVAL_JOBS_LOCK:
+        job = _GAME_EVAL_JOBS.get(run_id)
+    process = job.get("process") if isinstance(job, dict) else None
+    running = isinstance(process, subprocess.Popen) and process.poll() is None
+    returncode = process.poll() if isinstance(process, subprocess.Popen) and not running else None
+    if running:
+        status = "running"
+    elif report_path is not None:
+        status = "complete"
+    elif returncode not in (None, 0):
+        status = "error"
+    else:
+        status = "started" if root.exists() else "unknown"
+    expected_total = job.get("expected_total") if isinstance(job, dict) else None
+    progress = _game_eval_batch_progress(
+        root,
+        report_path,
+        prefer_report_total=not running,
+        expected_total=int(expected_total) if isinstance(expected_total, int) else None,
+    )
+    return {
+        "runId": run_id,
+        "status": status,
+        "returnCode": returncode,
+        "url": f"/eval/game?run={quote(run_id, safe='')}",
+        "statusUrl": f"/eval/game/run/{quote(run_id, safe='')}/status",
+        "hasReport": report_path is not None,
+        "progress": progress,
+    }
+
+
+def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
+    if not payload:
+        return []
+    raw = payload.get("sample_ids")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="sample_ids must be a list.")
+    sample_ids = [str(item).strip() for item in raw if str(item).strip()]
+    known = {str(item["sampleId"]) for item in _game_eval_samples()}
+    if known:
+        invalid = sorted(set(sample_ids) - known)
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Unknown sample_id: {', '.join(invalid)}")
+    elif any(not re.fullmatch(r"G\d{2}", sample_id) for sample_id in sample_ids):
+        raise HTTPException(status_code=400, detail="sample_ids must look like G01.")
+    deduped: list[str] = []
+    for sample_id in sample_ids:
+        if sample_id not in deduped:
+            deduped.append(sample_id)
+    if raw and not deduped:
+        raise HTTPException(status_code=400, detail="Select at least one sample.")
+    return deduped
+
+
+def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, object]:
+    selected_sample_ids = list(sample_ids or [])
+    run_id = _next_game_eval_run_id()
+    out_dir = PROJECT_ROOT / "out" / run_id
+    out_dir.mkdir(parents=True, exist_ok=False)
+    log_path = out_dir / "web_batch.log"
+    script_path = PROJECT_ROOT / "scripts" / "09_game_eval_qwen_batch.py"
+    command = [
+        sys.executable,
+        str(script_path),
+        "--out-dir",
+        str(out_dir),
+    ]
+    if selected_sample_ids:
+        command.extend(["--sample-id", ",".join(selected_sample_ids)])
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=PROJECT_ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    launch = {
+        "run_id": run_id,
+        "command": command,
+        "log": str(log_path.relative_to(PROJECT_ROOT)),
+        "pid": process.pid,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "sample_ids": selected_sample_ids,
+    }
+    (out_dir / "web_launch.json").write_text(json.dumps(launch, indent=2, ensure_ascii=False), encoding="utf-8")
+    with _GAME_EVAL_JOBS_LOCK:
+        _GAME_EVAL_JOBS[run_id] = {
+            "process": process,
+            "log": log_path,
+            "sample_ids": selected_sample_ids,
+            "expected_total": len(selected_sample_ids) * 2 if selected_sample_ids else _game_eval_expected_case_count(),
+        }
+    return _game_eval_batch_status(run_id)
+
+
 def _default_game_eval_root() -> Path:
     roots = [
         path
@@ -1012,11 +1222,7 @@ def _game_eval_root(run: str | None = None) -> Path:
         if root.is_dir() and _game_eval_root_has_data(root):
             return root
         raise HTTPException(status_code=404, detail="Game eval run not found.")
-    if "/" in run or "\\" in run or run.startswith("."):
-        raise HTTPException(status_code=404, detail="Game eval run not found.")
-    root = (PROJECT_ROOT / "out" / run).resolve()
-    if not _is_relative_to(root, (PROJECT_ROOT / "out").resolve()):
-        raise HTTPException(status_code=404, detail="Game eval run not found.")
+    root = _game_eval_run_path(run)
     if not root.is_dir() or not _game_eval_root_has_data(root):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
     return root
@@ -1148,6 +1354,7 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
         "vlmRoot": "",
+        "samples": _game_eval_samples(),
         "cases": cases,
     }
 
@@ -1266,8 +1473,20 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         "vlmRoot": str(_game_vlm_root(root).relative_to(PROJECT_ROOT)),
         "runs": _game_eval_runs(root),
         "selectedRun": root.name,
+        "progress": _game_eval_batch_progress(root, report_path, prefer_report_total=True),
+        "samples": _game_eval_samples(),
         "cases": cases,
     }
+
+
+@app.post("/eval/game/run")
+def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
+    return _start_game_eval_batch(_selected_game_eval_sample_ids(payload))
+
+
+@app.get("/eval/game/run/{run_id}/status")
+def game_eval_run_status(run_id: str) -> dict[str, object]:
+    return _game_eval_batch_status(run_id)
 
 
 @app.get("/eval/game/file/{rel_path:path}")
@@ -1393,29 +1612,67 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       position: sticky;
       top: 0;
       z-index: 10;
-      min-height: 56px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 20px;
-      padding: 0 24px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      padding: 10px 20px;
       border-bottom: 1px solid #d6ddd4;
       background: rgba(255, 255, 255, 0.96);
       backdrop-filter: blur(10px);
     }}
-    h1 {{ margin: 0; font-size: 18px; letter-spacing: 0; }}
-    nav {{ display: flex; align-items: center; gap: 14px; font-size: 13px; color: #53615a; }}
-    nav a {{ color: #196f5a; font-weight: 700; text-decoration: none; }}
+    h1 {{ flex: 0 0 auto; margin: 0; font-size: 18px; letter-spacing: 0; white-space: nowrap; }}
+    nav {{ min-width: 0; display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 10px; font-size: 13px; color: #53615a; }}
+    nav a {{ color: #196f5a; font-weight: 700; text-decoration: none; white-space: nowrap; }}
+    #run-id {{
+      min-width: 0;
+      flex: 1 1 260px;
+      max-width: 420px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .run-button {{
+      min-height: 34px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 6px;
+      background: #176a56;
+      color: #ffffff;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .run-button:disabled {{ opacity: 0.58; cursor: progress; }}
+    .run-status {{ flex: 0 1 160px; min-width: 92px; color: #53615a; font-size: 12px; font-weight: 800; }}
+    .run-progress {{
+      flex: 1 1 160px;
+      width: 128px;
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #dce4d9;
+    }}
+    .run-progress-bar {{
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: #176a56;
+      transition: width 180ms ease;
+    }}
     .run-picker {{
-      min-width: 280px;
+      min-width: 0;
+      flex: 1 1 420px;
       display: flex;
       align-items: center;
       gap: 8px;
       color: #53615a;
       font-weight: 800;
     }}
+    .run-picker span {{ flex: 0 0 auto; white-space: nowrap; }}
     .run-picker select {{
-      width: min(420px, 42vw);
+      min-width: 0;
+      width: 100%;
       min-height: 34px;
       padding: 0 30px 0 10px;
       border: 1px solid #c6d0c3;
@@ -1443,19 +1700,27 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       border: 1px solid #d1d9cf;
       border-radius: 999px;
       background: #ffffff;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }}
     .table-wrap {{
-      overflow-x: auto;
+      overflow: auto;
       border: 1px solid #d6ddd4;
       border-radius: 8px;
       background: #ffffff;
     }}
-    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1280px; }}
+    table {{
+      width: max(100%, 1220px);
+      border-collapse: separate;
+      border-spacing: 0;
+      table-layout: fixed;
+    }}
     th, td {{ border-bottom: 1px solid #e2e8df; vertical-align: top; }}
     th {{
       position: sticky;
-      top: 56px;
+      top: 0;
       z-index: 5;
       height: 40px;
       padding: 0 10px;
@@ -1467,10 +1732,18 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }}
     td {{ padding: 10px; }}
     tr:last-child td {{ border-bottom: 0; }}
-    .case-col {{ width: 280px; }}
-    .original-col {{ width: 150px; }}
-    .regions-col {{ width: 170px; }}
-    .preview-col {{ width: 170px; }}
+    .case-col {{ width: 260px; }}
+    .original-col {{ width: 145px; }}
+    .regions-col {{ width: 155px; }}
+    .preview-col {{ width: 132px; }}
+    th.case-col, td:first-child {{
+      position: sticky;
+      left: 0;
+      z-index: 4;
+      background: #ffffff;
+      box-shadow: 1px 0 0 #e2e8df;
+    }}
+    th.case-col {{ z-index: 6; background: #fbfcfa; }}
     .case-name {{ font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }}
     .sample-code {{
       display: inline-flex;
@@ -1507,12 +1780,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .tools {{ overflow-wrap: anywhere; }}
     .thumb-button {{
       width: 100%;
-      min-height: 96px;
+      min-height: 92px;
       max-height: 220px;
       aspect-ratio: var(--thumb-ratio, 1 / 1);
       display: grid;
       place-items: center;
-      padding: 8px;
+      padding: 6px;
       border: 1px solid #cad3c7;
       border-radius: 6px;
       cursor: zoom-in;
@@ -1540,6 +1813,9 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .bg-white {{ background: #ffffff; }}
     .bg-black {{ background: #101413; }}
     .bg-purple {{ background: #7c3aed; }}
+    /* Known green-screen reference for judging whether transparent shadows
+       match the original source, without white/checker contrast bias. */
+    .bg-green {{ background: #00c800; }}
     .candidate-label {{ margin-bottom: 7px; color: #53615a; font-size: 12px; font-weight: 800; overflow-wrap: anywhere; }}
     .selected-mark {{
       display: inline-flex;
@@ -1549,7 +1825,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }}
     .empty-cell {{
       width: 100%;
-      min-height: 96px;
+      min-height: 92px;
       aspect-ratio: 1 / 1;
       display: grid;
       place-items: center;
@@ -1613,15 +1889,104 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       user-select: none;
       pointer-events: none;
     }}
-    @media (max-width: 760px) {{
-      header {{ align-items: flex-start; flex-direction: column; gap: 5px; padding: 10px 16px; }}
-      nav {{ width: 100%; flex-wrap: wrap; }}
-      .run-picker {{ width: 100%; min-width: 0; }}
+    .eval-panel {{
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: none;
+      place-items: center;
+      padding: 20px;
+      background: rgba(12, 17, 15, 0.58);
+    }}
+    .eval-panel.is-open {{ display: grid; }}
+    .eval-dialog {{
+      width: min(720px, 100%);
+      max-height: min(760px, calc(100vh - 40px));
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      overflow: hidden;
+      border: 1px solid #d6ddd4;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 18px 52px rgba(20, 31, 26, 0.22);
+    }}
+    .eval-dialog header {{
+      position: static;
+      min-height: 54px;
+      padding: 0 16px;
+      border-bottom: 1px solid #e2e8df;
+      background: #ffffff;
+      backdrop-filter: none;
+    }}
+    .eval-dialog h2 {{ margin: 0; font-size: 16px; letter-spacing: 0; }}
+    .eval-tools {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e2e8df;
+    }}
+    .eval-tools button, .eval-actions button {{
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }}
+    .eval-tools .selection-count {{ margin-left: auto; color: #53615a; font-size: 12px; font-weight: 800; }}
+    .sample-list {{ min-height: 0; overflow: auto; padding: 8px 16px; }}
+    .sample-option {{
+      display: grid;
+      grid-template-columns: 22px 72px 1fr;
+      gap: 10px;
+      align-items: start;
+      min-height: 44px;
+      padding: 10px 0;
+      border-bottom: 1px solid #edf1ea;
+      color: #17201c;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .sample-option:last-child {{ border-bottom: 0; }}
+    .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 2px 0 0; }}
+    .sample-detail {{ color: #5f6c66; font-size: 12px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }}
+    .eval-actions {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      padding: 12px 16px;
+      border-top: 1px solid #e2e8df;
+    }}
+    .eval-actions .primary {{
+      border-color: #176a56;
+      background: #176a56;
+      color: #ffffff;
+    }}
+    .eval-actions .primary:disabled {{ opacity: 0.55; cursor: not-allowed; }}
+    @media (max-width: 980px) {{
+      header {{
+        position: static;
+        padding: 10px 16px;
+      }}
+      nav {{ width: 100%; gap: 8px; }}
+      #run-id {{ flex: 1 1 100%; max-width: 100%; }}
+      .run-picker {{ flex: 1 1 320px; width: auto; min-width: 0; }}
       .run-picker select {{ width: 100%; }}
-      th {{ top: 78px; }}
+      .run-button {{ flex: 0 0 auto; }}
+      .run-status {{ flex: 1 1 180px; }}
+      .run-progress {{ flex: 1 1 160px; }}
       main {{ padding: 14px 12px 22px; }}
       .modal-bar {{ min-height: 92px; align-items: flex-start; flex-direction: column; padding: 10px 12px; }}
       .modal {{ grid-template-rows: auto 1fr; }}
+    }}
+    @media (max-width: 560px) {{
+      .run-picker {{ flex-basis: 100%; }}
+      .run-progress, .run-status {{ flex-basis: 100%; }}
     }}
   </style>
 </head>
@@ -1634,6 +1999,11 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <span>批次</span>
         <select id="run-select" aria-label="选择测试批次"></select>
       </label>
+      <button class="run-button" type="button" id="start-full-eval">启动测试</button>
+      <div class="run-progress" role="progressbar" aria-label="测试进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="run-progress-bar" id="batch-progress"></div>
+      </div>
+      <span class="run-status" id="batch-status" aria-live="polite"></span>
       <a href="/">上传页</a>
     </nav>
   </header>
@@ -1650,12 +2020,30 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
             <th class="preview-col">white</th>
             <th class="preview-col">black</th>
             <th class="preview-col">purple</th>
+            <th class="preview-col">green ref</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
   </main>
+  <div class="eval-panel" id="eval-panel" aria-hidden="true">
+    <section class="eval-dialog" role="dialog" aria-modal="true" aria-labelledby="eval-dialog-title">
+      <header>
+        <h2 id="eval-dialog-title">选择测试样本</h2>
+      </header>
+      <div class="eval-tools">
+        <button type="button" id="select-all-samples">全选</button>
+        <button type="button" id="clear-all-samples">取消全选</button>
+        <span class="selection-count" id="selection-count"></span>
+      </div>
+      <div class="sample-list" id="sample-list"></div>
+      <div class="eval-actions">
+        <button type="button" id="cancel-eval-panel">取消</button>
+        <button class="primary" type="button" id="confirm-start-eval">开始测试</button>
+      </div>
+    </section>
+  </div>
   <div class="modal" id="modal" aria-hidden="true">
     <div class="modal-bar">
       <div class="modal-title" id="modal-title"></div>
@@ -1664,6 +2052,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <button class="swatch bg-white" type="button" data-bg="white" title="白底" aria-label="白底"></button>
         <button class="swatch bg-black" type="button" data-bg="black" title="黑底" aria-label="黑底"></button>
         <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
+        <button class="swatch bg-green" type="button" data-bg="green" title="绿幕参照" aria-label="绿幕参照"></button>
         <button class="icon-button" type="button" id="reset-preview" title="重置视图" aria-label="重置视图">↺</button>
         <button class="icon-button" type="button" id="close-modal" title="关闭" aria-label="关闭">×</button>
       </div>
@@ -1674,11 +2063,22 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
   </div>
   <script>
     const data = {data_json};
-    const backgrounds = ["checker", "white", "black", "purple"];
+    const backgrounds = ["checker", "white", "black", "purple", "green"];
     const rowsEl = document.getElementById("rows");
     const summaryEl = document.getElementById("summary");
     const runIdEl = document.getElementById("run-id");
     const runSelect = document.getElementById("run-select");
+    const startFullEvalButton = document.getElementById("start-full-eval");
+    const batchProgress = document.getElementById("batch-progress");
+    const batchProgressRoot = batchProgress.parentElement;
+    const batchStatusEl = document.getElementById("batch-status");
+    const evalPanel = document.getElementById("eval-panel");
+    const sampleList = document.getElementById("sample-list");
+    const selectAllSamplesButton = document.getElementById("select-all-samples");
+    const clearAllSamplesButton = document.getElementById("clear-all-samples");
+    const cancelEvalPanelButton = document.getElementById("cancel-eval-panel");
+    const confirmStartEvalButton = document.getElementById("confirm-start-eval");
+    const selectionCountEl = document.getElementById("selection-count");
     const modal = document.getElementById("modal");
     const modalStage = document.getElementById("modal-stage");
     const modalImg = document.getElementById("modal-img");
@@ -1690,6 +2090,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     let panX = 0;
     let panY = 0;
     let dragStart = null;
+    let activeBatchStatusUrl = "";
 
     function text(value) {{
       return value === null || value === undefined || value === "" ? "—" : String(value);
@@ -1740,6 +2141,10 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     function renderRows() {{
       renderRunSelect();
       runIdEl.textContent = data.runId || "game eval";
+      setBatchProgress(data.progress);
+      if (data.progress) {{
+        setBatchStatus(`当前：${{progressText(data)}}`, false);
+      }}
       summaryEl.innerHTML = "";
       [
         `model: ${{text(data.model)}}`,
@@ -1848,6 +2253,132 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       }});
     }}
 
+    function setBatchStatus(message, isRunning = false) {{
+      batchStatusEl.textContent = message || "";
+      startFullEvalButton.disabled = isRunning;
+    }}
+
+    function setBatchProgress(progress) {{
+      const pct = progress && Number.isFinite(Number(progress.percent)) ? Number(progress.percent) : 0;
+      const clamped = Math.max(0, Math.min(100, pct));
+      batchProgress.style.width = `${{clamped}}%`;
+      batchProgressRoot.setAttribute("aria-valuenow", String(Math.round(clamped)));
+    }}
+
+    function progressText(status) {{
+      const progress = status && status.progress ? status.progress : {{}};
+      const completed = Number.isFinite(Number(progress.completed)) ? Number(progress.completed) : 0;
+      const total = Number.isFinite(Number(progress.total)) ? Number(progress.total) : 18;
+      const ok = Number.isFinite(Number(progress.ok)) ? Number(progress.ok) : 0;
+      const errors = Number.isFinite(Number(progress.errors)) ? Number(progress.errors) : 0;
+      return `${{completed}}/${{total}} · ok ${{ok}} · error ${{errors}}`;
+    }}
+
+    async function pollBatchStatus() {{
+      if (!activeBatchStatusUrl) return;
+      try {{
+        const response = await fetch(activeBatchStatusUrl);
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const status = await response.json();
+        setBatchProgress(status.progress);
+        if (status.status === "complete" && status.hasReport && status.url) {{
+          setBatchStatus(`完成：${{progressText(status)}}`, false);
+          window.location.href = status.url;
+          return;
+        }}
+        if (status.status === "error") {{
+          setBatchStatus(`失败：${{progressText(status)}}`, false);
+          activeBatchStatusUrl = "";
+          return;
+        }}
+        setBatchStatus(`运行中：${{progressText(status)}}`, true);
+        window.setTimeout(pollBatchStatus, 5000);
+      }} catch (error) {{
+        setBatchStatus("状态读取失败", false);
+        activeBatchStatusUrl = "";
+      }}
+    }}
+
+    function sampleCheckboxes() {{
+      return Array.from(sampleList.querySelectorAll('input[type="checkbox"]'));
+    }}
+
+    function selectedSampleIds() {{
+      return sampleCheckboxes().filter((input) => input.checked).map((input) => input.value);
+    }}
+
+    function updateSelectionCount() {{
+      const selected = selectedSampleIds().length;
+      const total = sampleCheckboxes().length;
+      selectionCountEl.textContent = `${{selected}}/${{total}}`;
+      confirmStartEvalButton.disabled = selected === 0;
+    }}
+
+    function renderSampleList() {{
+      const samples = Array.isArray(data.samples) ? data.samples : [];
+      sampleList.innerHTML = "";
+      samples.forEach((sample) => {{
+        const label = document.createElement("label");
+        label.className = "sample-option";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = sample.sampleId;
+        checkbox.checked = true;
+        checkbox.addEventListener("change", updateSelectionCount);
+        const code = document.createElement("span");
+        code.textContent = sample.sampleId;
+        const detail = document.createElement("span");
+        detail.className = "sample-detail";
+        detail.textContent = `${{sample.caseId || ""}} · ${{sample.category || ""}} · ${{sample.primaryAmbiguity || ""}}`;
+        label.appendChild(checkbox);
+        label.appendChild(code);
+        label.appendChild(detail);
+        sampleList.appendChild(label);
+      }});
+      updateSelectionCount();
+    }}
+
+    function openEvalPanel() {{
+      renderSampleList();
+      evalPanel.classList.add("is-open");
+      evalPanel.setAttribute("aria-hidden", "false");
+    }}
+
+    function closeEvalPanel() {{
+      evalPanel.classList.remove("is-open");
+      evalPanel.setAttribute("aria-hidden", "true");
+    }}
+
+    function setAllSamples(checked) {{
+      sampleCheckboxes().forEach((input) => {{
+        input.checked = checked;
+      }});
+      updateSelectionCount();
+    }}
+
+    async function startSelectedEval() {{
+      const sampleIds = selectedSampleIds();
+      if (!sampleIds.length) return;
+      setBatchStatus("启动中", true);
+      setBatchProgress({{ percent: 0 }});
+      try {{
+        closeEvalPanel();
+        const response = await fetch("/eval/game/run", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ sample_ids: sampleIds }}),
+        }});
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const payload = await response.json();
+        activeBatchStatusUrl = payload.statusUrl || "";
+        setBatchProgress(payload.progress);
+        setBatchStatus(`运行中：${{progressText(payload)}}`, true);
+        window.setTimeout(pollBatchStatus, 5000);
+      }} catch (error) {{
+        setBatchStatus("启动失败", false);
+      }}
+    }}
+
     function clampScale(value) {{
       return Math.min(16, Math.max(0.1, value));
     }}
@@ -1927,6 +2458,14 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     closeModalButton.addEventListener("click", closeModal);
     resetPreviewButton.addEventListener("click", resetTransform);
     swatches.forEach((swatch) => swatch.addEventListener("click", () => setModalBackground(swatch.dataset.bg)));
+    startFullEvalButton.addEventListener("click", openEvalPanel);
+    selectAllSamplesButton.addEventListener("click", () => setAllSamples(true));
+    clearAllSamplesButton.addEventListener("click", () => setAllSamples(false));
+    cancelEvalPanelButton.addEventListener("click", closeEvalPanel);
+    confirmStartEvalButton.addEventListener("click", startSelectedEval);
+    evalPanel.addEventListener("click", (event) => {{
+      if (event.target === evalPanel) closeEvalPanel();
+    }});
     runSelect.addEventListener("change", () => {{
       if (runSelect.value) {{
         window.location.href = `/eval/game?run=${{encodeURIComponent(runSelect.value)}}`;
@@ -1934,6 +2473,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }});
     document.addEventListener("keydown", (event) => {{
       if (event.key === "Escape") closeModal();
+      if (event.key === "Escape") closeEvalPanel();
     }});
 
     renderRows();

@@ -9,7 +9,12 @@ import pytest
 from ermbg import io
 from ermbg.matting import matte
 from ermbg.planner import RiskRegion
-from ermbg.shadow import ShadowPrior, estimate_shadow_alpha, shadow_prior_from_regions
+from ermbg.shadow import (
+    ShadowPrior,
+    estimate_shadow_alpha,
+    shadow_alpha_to_display_alpha,
+    shadow_prior_from_regions,
+)
 
 pytestmark = pytest.mark.core
 
@@ -62,6 +67,25 @@ def _green_subject_with_hard_shadow(h: int = 96, w: int = 128):
     return image, subject, shadow_alpha, tuple(int(c) for c in bg)
 
 
+def _white_subject_with_hard_shadow_and_weak_tail(h: int = 128, w: int = 160):
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    fg = np.array([220, 30, 30], dtype=np.uint8)
+    subject = np.zeros((h, w), dtype=np.float32)
+    subject[30:68, 48:104] = 1.0
+
+    shadow_alpha = np.zeros((h, w), dtype=np.float32)
+    shadow_alpha[76:94, 42:118] = 0.50
+    shadow_alpha[72:100, 30:132] = np.maximum(shadow_alpha[72:100, 30:132], 0.012)
+    shadow_alpha[subject > 0] = 0.0
+
+    B_lin = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0]
+    F_lin = io.srgb_to_linear(fg.reshape(1, 1, 3))[0, 0]
+    bg_shadow = (1.0 - shadow_alpha[..., None]) * B_lin
+    C_lin = subject[..., None] * F_lin + (1.0 - subject[..., None]) * bg_shadow
+    image = io.linear_to_srgb_u8(C_lin)
+    return image, subject, shadow_alpha, tuple(int(c) for c in bg)
+
+
 def _scaled_background_color(bg: np.ndarray, scale: float) -> np.ndarray:
     scaled = io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0] * float(scale)
     return io.linear_to_srgb_u8(scaled.reshape(1, 1, 3))[0, 0]
@@ -93,6 +117,40 @@ def test_estimate_shadow_alpha_preserves_hard_shadow_boundary_mode():
     assert info["boundary"]["boundary_mode"] == "hard"
     assert info["boundary"]["boundary_falloff_px"] <= 2.0
     assert shadow_alpha[hard_core].mean() > 0.35
+
+
+def test_estimate_shadow_alpha_keeps_hard_boundary_with_weak_tail_support():
+    image, subject, shadow_gt, bg = _white_subject_with_hard_shadow_and_weak_tail()
+
+    shadow_alpha, info = estimate_shadow_alpha(image, subject, bg)
+
+    hard_core = (shadow_gt > 0.4) & (subject < 0.1)
+    weak_tail = (shadow_gt > 0.0) & (shadow_gt < 0.05) & (subject < 0.1)
+    assert info["detected"] is True
+    assert info["boundary"]["boundary_mode"] == "hard"
+    assert info["boundary"]["boundary_falloff_px"] <= 2.0
+    assert info["boundary"]["support_expansion_ratio"] >= 2.5
+    assert shadow_alpha[hard_core].mean() > 0.35
+    assert shadow_alpha[weak_tail].mean() < shadow_alpha[hard_core].mean()
+
+
+def test_shadow_alpha_to_display_alpha_matches_srgb_viewer_composite():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    physical = np.array([[0.0, 0.5, 0.8]], dtype=np.float32)
+
+    display = shadow_alpha_to_display_alpha(physical, tuple(int(c) for c in bg))
+
+    assert float(display[0, 0]) == 0.0
+    assert float(display[0, 1]) < float(physical[0, 1])
+    assert float(display[0, 2]) < float(physical[0, 2])
+
+    bg_srgb = bg.astype(np.float32) / 255.0
+    viewer_comp = (1.0 - display[..., None]) * bg_srgb.reshape(1, 1, 3)
+    target = io.linear_to_srgb(
+        (1.0 - physical[..., None])
+        * io.srgb_to_linear(bg.reshape(1, 1, 3))[0, 0].reshape(1, 1, 3)
+    )
+    assert np.abs(viewer_comp[..., 1] - target[..., 1]).max() < 1e-5
 
 
 def test_estimate_shadow_alpha_rejects_clean_background():
@@ -175,12 +233,19 @@ def test_shadow_prior_from_planner_regions_maps_semantic_masks():
 
 
 def test_matte_composites_detected_shadow_behind_subject():
-    image, subject, shadow_gt, _ = _green_subject_with_shadow(shadow=True)
+    image, subject, shadow_gt, bg = _green_subject_with_shadow(shadow=True)
 
     result = matte(image, segmenter=_StubSegmenter(subject))
     shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
 
     assert result.debug["shadow"]["detected"] is True
     assert result.debug["subject_alpha"][shadow_core].mean() < 0.05
-    assert result.debug["shadow_alpha"][shadow_core].mean() > 0.20
+    assert result.debug["shadow_alpha_physical"][shadow_core].mean() > 0.20
+    assert result.debug["shadow_alpha"][shadow_core].mean() < result.debug["shadow_alpha_physical"][shadow_core].mean()
     assert result.alpha[shadow_core].mean() > 0.20
+
+    bg_arr = np.asarray(bg, dtype=np.float32).reshape(1, 1, 3)
+    rgba = result.rgba.astype(np.float32)
+    a = rgba[..., 3:4] / 255.0
+    viewer_comp = rgba[..., :3] * a + bg_arr * (1.0 - a)
+    assert np.abs(viewer_comp[shadow_core] - image.astype(np.float32)[shadow_core]).mean() < 3.0

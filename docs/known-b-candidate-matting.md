@@ -223,6 +223,46 @@ Coalescing is evidence compression, not semantic grouping. For example, 40
 high-contrast edge fragments can become one evidence group while still meaning
 only "high-contrast keyer/matting conflict", not "definitely hard edge".
 
+### VLM Region Budget
+
+Image complexity should control how many local evidence regions are generated,
+but it should not directly control how many regions are sent to one VLM request.
+The local analyzer may produce a large candidate pool for complex images; the
+planner request still needs an explicit inference budget.
+
+The intended policy is:
+
+```text
+image complexity -> candidate pool size
+inference budget -> regions per VLM round
+uncertainty      -> follow-up rounds or local splitting
+```
+
+Do not pass every detected region to the VLM just because the image is complex.
+Large or low-information regions can slow the model down and make the semantic
+answer worse. In particular, broad `alpha_keyer_disagreement` components should
+be split locally, demoted, or handled by deterministic rules before they are
+eligible for VLM review.
+
+Default planning guidance:
+
+- keep the full local `EvidenceRegion[]` pool for debugging and deterministic
+  fallback;
+- rank regions by expected impact on final alpha, semantic ambiguity, local
+  confidence conflict, and area;
+- send only the top high-value regions per VLM round, with a typical budget of
+  6-8 and a hard cap near 12 unless an explicit batch mode is being tested;
+- split oversized regions before VLM review when their bbox covers unrelated
+  subject/background structure;
+- use follow-up rounds for genuinely complex images instead of one very large
+  prompt;
+- keep `max_new_tokens` proportional to the expected JSON plan size, not to the
+  source image size.
+
+This keeps the VLM as a semantic planner rather than an expensive reviewer of
+all local CV noise. Complex images should get better prioritization and, when
+needed, more rounds; they should not automatically get unbounded prompt size.
+
 ## ToolCatalog v0
 
 First version exposes only deterministic tools:

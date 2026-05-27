@@ -19,6 +19,8 @@ import numpy as np
 
 from . import io
 
+DISPLAY_SAFE_SHADOW_OPACITY_SCALE = 0.75
+
 
 @dataclass(frozen=True)
 class ShadowThresholds:
@@ -41,6 +43,17 @@ class ShadowThresholds:
     hard_boundary_falloff_px: float = 2.0
     hard_boundary_alpha_min: float = 0.16
     hard_boundary_ratio_min: float = 0.40
+    # Hard-shadow rescue thresholds are intentionally feature-based, not
+    # sample-specific. They cover the case where strict scalar-darkening seeds
+    # contain a clear high-alpha platform, but the loose support grows into a
+    # broad weak tail or non-pure background noise; in that case a large soft
+    # falloff erases the platform edge. These empirical gates require a strong
+    # seed plateau, a still-dark seed boundary, and significant support
+    # expansion before overriding the default soft-boundary decision.
+    hard_plateau_alpha_min: float = 0.30
+    hard_plateau_fraction_min: float = 0.10
+    hard_seed_alpha_p75_min: float = 0.45
+    hard_support_expansion_min: float = 2.50
     field_blur_sigma: float = 5.0
     contact_distance_ratio: float = 0.035
     contact_distance_px: int = 42
@@ -242,6 +255,40 @@ def shadow_prior_from_regions(
     )
 
 
+def shadow_alpha_to_display_alpha(
+    shadow_alpha: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    opacity_scale: float = 1.0,
+) -> np.ndarray:
+    """Map linear scalar-darkening strength to black-alpha for sRGB viewers.
+
+    ``estimate_shadow_alpha`` measures known-background darkening in linear RGB:
+    ``C_linear ~= (1 - strength) * B_linear``. A PNG viewer normally composites
+    black RGBA in sRGB space, where using ``strength`` directly as alpha makes
+    the shadow look too dark. This conversion chooses the black alpha that best
+    reproduces the same darkened known background under sRGB alpha compositing.
+
+    Keep this as an export/compositing conversion only. The physical shadow
+    alpha is still the right representation for detection, component filtering,
+    and VLM shadow-candidate evidence.
+    """
+    alpha = np.clip(shadow_alpha.astype(np.float32), 0.0, 1.0)
+    bg_u8 = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    bg_srgb = bg_u8.astype(np.float32) / 255.0
+    weights = bg_srgb * bg_srgb
+    weight_sum = float(weights.sum())
+    if weight_sum <= 1e-6:
+        return alpha
+
+    bg_linear = io.srgb_to_linear(bg_u8)[0, 0].astype(np.float32).reshape(1, 1, 3)
+    shadowed_linear = (1.0 - alpha[..., None]) * bg_linear
+    shadowed_srgb = io.linear_to_srgb(shadowed_linear)
+    channel_alpha = 1.0 - shadowed_srgb / np.maximum(bg_srgb, 1e-6)
+    display_alpha = (channel_alpha * weights).sum(axis=-1) / weight_sum
+    return np.clip(display_alpha * float(opacity_scale), 0.0, 1.0).astype(np.float32)
+
+
 def composite_subject_with_shadow(
     foreground_linear: np.ndarray,
     subject_alpha: np.ndarray,
@@ -354,6 +401,28 @@ def _soft_shadow_alpha_from_seeds(
             float(thresholds.boundary_falloff_px),
         )
 
+    support_values = base_alpha[support & (base_alpha > 0.0)]
+    support_p75 = float(np.percentile(support_values, 75.0)) if support_values.size else 0.0
+    plateau_threshold = max(float(thresholds.hard_boundary_alpha_min), float(thresholds.hard_plateau_alpha_min))
+    plateau_fraction = (
+        float((support_values >= plateau_threshold).mean()) if support_values.size else 0.0
+    )
+    seed_area = int((seed_union & support).sum())
+    support_area = int(support.sum())
+    support_expansion_ratio = float(support_area) / max(float(seed_area), 1.0)
+    seed_values = base_alpha[seed_union & support & (base_alpha > 0.0)]
+    seed_p75 = float(np.percentile(seed_values, 75.0)) if seed_values.size else 0.0
+    seed_eroded = cv2.erode(
+        (seed_union & support).astype(np.uint8),
+        np.ones((3, 3), np.uint8),
+        iterations=1,
+    ).astype(bool)
+    seed_boundary = (seed_union & support) & ~seed_eroded
+    seed_boundary_values = base_alpha[seed_boundary & (base_alpha > 0.0)]
+    seed_boundary_p25 = (
+        float(np.percentile(seed_boundary_values, 25.0)) if seed_boundary_values.size else 0.0
+    )
+
     falloff_px = min(
         float(thresholds.boundary_falloff_px),
         max(3.0, 0.04 * float(min(h, w))),
@@ -373,13 +442,24 @@ def _soft_shadow_alpha_from_seeds(
 
     if open_boundary.any():
         boundary_values = base_alpha[open_boundary & (base_alpha > 0.0)]
-        support_values = base_alpha[support & (base_alpha > 0.0)]
         boundary_p75 = float(np.percentile(boundary_values, 75.0)) if boundary_values.size else 0.0
-        support_p75 = float(np.percentile(support_values, 75.0)) if support_values.size else 0.0
         boundary_ratio = boundary_p75 / max(support_p75, 1e-6)
+        # A very broad low-alpha support can make a hard UI shadow look soft at
+        # the outer edge. If the strict seed itself has a strong high-alpha
+        # platform and the loose support expanded far beyond it, keep the
+        # measured hard boundary instead of applying a wide falloff.
+        plateau_hard_boundary = (
+            support_expansion_ratio >= float(thresholds.hard_support_expansion_min)
+            and seed_p75 >= float(thresholds.hard_seed_alpha_p75_min)
+            and seed_boundary_p25 >= float(thresholds.hard_boundary_alpha_min)
+            and plateau_fraction >= float(thresholds.hard_plateau_fraction_min)
+        )
         hard_boundary = (
-            boundary_p75 >= float(thresholds.hard_boundary_alpha_min)
-            and boundary_ratio >= float(thresholds.hard_boundary_ratio_min)
+            (
+                boundary_p75 >= float(thresholds.hard_boundary_alpha_min)
+                and boundary_ratio >= float(thresholds.hard_boundary_ratio_min)
+            )
+            or plateau_hard_boundary
         )
         if hard_boundary:
             falloff_px = min(falloff_px, float(thresholds.hard_boundary_falloff_px))
@@ -400,12 +480,22 @@ def _soft_shadow_alpha_from_seeds(
 
     alpha = np.where(support, base_alpha * open_falloff, 0.0).astype(np.float32)
 
-    return np.clip(alpha, 0.0, 1.0).astype(np.float32), _boundary_info(
+    boundary_info = _boundary_info(
         boundary_mode,
         boundary_p75,
         boundary_ratio,
         falloff_px,
     )
+    boundary_info.update(
+        {
+            "support_alpha_p75": support_p75,
+            "support_plateau_fraction": plateau_fraction,
+            "support_expansion_ratio": support_expansion_ratio,
+            "seed_alpha_p75": seed_p75,
+            "seed_boundary_alpha_p25": seed_boundary_p25,
+        }
+    )
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32), boundary_info
 
 
 def _boundary_info(
@@ -518,7 +608,9 @@ def _shadow_info(
 __all__ = [
     "ShadowThresholds",
     "ShadowPrior",
+    "DISPLAY_SAFE_SHADOW_OPACITY_SCALE",
     "composite_subject_with_shadow",
     "estimate_shadow_alpha",
+    "shadow_alpha_to_display_alpha",
     "shadow_prior_from_regions",
 ]

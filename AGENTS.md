@@ -81,6 +81,13 @@ tests/                pytest, 22 tests passing
 - Tests must keep passing (`pytest -q`). When adding modules, add a smoke test.
 - The python venv is **`.venv/`** (managed by uv, Python 3.12). All `.venv/bin/ermbg`, `.venv/bin/pytest`, `.venv/bin/python` commands.
 
+### AI / algorithm tuning contract
+
+- Any algorithm-detail adjustment made by an AI agent, especially heuristic thresholds, confidence gates, falloff widths, area ratios, or display/export remapping constants, must include a nearby code comment explaining the intent and the failure mode it protects against.
+- Comments must distinguish broad invariants from empirical values. If a value is experience-driven, say what observable signal it keys on and which class of samples motivated it; do not leave a naked magic number.
+- Do not encode sample IDs, file names, or one-off coordinates as fixes unless explicitly requested. Prefer feature-based rules and document why the rule should generalize.
+- When changing visual/matting behavior, write or update a focused test that captures the intended class of failure, not just the current sample.
+
 ### Test / eval batch convention
 
 - All sample tests, visual regressions, VLM/game eval reruns, probe comparisons, and one-off debugging runs that produce artifacts must write into a **batch directory** under `out/`.
