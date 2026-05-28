@@ -1632,6 +1632,7 @@ def _cached_slice_result(
     *,
     min_area: int,
     padding: int,
+    source_alpha: np.ndarray | None = None,
 ) -> SliceResult:
     key = (image_digest, int(min_area), int(padding))
     with _SLICE_CACHE_LOCK:
@@ -1651,9 +1652,14 @@ def _cached_slice_result(
         small_w = max(1, int(round(w * scale)))
         small_h = max(1, int(round(h * scale)))
         small = cv2.resize(image_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        small_alpha = (
+            cv2.resize(source_alpha.astype(np.float32), (small_w, small_h), interpolation=cv2.INTER_AREA)
+            if source_alpha is not None and source_alpha.shape == image_rgb.shape[:2]
+            else None
+        )
         small_min_area = max(1, int(round(min_area * scale * scale)))
         small_padding = max(1, int(round(padding * scale)))
-        small_result = slice_image(small, min_area=small_min_area, padding=small_padding)
+        small_result = slice_image(small, min_area=small_min_area, padding=small_padding, source_alpha=small_alpha)
         boxes: list[SliceBox] = []
         mask = np.zeros((h, w), dtype=np.float32)
         for box in small_result.boxes:
@@ -1666,7 +1672,7 @@ def _cached_slice_result(
             boxes.append(SliceBox(id=box.id, bbox=(x0, y0, x1 - x0, y1 - y0), area=int(box.area / max(scale * scale, 1e-6))))
         result = SliceResult(background_color=small_result.background_color, foreground_mask=mask, boxes=boxes)
     else:
-        result = slice_image(image_rgb, min_area=min_area, padding=padding)
+        result = slice_image(image_rgb, min_area=min_area, padding=padding, source_alpha=source_alpha)
 
     with _SLICE_CACHE_LOCK:
         _SLICE_CACHE[key] = result
@@ -1830,8 +1836,15 @@ def slice_endpoint(
 ) -> Response:
     image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    source_alpha = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0 if image.mode == "RGBA" else None
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        result = _cached_slice_result(
+            image_rgb,
+            image_digest,
+            min_area=min_area,
+            padding=padding,
+            source_alpha=source_alpha,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slicing failed: {e}") from e
 
@@ -1865,9 +1878,16 @@ def slice_preview_endpoint(
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    source_alpha = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0 if image.mode == "RGBA" else None
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        result = _cached_slice_result(
+            image_rgb,
+            image_digest,
+            min_area=min_area,
+            padding=padding,
+            source_alpha=source_alpha,
+        )
         return _slice_preview_payload(image_rgb, stem, result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice preview failed: {e}") from e
@@ -1881,9 +1901,16 @@ def slice_crops_endpoint(
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    source_alpha = np.asarray(image.getchannel("A"), dtype=np.float32) / 255.0 if image.mode == "RGBA" else None
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        result = _cached_slice_result(
+            image_rgb,
+            image_digest,
+            min_area=min_area,
+            padding=padding,
+            source_alpha=source_alpha,
+        )
         return _slice_crop_payloads(image_rgb, stem, result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice crops failed: {e}") from e

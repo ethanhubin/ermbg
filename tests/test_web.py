@@ -710,6 +710,34 @@ def test_slice_crops_endpoint_returns_list_payload():
     assert Image.open(BytesIO(png)).mode == "RGB"
 
 
+def test_slice_crops_endpoint_uses_png_alpha_not_hidden_rgb():
+    rgb = np.zeros((48, 72, 3), dtype=np.uint8)
+    yy, xx = np.indices(rgb.shape[:2])
+    checker = ((xx // 4 + yy // 4) % 2) == 0
+    rgb[checker] = [226, 226, 226]
+    rgb[~checker] = [245, 245, 245]
+    rgb[8:22, 8:24] = [240, 30, 30]
+    rgb[26:42, 44:64] = [20, 40, 220]
+    alpha = np.zeros(rgb.shape[:2], dtype=np.uint8)
+    alpha[8:22, 8:24] = 255
+    alpha[26:42, 44:64] = 255
+    rgba = np.dstack([rgb, alpha])
+    buf = BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice-crops",
+        files={"file": ("atlas.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "1"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert [crop["bbox"] for crop in payload["crops"]] == [[7, 7, 18, 16], [43, 25, 22, 18]]
+
+
 def test_slice_preview_and_crops_reuse_cached_slice_result(monkeypatch):
     import ermbg.web as web
 
