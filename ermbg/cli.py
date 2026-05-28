@@ -24,6 +24,7 @@ from loguru import logger
 from PIL import Image
 
 from . import io
+from .comfy import DEFAULT_COMFY_URL
 from .diagnose import BackgroundDiagnoser
 from .matting import matte as run_matte
 from .probe.generator import PROBE_COLORS
@@ -152,7 +153,7 @@ def matte(
         "shadow",
         help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
     ),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --vlm-provider comfy-qwen"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --vlm-provider comfy-qwen"),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -413,7 +414,7 @@ def probe(
     out_dir: Path = typer.Option(Path("samples/outputs/probes"), help="Output directory"),
     backend: str = typer.Option("auto", help="Segmenter backend"),
     seed: int = typer.Option(42, help="Random seed"),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL"),
 ):
     """(Legacy) generate one probe image. Not part of the main matting pipeline."""
     image = io.load_rgb(input_path)

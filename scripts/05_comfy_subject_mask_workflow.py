@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ermbg import io
+from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.probe.comfyui_subject_mask import (
     ComfyUISubjectMaskWorkflow,
     render_clipseg_ermbg_workflow,
@@ -31,7 +32,7 @@ def main() -> None:
     p.add_argument("--clipseg-model", default="CIDAS/clipseg-rd64-refined")
     p.add_argument("--matting-model", default="ZhengPeng7/BiRefNet-matting")
     p.add_argument("--bg-color", default="0,200,0")
-    p.add_argument("--comfy-url", default="http://192.168.0.8:8000")
+    p.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     p.add_argument("--submit", action="store_true", help="Upload and queue on ComfyUI")
     p.add_argument(
         "--no-wait",

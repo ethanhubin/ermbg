@@ -19,6 +19,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+from ermbg.comfy import DEFAULT_COMFY_URL
+
 _DEFAULT_WORKFLOW = Path(__file__).parent / "comfyui_clipseg_ermbg.json"
 _DEFAULT_OUTPUT_NAMES = {
     "40": "foreground",
@@ -62,7 +64,7 @@ class ComfyUISubjectMaskWorkflow:
 
     def __init__(
         self,
-        url: str = "http://192.168.0.8:8000",
+        url: str = DEFAULT_COMFY_URL,
         timeout: float = 600.0,
         poll_interval: float = 1.0,
     ) -> None:

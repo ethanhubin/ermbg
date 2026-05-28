@@ -27,6 +27,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ermbg import io
+from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.executor import execute_plans
 from ermbg.matting import matte as run_matte
 from ermbg.segmenter import build_segmenter
@@ -999,7 +1000,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     p.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "out" / "vlm_eval_game_qwen_gw_v001_20260526")
-    p.add_argument("--comfy-url", default="http://192.168.0.8:8000")
+    p.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     p.add_argument("--qwen-model", default="Qwen3-VL-4B-Instruct-FP8")
     p.add_argument("--timeout", type=float, default=900.0)
     p.add_argument("--backend", default="auto")

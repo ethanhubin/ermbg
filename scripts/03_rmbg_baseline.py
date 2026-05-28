@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from loguru import logger
 
 from ermbg import io
+from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.probe.comfyui_rmbg import ComfyUIRembgBaseline
 from ermbg.qa import run_qa
 from ermbg.segmenter import build_segmenter
@@ -29,7 +30,7 @@ def main() -> None:
     p.add_argument("--input", type=Path, required=True, action="append",
                    help="Input image; pass multiple times")
     p.add_argument("--out", type=Path, required=True, help="Output root")
-    p.add_argument("--comfy-url", default="http://192.168.0.8:8000")
+    p.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     args = p.parse_args()
 
     rmbg = ComfyUIRembgBaseline(url=args.comfy_url)
