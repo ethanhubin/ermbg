@@ -206,6 +206,9 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         foreground_linear,
         subject_alpha,
         opaque_subject | soft_subject,
+        image_srgb=image_srgb,
+        subject_hole=hole,
+        soft_subject=soft_subject,
     )
     known_bg_projection_strength[internal_bg_material] = 0.0
     known_bg_projection = known_bg_projection_strength > 1e-4
@@ -231,6 +234,25 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         alpha[solved_soft_background_leak] = 0.0
         foreground_linear[solved_soft_background_leak] = 0.0
         exterior_bg |= solved_soft_background_leak
+    foreground_linear, glass_foreground_info = _stabilize_saturated_glass_soft_foreground(
+        image_srgb,
+        bg,
+        foreground_linear,
+        subject_alpha,
+        soft_subject,
+        opaque_subject,
+        hole,
+    )
+    foreground_linear, subject_alpha, alpha, thin_glass_repair_info = _repair_thin_unstable_glass_foreground_ridges(
+        bg,
+        foreground_linear,
+        subject_alpha,
+        alpha,
+        soft_subject,
+        opaque_subject,
+        hole,
+        shadow,
+    )
     rgba_rgb_linear = foreground_linear.copy()
     rgba_rgb_linear[shadow] = shadow_rgb_linear[shadow]
 
@@ -293,6 +315,8 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
             "opaque_glass_leak_pixels": int(opaque_glass_leak.sum()),
             "glass_internal_shadow_reclassified_pixels": int(glass_internal_shadow.sum()),
             "glass_internal_shadow_reclassification": glass_internal_shadow_info,
+            "glass_soft_foreground_stabilization": glass_foreground_info,
+            "thin_glass_foreground_ridge_repair": thin_glass_repair_info,
             "internal_hole_shadow_pixels": int(internal_hole_shadow.sum()),
             "soft_background_leak_pixels": int(soft_background_leak.sum()),
             "exterior_translucent_soft_pixels": int(exterior_translucent_soft.sum()),
@@ -1019,6 +1043,10 @@ def _known_background_projection_strength(
     foreground_linear: np.ndarray,
     subject_alpha: np.ndarray,
     subject_mask: np.ndarray,
+    *,
+    image_srgb: np.ndarray | None = None,
+    subject_hole: np.ndarray | None = None,
+    soft_subject: np.ndarray | None = None,
 ) -> np.ndarray:
     bg_arr = np.asarray(bg, dtype=np.uint8)
     dominant = int(np.argmax(bg_arr))
@@ -1078,6 +1106,44 @@ def _known_background_projection_strength(
         soft_strength = ndimage.gaussian_filter(soft_strength, sigma=1.0)
         soft_strength[~soft_region] = 0.0
         strength = np.maximum(strength, np.clip(soft_strength, 0.0, 1.0).astype(np.float32))
+    if image_srgb is not None and subject_hole is not None and soft_subject is not None:
+        hole_fraction = float(subject_hole.mean())
+        soft_fraction = float(soft_subject.mean())
+        # Broad saturated-screen glass contains large same-background basins
+        # plus soft refractive rims. Residual green patches there are known-B
+        # transmission, not subject hue. Use source-space background-family
+        # evidence to extend projection into those rims; the broad-basin guard
+        # prevents ordinary green subject material or thin antialiasing from
+        # being globally de-greened.
+        if hole_fraction > 0.08 and soft_fraction > 0.04:
+            pixels = image_srgb.astype(np.float32)
+            source_margin = pixels[..., dominant] - np.maximum(
+                pixels[..., other_channels[0]],
+                pixels[..., other_channels[1]],
+            )
+            bg_norm = bg_arr.astype(np.float32) / max(float(bg_arr[dominant]), 1.0)
+            pixel_norm = pixels / np.maximum(pixels[..., dominant : dominant + 1], 1.0)
+            norm_delta = np.maximum(
+                np.abs(pixel_norm[..., other_channels[0]] - bg_norm[other_channels[0]]),
+                np.abs(pixel_norm[..., other_channels[1]] - bg_norm[other_channels[1]]),
+            )
+            hole_density = ndimage.uniform_filter(subject_hole.astype(np.float32), size=31)
+            soft_density = ndimage.uniform_filter(soft_subject.astype(np.float32), size=21)
+            glass_context = (hole_density >= 0.08) | (soft_density >= 0.18)
+            source_bg_family = (source_margin >= 8.0) & (norm_delta <= 0.90)
+            solved_bg_family = dominant_margin >= 8
+            glass_seed = soft_region & glass_context & (source_bg_family | solved_bg_family)
+            if glass_seed.any():
+                dist_to_seed = ndimage.distance_transform_edt(~glass_seed)
+                diffusion = np.exp(-((dist_to_seed / 9.0) ** 2)).astype(np.float32)
+                source_evidence = np.clip((source_margin - 2.0) / (28.0 - 2.0), 0.0, 1.0)
+                source_evidence *= np.clip((0.95 - norm_delta) / (0.95 - 0.45), 0.15, 1.0)
+                solved_evidence = np.clip((dominant_margin.astype(np.float32) - 4.0) / (24.0 - 4.0), 0.0, 1.0)
+                glass_strength = diffusion * np.maximum(source_evidence, solved_evidence)
+                glass_strength[glass_seed] = np.maximum(glass_strength[glass_seed], 0.55)
+                glass_strength = ndimage.gaussian_filter(glass_strength, sigma=1.2)
+                glass_strength[~(soft_region & glass_context)] = 0.0
+                strength = np.maximum(strength, np.clip(glass_strength, 0.0, 0.92).astype(np.float32))
     return strength
 
 
@@ -1153,6 +1219,255 @@ def _project_known_background_foreground(
     projected = np.clip(values - subtract_scale[:, None] * bg.reshape(1, 3), 0.0, 1.0)
     repaired[projection_mask] = projected
     return repaired
+
+
+def _stabilize_saturated_glass_soft_foreground(
+    image_srgb: np.ndarray,
+    bg: tuple[int, int, int],
+    foreground_linear: np.ndarray,
+    subject_alpha: np.ndarray,
+    soft_subject: np.ndarray,
+    opaque_subject: np.ndarray,
+    subject_hole: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Extend stable glass color over underconstrained soft foreground RGB.
+
+    In a broad saturated-screen glass basin, soft pixels that are still
+    source-background-family can have a valid alpha but an unstable straight
+    foreground solve: the division by small/medium alpha amplifies tiny known-B
+    residuals into dark lines or green flecks. Alpha remains the transparency
+    signal; only RGB is borrowed from nearby stable subject/glass material.
+    """
+    bg_arr = np.asarray(bg, dtype=np.uint8)
+    dominant = int(np.argmax(bg_arr))
+    other_channels = [idx for idx in range(3) if idx != dominant]
+    if int(bg_arr[dominant]) - int(max(bg_arr[other_channels])) < 40:
+        return foreground_linear, {
+            "method": "saturated_glass_soft_foreground_stabilization",
+            "applied": False,
+            "reason": "background is not saturated",
+        }
+
+    hole_fraction = float(subject_hole.mean())
+    soft_fraction = float(soft_subject.mean())
+    if hole_fraction <= 0.08 or soft_fraction <= 0.04:
+        return foreground_linear, {
+            "method": "saturated_glass_soft_foreground_stabilization",
+            "applied": False,
+            "reason": "no broad glass basin",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    pixels = image_srgb.astype(np.float32)
+    source_margin = pixels[..., dominant] - np.maximum(
+        pixels[..., other_channels[0]],
+        pixels[..., other_channels[1]],
+    )
+    bg_norm = bg_arr.astype(np.float32) / max(float(bg_arr[dominant]), 1.0)
+    pixel_norm = pixels / np.maximum(pixels[..., dominant : dominant + 1], 1.0)
+    norm_delta = np.maximum(
+        np.abs(pixel_norm[..., other_channels[0]] - bg_norm[other_channels[0]]),
+        np.abs(pixel_norm[..., other_channels[1]] - bg_norm[other_channels[1]]),
+    )
+    source_bg_family = (source_margin >= 6.0) & (norm_delta <= 0.95)
+
+    fg_srgb = io.linear_to_srgb_u8(foreground_linear)
+    fg = fg_srgb.astype(np.float32)
+    fg_mean = fg.mean(axis=-1)
+    fg_chroma = fg.max(axis=-1) - fg.min(axis=-1)
+    fg_green_margin = fg[..., dominant] - np.maximum(fg[..., other_channels[0]], fg[..., other_channels[1]])
+
+    hole_density = ndimage.uniform_filter(subject_hole.astype(np.float32), size=31)
+    soft_density = ndimage.uniform_filter(soft_subject.astype(np.float32), size=21)
+    glass_context = hole_density >= 0.08
+    mid_soft = (subject_alpha >= 0.12) & (subject_alpha <= 0.86)
+    unstable_dark = (fg_mean < 112.0) & (fg_chroma < 170.0)
+    unstable_green = fg_green_margin > 10.0
+    invalid = soft_subject & glass_context & mid_soft & source_bg_family & (unstable_dark | unstable_green)
+    if not invalid.any():
+        return foreground_linear, {
+            "method": "saturated_glass_soft_foreground_stabilization",
+            "applied": False,
+            "reason": "no unstable soft foreground pixels",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    stable_soft = (
+        soft_subject
+        & glass_context
+        & ~invalid
+        & (subject_alpha >= 0.18)
+        & (fg_mean >= 112.0)
+        & (fg_green_margin <= 10.0)
+    )
+    stable_opaque = opaque_subject & (fg_mean >= 90.0) & (fg_green_margin <= 16.0)
+    seeds = stable_soft | stable_opaque
+    if not seeds.any():
+        return foreground_linear, {
+            "method": "saturated_glass_soft_foreground_stabilization",
+            "applied": False,
+            "reason": "no stable foreground color seeds",
+            "invalid_pixels": int(invalid.sum()),
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    _, nearest = ndimage.distance_transform_edt(~seeds, return_indices=True)
+    repaired = foreground_linear.copy()
+    repaired[invalid] = foreground_linear[nearest[0][invalid], nearest[1][invalid]]
+    return repaired, {
+        "method": "saturated_glass_soft_foreground_stabilization",
+        "applied": True,
+        "invalid_pixels": int(invalid.sum()),
+        "seed_pixels": int(seeds.sum()),
+        "hole_fraction": hole_fraction,
+        "soft_fraction": soft_fraction,
+        "mean_invalid_alpha": float(subject_alpha[invalid].mean()),
+        "mean_invalid_fg_green_margin_before": float(fg_green_margin[invalid].mean()),
+        "mean_invalid_fg_luma_before": float(fg_mean[invalid].mean()),
+    }
+
+
+def _repair_thin_unstable_glass_foreground_ridges(
+    bg: tuple[int, int, int],
+    foreground_linear: np.ndarray,
+    subject_alpha: np.ndarray,
+    alpha: np.ndarray,
+    soft_subject: np.ndarray,
+    opaque_subject: np.ndarray,
+    subject_hole: np.ndarray,
+    shadow_layer: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Repair thin dark foreground-solve ridges in broad glass basins."""
+    bg_arr = np.asarray(bg, dtype=np.uint8)
+    dominant = int(np.argmax(bg_arr))
+    other_channels = [idx for idx in range(3) if idx != dominant]
+    if int(bg_arr[dominant]) - int(max(bg_arr[other_channels])) < 40:
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "thin_unstable_glass_foreground_ridge_repair",
+            "applied": False,
+            "reason": "background is not saturated",
+        }
+
+    hole_fraction = float(subject_hole.mean())
+    soft_fraction = float(soft_subject.mean())
+    if hole_fraction <= 0.08 or soft_fraction <= 0.04:
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "thin_unstable_glass_foreground_ridge_repair",
+            "applied": False,
+            "reason": "no broad glass basin",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    fg = io.linear_to_srgb_u8(foreground_linear).astype(np.float32)
+    fg_mean = fg.mean(axis=-1)
+    subject_region = soft_subject | opaque_subject
+    # Experience-driven luma/alpha gates: the failure is a visibly dark
+    # straight-F solve ridge on transparent glass, not a saturated/cyan glass
+    # highlight or a barely visible alpha fringe.
+    dark_subject = subject_region & (subject_alpha >= 0.22) & (fg_mean < 92.0)
+    labels, n = ndimage.label(dark_subject)
+    cap_mask = np.zeros_like(dark_subject, dtype=bool)
+    high_alpha_black_mask = np.zeros_like(dark_subject, dtype=bool)
+    components: list[dict[str, Any]] = []
+    for label_id in range(1, n + 1):
+        comp = labels == label_id
+        area = int(comp.sum())
+        if area < 3:
+            continue
+        ys, xs = np.nonzero(comp)
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        # In broad saturated glass, one- or few-pixel dark ridges can be
+        # promoted to soft/opaque subject by local evidence even though they
+        # are unstable foreground-solve residue. The 14px empirical thinness
+        # allowance covers high-resolution rasterized glass ridges; the area
+        # cap keeps broad contact shadows and large glass gradients untouched.
+        if min(width, height) > 14 or area > 3000:
+            continue
+        cap_mask |= comp
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+            }
+        )
+
+    high_alpha_black = subject_region & ~shadow_layer & (subject_alpha >= 0.60) & (fg_mean < 45.0)
+    labels, n = ndimage.label(high_alpha_black)
+    for label_id in range(1, n + 1):
+        comp = labels == label_id
+        area = int(comp.sum())
+        if area < 2:
+            continue
+        ys, xs = np.nonzero(comp)
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        # The bottom-left failure is a short near-black opaque arc embedded in
+        # a glass rim. Treat only small/local high-alpha black strokes here;
+        # broad shadows remain excluded by size and by the shadow mask.
+        if area > 600 or max(width, height) > 96 or min(width, height) > 32:
+            continue
+        high_alpha_black_mask |= comp
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+                "kind": "high_alpha_black_ridge",
+            }
+        )
+    cap_mask |= high_alpha_black_mask
+
+    if not cap_mask.any():
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "thin_unstable_glass_foreground_ridge_repair",
+            "applied": False,
+            "reason": "no thin unstable soft components",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    # A lower alpha alone still leaves visible dark strokes when straight-F is
+    # near black. Borrow RGB from nearby stable glass/material pixels, while
+    # keeping the repaired pixels' alpha soft. This targets foreground-solve
+    # residue; broad shadow components are excluded by the thinness/area gate.
+    fg_chroma = fg.max(axis=-1) - fg.min(axis=-1)
+    stable_color_seed = (
+        subject_region
+        & ~cap_mask
+        & (subject_alpha >= 0.18)
+        & (fg_mean >= 100.0)
+        & (fg_chroma >= 25.0)
+    )
+    repaired_foreground = foreground_linear.copy()
+    seed_pixels = int(stable_color_seed.sum())
+    if seed_pixels > 0:
+        _, nearest = ndimage.distance_transform_edt(~stable_color_seed, return_indices=True)
+        repaired_foreground[cap_mask] = foreground_linear[nearest[0][cap_mask], nearest[1][cap_mask]]
+
+    capped_subject_alpha = subject_alpha.copy()
+    capped_alpha = alpha.copy()
+    cap_value = 0.30
+    capped_subject_alpha[cap_mask] = np.minimum(capped_subject_alpha[cap_mask], cap_value)
+    capped_alpha[cap_mask] = np.minimum(capped_alpha[cap_mask], cap_value)
+    return repaired_foreground, capped_subject_alpha, capped_alpha, {
+        "method": "thin_unstable_glass_foreground_ridge_repair",
+        "applied": True,
+        "pixels": int(cap_mask.sum()),
+        "high_alpha_black_pixels": int(high_alpha_black_mask.sum()),
+        "rgb_repaired": seed_pixels > 0,
+        "stable_color_seed_pixels": seed_pixels,
+        "components": components,
+        "cap_value": cap_value,
+        "mean_alpha_before": float(subject_alpha[cap_mask].mean()),
+        "mean_alpha_after": float(capped_subject_alpha[cap_mask].mean()),
+        "mean_fg_luma_before": float(fg_mean[cap_mask].mean()),
+        "hole_fraction": hole_fraction,
+        "soft_fraction": soft_fraction,
+    }
 
 
 def _foreground_from_known_bg(C_lin: np.ndarray, B_lin: np.ndarray, alpha: np.ndarray) -> np.ndarray:

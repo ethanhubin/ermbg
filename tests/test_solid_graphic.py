@@ -360,7 +360,23 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
 
     assert result.accepted is True
     assert result.debug["glass_internal_shadow_reclassified_pixels"] > 5000
+    assert result.debug["glass_soft_foreground_stabilization"]["applied"] is True
+    thin_ridge_repair = result.debug["thin_glass_foreground_ridge_repair"]
+    assert thin_ridge_repair["applied"] is True
+    assert thin_ridge_repair["rgb_repaired"] is True
+    assert thin_ridge_repair["high_alpha_black_pixels"] > 50
+    assert 1000 < thin_ridge_repair["pixels"] < 8000
     assert result.ownership_masks["shadow_layer"][382:754, 1026:1081].mean() < 0.05
+    assert np.percentile(result.alpha[430:790, 152:168], 90) <= 0.75
+    corner = np.s_[820:940, 135:570]
+    fg_luma = rgba_rgb.astype(np.float32).mean(axis=-1)
+    remaining_corner_black_arc = (
+        (result.alpha > 0.60)
+        & (fg_luma < 45.0)
+        & (result.ownership_masks["soft_subject_layer"] | result.ownership_masks["opaque_subject"])
+        & ~result.ownership_masks["shadow_layer"]
+    )
+    assert int(remaining_corner_black_arc[corner].sum()) < 20
     assert int(false_hue.sum()) < 400
 
 
