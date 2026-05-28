@@ -162,10 +162,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     elapsed = time.perf_counter() - start
 
+    stem = input_path.stem
     for src_name, dst_name in [
-        ("input_rgba.png", "rgba.png"),
-        ("input_alpha.png", "alpha.png"),
-        ("input_foreground.png", "foreground.png"),
+        (f"{stem}_rgba.png", "rgba.png"),
+        (f"{stem}_alpha.png", "alpha.png"),
+        (f"{stem}_foreground.png", "foreground.png"),
     ]:
         src = case_dir / src_name
         if src.exists():

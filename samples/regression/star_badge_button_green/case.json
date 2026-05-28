@@ -1,0 +1,17 @@
+{
+  "id": "star_badge_button_green",
+  "category": "real_ui_button",
+  "input": "samples/regression/star_badge_button_green/input.png",
+  "image_size": {
+    "width": 226,
+    "height": 96
+  },
+  "background": [2, 179, 10],
+  "failure_mode": "A wide game/UI button on a stable saturated green background, with glossy yellow material and a star badge touching the left edge. The subject occupies much of the image border, so routing and the solid-graphic prepass must rely on stable corner background evidence rather than whole-edge purity.",
+  "expected": {
+    "router_bg_type": "saturated",
+    "keyer_mode": "chromatic",
+    "matte_strategy": "solid_bg_graphic",
+    "must_not_route_as": ["noisy"]
+  }
+}

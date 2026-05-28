@@ -354,6 +354,79 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
     assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/alpha_abs_diff.png" in response.text
 
 
+def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_panel"
+    sample_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(sample_root / "white.png")
+    (tmp_path / "samples" / "vlm_eval_game" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "sample_id": "G05",
+                        "id": "ui_panel",
+                        "category": "ui",
+                        "green": "samples/vlm_eval_game/ui_panel/green.png",
+                        "white": "samples/vlm_eval_game/ui_panel/white.png",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_root = tmp_path / "out" / "comfy_full_test_20260529"
+    case_root = run_root / "G05_green_remote"
+    case_root.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(case_root / "rgba.png")
+    Image.new("RGB", (8, 8), (200, 200, 200)).save(case_root / "contact_sheet.png")
+    (run_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "case": "G05_green",
+                        "phase": "remote",
+                        "backend": "comfy-ermbg",
+                        "input": str(sample_root / "green.png"),
+                        "elapsed_sec_client": 6.2,
+                        "outputs": {
+                            "rgba": "out/comfy_full_test_20260529/G05_green_remote/rgba.png",
+                            "contact_sheet": "out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png",
+                        },
+                        "remote_debug": {"timings": {"total_sec": 5.1}},
+                        "quality_metrics": {"alpha_mean": 0.42, "alpha_nonzero_pixels": 64},
+                        "case_metadata": {
+                            "sample_id": "G05",
+                            "id": "ui_panel",
+                            "category": "ui",
+                            "primary_ambiguity": "remote production smoke",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", run_root)
+
+    client = TestClient(app)
+    response = client.get("/eval/game?run=comfy_full_test_20260529")
+
+    assert response.status_code == 200
+    assert "comfy_full_test_20260529" in response.text
+    assert "comfy-ermbg remote" in response.text
+    assert "comfy-ermbg" in response.text
+    assert "contact sheet" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/rgba.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png" in response.text
+
+
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(

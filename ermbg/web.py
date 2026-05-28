@@ -44,7 +44,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
 SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
-GAME_EVAL_RUN_PREFIXES = (LOCAL_OWNERSHIP_EVAL_PREFIX, SOLID_GRAPHIC_EVAL_PREFIX)
+COMFY_ERMBG_EVAL_PREFIX = "comfy_"
+GAME_EVAL_RUN_PREFIXES = (LOCAL_OWNERSHIP_EVAL_PREFIX, SOLID_GRAPHIC_EVAL_PREFIX, COMFY_ERMBG_EVAL_PREFIX)
 FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
@@ -2073,12 +2074,32 @@ def _solid_graphic_summary_path(root: Path) -> Path | None:
     return None
 
 
+def _comfy_ermbg_summary_path(root: Path) -> Path | None:
+    path = root / "summary.json"
+    if not path.is_file():
+        return None
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        return None
+    if root.name.startswith(COMFY_ERMBG_EVAL_PREFIX):
+        return path
+    for item in runs:
+        if isinstance(item, dict) and item.get("backend") == "comfy-ermbg":
+            return path
+    return None
+
+
 def _game_eval_root_has_data(root: Path) -> bool:
     if _game_report_path(root) is not None:
         return True
     if _game_eval_partial_summary_paths(root):
         return True
     if _solid_graphic_summary_path(root) is not None:
+        return True
+    if _comfy_ermbg_summary_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -2088,7 +2109,14 @@ def _game_eval_root_is_complete(root: Path) -> bool:
     if report_path is None:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is None:
-            return False
+            comfy_path = _comfy_ermbg_summary_path(root)
+            if comfy_path is None:
+                return False
+            report = _load_json(comfy_path)
+            if not isinstance(report, dict):
+                return False
+            runs = report.get("runs")
+            return isinstance(runs, list) and len(runs) >= _game_eval_expected_case_count()
         report = _load_json(solid_path)
         if not isinstance(report, dict):
             return False
@@ -2194,6 +2222,11 @@ def _game_eval_batch_progress(
             completed = len(rows)
             ok = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "ok")
             errors = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "error")
+        runs = report.get("runs") if isinstance(report, dict) else None
+        if isinstance(runs, list):
+            completed = len(runs)
+            errors = sum(1 for row in runs if isinstance(row, dict) and row.get("status") == "error")
+            ok = completed - errors
         if isinstance(report, dict):
             try:
                 report_total = int(report.get("case_count", 0))
@@ -2778,6 +2811,138 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
     }
 
 
+def _case_id_from_comfy_run(item: dict[str, object], index: int) -> tuple[str, str, str]:
+    metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
+    input_path = item.get("input")
+    variant = _sample_variant_from_path(input_path) or "green"
+    sample_id = str(metadata.get("sample_id") or "")
+    case_id = str(metadata.get("id") or "")
+    case_label = str(item.get("case") or "")
+    if not sample_id and case_label:
+        parts = case_label.split("_")
+        if parts and re.fullmatch(r"G\d{2}", parts[0]):
+            sample_id = parts[0]
+    if not case_id and isinstance(input_path, str):
+        try:
+            case_id = Path(input_path).parent.name
+        except Exception:
+            case_id = ""
+    if not sample_id:
+        sample_id = f"G{index:02d}"
+    if not case_id:
+        case_id = case_label or f"case_{index:02d}"
+    return sample_id, case_id, variant
+
+
+def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> dict[str, object]:
+    payload = _load_json(summary_path)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Comfy ERMBG summary must be a JSON object.")
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        raise HTTPException(status_code=500, detail="Comfy ERMBG summary is missing runs.")
+
+    cases: list[dict[str, object]] = []
+    ok_count = 0
+    for index, item in enumerate((run for run in runs if isinstance(run, dict)), start=1):
+        status = str(item.get("status", "ok"))
+        is_ok = status != "error"
+        ok_count += 1 if is_ok else 0
+        sample_id, case_id, variant = _case_id_from_comfy_run(item, index)
+        metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
+        outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else {}
+        metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
+        remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
+        timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}
+        strategy = "comfy-ermbg"
+        elapsed = item.get("elapsed_sec_client")
+        alpha_mean = metrics.get("alpha_mean")
+        alpha_pixels = metrics.get("alpha_nonzero_pixels")
+        reason_parts = []
+        if isinstance(elapsed, (int, float)):
+            reason_parts.append(f"{float(elapsed):.1f}s client")
+        if isinstance(timings.get("total_sec"), (int, float)):
+            reason_parts.append(f"{float(timings['total_sec']):.1f}s server")
+        if isinstance(alpha_mean, (int, float)):
+            reason_parts.append(f"alpha_mean={float(alpha_mean):.3f}")
+        if isinstance(alpha_pixels, int):
+            reason_parts.append(f"alpha_px={alpha_pixels}")
+        candidate_url = _image_url(outputs.get("rgba"))
+        candidates = []
+        if is_ok and candidate_url:
+            candidates.append(
+                {
+                    "id": "comfy_ermbg",
+                    "label": "comfy-ermbg",
+                    "selected": True,
+                    "tools": [strategy],
+                    "reason": ", ".join(reason_parts),
+                    "url": candidate_url,
+                }
+            )
+        contact_url = _image_url(outputs.get("contact_sheet"))
+        if is_ok and contact_url:
+            candidates.append(
+                {
+                    "id": "contact_sheet",
+                    "label": "contact sheet",
+                    "selected": False,
+                    "tools": ["qa"],
+                    "reason": "input / foreground / alpha / composites",
+                    "url": contact_url,
+                }
+            )
+
+        sample_paths = _game_sample_paths(case_id)
+        sample_path = sample_paths.get(variant) or str(item.get("input", ""))
+        cases.append(
+            {
+                "caseId": case_id,
+                "sampleId": sample_id,
+                "sampleCode": f"{sample_id}-{variant[:1].upper()}",
+                "sampleVariant": variant,
+                "runStatus": "ran" if is_ok else "error",
+                "category": metadata.get("category", "comfy-ermbg"),
+                "verdict": strategy if is_ok else status,
+                "expectedHit": is_ok,
+                "expectedAnyHit": is_ok,
+                "harmfulToolSelected": False,
+                "harmfulTools": [],
+                "shadowPolicyRequired": False,
+                "shadowPolicyHit": None,
+                "shadowCandidateCount": 0,
+                "regionCount": int(alpha_pixels) if isinstance(alpha_pixels, int) else 0,
+                "counts": {"alpha_nonzero_pixels": alpha_pixels, "alpha_mean": alpha_mean},
+                "selectedTools": [strategy] if is_ok else [],
+                "primaryAmbiguity": metadata.get("primary_ambiguity", ""),
+                "originalUrl": _image_url(sample_path),
+                "regionsUrl": None,
+                "matteUrl": candidate_url if is_ok else None,
+                "candidates": candidates,
+            }
+        )
+
+    progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
+    return {
+        "runId": root.name,
+        "model": "comfy-ermbg remote",
+        "success": f"{ok_count}/{len(runs)}",
+        "expectedHit": f"{ok_count}/{len(runs)}",
+        "expectedAnyHit": f"{ok_count}/{len(runs)}",
+        "harmfulTools": f"0/{len(runs)}",
+        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str(root.relative_to(PROJECT_ROOT)),
+        "vlmRoot": str((PROJECT_ROOT / "samples" / "vlm_eval_game").relative_to(PROJECT_ROOT)),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "progress": progress,
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
 def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
     report_path = _game_report_path(root)
     if report_path is None:
@@ -2786,6 +2951,9 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is not None:
             return _game_eval_data_from_solid_graphic_summary(root, solid_path)
+        comfy_path = _comfy_ermbg_summary_path(root)
+        if comfy_path is not None:
+            return _game_eval_data_from_comfy_ermbg_summary(root, comfy_path)
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name

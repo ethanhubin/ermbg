@@ -611,6 +611,61 @@
         "green_background_tolerance": "pixel_exact_from_truth"
       },
       "green_note": "Synthetic stress case with truth_rgba; designed to expose global-threshold failures on translucent local color manifolds."
+    },
+    {
+      "sample_id": "G11",
+      "id": "ui_star_badge_button",
+      "category": "ui",
+      "white": "samples/vlm_eval_game/ui_star_badge_button/white.png",
+      "green": "samples/vlm_eval_game/ui_star_badge_button/green.png",
+      "green_status": "real_user_green_bg_with_synthetic_white_companion",
+      "backgrounds": {
+        "white": [
+          255,
+          255,
+          255
+        ],
+        "green": [
+          2,
+          179,
+          10
+        ]
+      },
+      "primary_ambiguity": "wide_ui_button+stable_green_corners+subject_touches_edge",
+      "shadow": {
+        "present": false,
+        "kind": "none",
+        "semantic": "none"
+      },
+      "image_size": {
+        "white": {
+          "width": 226,
+          "height": 96
+        },
+        "green": {
+          "width": 226,
+          "height": 96
+        }
+      },
+      "expected": {
+        "target_tools": [
+          [
+            "snap_hard_edge"
+          ],
+          [
+            "preserve_glossy_ui_material"
+          ]
+        ],
+        "target_policy": [],
+        "must_preserve_subject_identity_between_white_and_green": true
+      },
+      "generation": {
+        "green_method": "user_provided_file",
+        "green_source_image": "/Users/ethanhu/Downloads/11.png",
+        "white_method": "known_background_replacement_from_green_reference",
+        "white_prompt_goal": "No generative edit; replace only stable green-screen background pixels with white for paired game-eval compatibility."
+      },
+      "green_note": "Real user-provided green-screen UI button. Background measured from stable corners around RGB [2, 179, 10]."
     }
   ],
   "green_background_tolerance": "non_pixel_exact_allowed",

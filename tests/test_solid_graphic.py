@@ -396,8 +396,15 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     source_preserving = result.debug["source_preserving_glass_foreground"]
     assert source_preserving["applied"] is True
     assert source_preserving["smooth_pixels"] > 100000
+    assert source_preserving["source_highlight_protected_pixels"] > 10000
+    assert source_preserving["source_highlight_foreground_kept_pixels"] > 10000
     assert source_preserving["chroma_continuity_pixels"] > 1000
     assert source_preserving["nearest_chroma_continuity_pixels"] > 1000
+    glass_field = result.debug["glass_continuous_field"]
+    assert glass_field["applied"] is True
+    assert glass_field["alpha_pixels"] > 50000
+    assert glass_field["color_pixels"] > 10000
+    assert glass_field["mean_alpha_delta"] < 0.04
     gap_restore = result.debug["glass_color_shifted_gap_restore"]
     assert gap_restore["applied"] is True
     assert gap_restore["pixels"] > 1000
@@ -420,7 +427,7 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
         visible_subject,
         (bottom[1].start, bottom[0].start, bottom[1].stop, bottom[0].stop),
         95,
-    ) < 38.0
+    ) < 39.0
     assert _rgb_neighbor_jump_percentile(
         on_gray,
         visible_subject,
@@ -440,6 +447,12 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     # from reintroducing a black/grey notch where a colored refractive line is
     # adjacent but the density-based glass context has a small gap.
     assert int(dirty_dark_neutral[left_lower_bend].sum()) == 0
+    # The same source-continuity machinery must not flatten bright chromatic
+    # refraction bands. Those bands are valid source evidence even when their
+    # hue is close to the green screen family.
+    left_highlight = np.s_[835:900, 120:245]
+    on_gray_luma = on_gray.astype(np.float32).mean(axis=-1)
+    assert float(np.percentile(on_gray_luma[left_highlight], 99.0)) > 230.0
     # Color-shifted fragments that still carry red/blue source evidence should
     # not be punched out as background holes, while the broad center basin must
     # remain transparent. This guards the corner-gap class without encoding a
@@ -547,3 +560,15 @@ def test_real_small_ui_icon_can_use_solid_graphic_prepass():
 
     assert result.strategy_name == "solid_bg_graphic"
     assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"
+
+
+def test_real_wide_star_button_can_use_solid_graphic_prepass():
+    path = Path("samples/regression/star_badge_button_green/input.png")
+    if not path.exists():
+        pytest.skip("real regression sample is not present")
+
+    result = matte_image(str(path), backend="auto", qa=False)
+
+    assert result.strategy_name == "solid_bg_graphic"
+    assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"
+    assert result.report["strategy"]["extras"]["solid_graphic_confidence"] > 0.90

@@ -190,6 +190,16 @@ def test_small_ui_icon_with_clean_green_corners_is_not_noisy():
     assert s.extras["bg_sigma"] < 2.0
 
 
+def test_wide_star_button_with_clean_green_corners_is_not_noisy():
+    """Wide UI buttons can dominate the border while still having stable bg corners."""
+    path = Path(__file__).resolve().parents[1] / "samples" / "regression" / "star_badge_button_green" / "input.png"
+    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    s = classify_strategy(img)
+    assert s.bg_type == "saturated"
+    assert s.keyer_mode == "chromatic"
+    assert s.extras["bg_sigma"] < 2.0
+
+
 def test_strategy_thresholds_tighter_for_graphic():
     """Graphic strategies should get tight keyer thresholds."""
     img = _solid_with_subject((0, 200, 0))   # flat → graphic

@@ -281,6 +281,17 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         hole,
         shadow,
     )
+    foreground_linear, subject_alpha, alpha, glass_continuous_field_info = _solve_saturated_glass_continuous_field(
+        image_srgb,
+        bg,
+        foreground_linear,
+        subject_alpha,
+        alpha,
+        soft_subject,
+        opaque_subject,
+        hole,
+        shadow,
+    )
     foreground_linear, source_preserving_glass_info = _source_preserving_saturated_glass_foreground(
         image_srgb,
         bg,
@@ -356,6 +367,7 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
             "glass_color_shifted_gap_restore": glass_color_gap_info,
             "glass_soft_foreground_stabilization": glass_foreground_info,
             "thin_glass_foreground_ridge_repair": thin_glass_repair_info,
+            "glass_continuous_field": glass_continuous_field_info,
             "source_preserving_glass_foreground": source_preserving_glass_info,
             "internal_hole_shadow_pixels": int(internal_hole_shadow.sum()),
             "exterior_shadow_feather": shadow_feather_info,
@@ -1797,6 +1809,185 @@ def _repair_thin_unstable_glass_foreground_ridges(
     }
 
 
+def _solve_saturated_glass_continuous_field(
+    image_srgb: np.ndarray,
+    bg: tuple[int, int, int],
+    foreground_linear: np.ndarray,
+    subject_alpha: np.ndarray,
+    alpha: np.ndarray,
+    soft_subject: np.ndarray,
+    opaque_subject: np.ndarray,
+    subject_hole: np.ndarray,
+    shadow_layer: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Recover broad green-screen glass as continuous alpha/premul fields.
+
+    Glass is not a one-dimensional solve like shadow: both opacity and
+    foreground color are unknown. Once topology has proved a broad glass basin,
+    however, the source still gives a continuous premultiplied signal
+    ``P = C - (1 - alpha)B``. Treat alpha and P as noisy fields in that basin,
+    with holes/exterior acting as zero-alpha boundary constraints. This avoids
+    making every local defect a separate mask repair.
+    """
+    bg_arr = np.asarray(bg, dtype=np.uint8)
+    dominant = int(np.argmax(bg_arr))
+    other_channels = [idx for idx in range(3) if idx != dominant]
+    if int(bg_arr[dominant]) - int(max(bg_arr[other_channels])) < 40:
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "saturated_glass_continuous_field",
+            "applied": False,
+            "reason": "background is not saturated",
+        }
+
+    hole_fraction = float(subject_hole.mean())
+    soft_fraction = float(soft_subject.mean())
+    if hole_fraction <= 0.08 or soft_fraction <= 0.04:
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "saturated_glass_continuous_field",
+            "applied": False,
+            "reason": "no broad glass basin",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    subject_region = soft_subject | opaque_subject
+    hole_density = ndimage.uniform_filter(subject_hole.astype(np.float32), size=31)
+    soft_density = ndimage.uniform_filter(soft_subject.astype(np.float32), size=21)
+    glass_context = (hole_density >= 0.08) | (soft_density >= 0.16)
+    domain = subject_region & glass_context & ~shadow_layer & (alpha > 1e-3)
+    if not domain.any():
+        return foreground_linear, subject_alpha, alpha, {
+            "method": "saturated_glass_continuous_field",
+            "applied": False,
+            "reason": "no glass field domain",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
+    B_lin = io.srgb_to_linear(bg_arr.reshape(1, 1, 3))[0, 0].astype(np.float32)
+    pixels = image_srgb.astype(np.float32)
+    source_luma = pixels.mean(axis=-1)
+    source_chroma = pixels.max(axis=-1) - pixels.min(axis=-1)
+
+    # Alpha confidence is semantic, not a target opacity. High-alpha specular
+    # highlights are preserved by reducing blend, while soft glass ramps are
+    # regularized against nearby hole boundaries so they can fade continuously.
+    domain_f = domain.astype(np.float32)
+    boundary = ndimage.binary_dilation(domain, iterations=7) & ~domain & subject_hole
+    boundary_weight = boundary.astype(np.float32) * 0.55
+    alpha_conf = domain_f * np.clip(alpha / 0.48, 0.22, 1.0)
+    sigma_alpha = 2.4
+    alpha_num = ndimage.gaussian_filter(alpha * alpha_conf, sigma=sigma_alpha)
+    alpha_den = ndimage.gaussian_filter(alpha_conf + boundary_weight, sigma=sigma_alpha)
+    alpha_field = alpha_num / np.maximum(alpha_den, 1e-6)
+    alpha_field = np.clip(alpha_field, 0.0, 1.0).astype(np.float32)
+
+    # Bright chromatic ridges are glass evidence, not dirty color defects. The
+    # broad-field solve may smooth low-contrast gaps, but it must not average
+    # away saturated cyan/white refraction lines that already exist in source.
+    alpha_highlight_protect = (
+        ((source_luma >= 224.0) & (source_chroma <= 70.0))
+        | ((source_luma >= 190.0) & (source_chroma >= 45.0))
+        | (alpha >= 0.92)
+    )
+    alpha_blend = 0.34 * np.clip((0.88 - alpha) / 0.88, 0.0, 1.0)
+    alpha_blend[alpha_highlight_protect] *= 0.20
+    alpha_write = domain & (alpha_blend > 1e-4)
+
+    alpha_out = alpha.copy()
+    subject_alpha_out = subject_alpha.copy()
+    alpha_out[alpha_write] = (
+        alpha[alpha_write] * (1.0 - alpha_blend[alpha_write])
+        + alpha_field[alpha_write] * alpha_blend[alpha_write]
+    )
+    subject_alpha_out[alpha_write] = alpha_out[alpha_write]
+
+    source_premultiplied = C_lin - (1.0 - alpha_out[..., None]) * B_lin.reshape(1, 1, 3)
+    source_premultiplied = np.clip(source_premultiplied, 0.0, np.maximum(alpha_out[..., None], 1e-6))
+    premultiplied = foreground_linear * alpha_out[..., None]
+    premultiplied[domain] = source_premultiplied[domain]
+
+    color_seed = (
+        domain
+        & (alpha_out >= 0.025)
+        & ((source_chroma >= 28.0) | (source_luma >= 150.0))
+    )
+    color_weight = color_seed.astype(np.float32) * np.clip(alpha_out / 0.42, 0.18, 1.0)
+    sigma_color = 2.2
+    color_den = ndimage.gaussian_filter(color_weight, sigma=sigma_color)
+    if float(color_den.max(initial=0.0)) <= 1e-6:
+        return foreground_linear, subject_alpha_out, alpha_out, {
+            "method": "saturated_glass_continuous_field",
+            "applied": False,
+            "reason": "no glass color seeds",
+            "pixels": int(domain.sum()),
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    premul_field = np.empty_like(premultiplied)
+    for channel in range(3):
+        premul_field[..., channel] = (
+            ndimage.gaussian_filter(premultiplied[..., channel] * color_weight, sigma=sigma_color)
+            / np.maximum(color_den, 1e-6)
+        )
+    premul_field = np.clip(premul_field, 0.0, 1.0)
+
+    straight = np.zeros_like(premultiplied)
+    visible = domain & (alpha_out > 1e-3)
+    straight[visible] = np.clip(
+        premultiplied[visible] / np.maximum(alpha_out[visible, None], 1e-3),
+        0.0,
+        1.0,
+    )
+    straight_srgb = io.linear_to_srgb_u8(straight).astype(np.float32)
+    straight_chroma = straight_srgb.max(axis=-1) - straight_srgb.min(axis=-1)
+    straight_luma = straight_srgb.mean(axis=-1)
+    color_highlight_protect = alpha_highlight_protect | (
+        (straight_luma >= 175.0) & (straight_chroma >= 55.0)
+    )
+    local_luma_delta = np.abs(ndimage.gaussian_filter(straight_luma, sigma=1.0) - straight_luma)
+    dirty_mid_luma_jump = local_luma_delta > 18.0
+    unstable_color = (
+        domain
+        & (alpha_out > 0.015)
+        & (color_den >= 0.025)
+        & ~color_highlight_protect
+        & (
+            (straight_chroma < 42.0)
+            | (dirty_mid_luma_jump & (straight_luma < 170.0))
+        )
+    )
+    color_blend = 0.38 * np.clip(color_den / 0.20, 0.0, 1.0)
+    color_blend[color_highlight_protect] *= 0.05
+    color_write = unstable_color & (color_blend > 1e-4)
+    premultiplied[color_write] = (
+        premultiplied[color_write] * (1.0 - color_blend[color_write, None])
+        + premul_field[color_write] * color_blend[color_write, None]
+    )
+
+    repaired = foreground_linear.copy()
+    final_write = domain & (alpha_out > 1e-3)
+    repaired[final_write] = np.clip(
+        premultiplied[final_write] / np.maximum(alpha_out[final_write, None], 1e-3),
+        0.0,
+        1.0,
+    )
+    return repaired, subject_alpha_out, alpha_out, {
+        "method": "saturated_glass_continuous_field",
+        "applied": True,
+        "pixels": int(domain.sum()),
+        "alpha_pixels": int(alpha_write.sum()),
+        "color_pixels": int(color_write.sum()),
+        "color_seed_pixels": int(color_seed.sum()),
+        "highlight_protected_pixels": int((domain & color_highlight_protect).sum()),
+        "mean_alpha_delta": float(np.abs(alpha_out[alpha_write] - alpha[alpha_write]).mean()) if alpha_write.any() else 0.0,
+        "hole_fraction": hole_fraction,
+        "soft_fraction": soft_fraction,
+    }
+
+
 def _source_preserving_saturated_glass_foreground(
     image_srgb: np.ndarray,
     bg: tuple[int, int, int],
@@ -1853,6 +2044,8 @@ def _source_preserving_saturated_glass_foreground(
         }
 
     pixels = image_srgb.astype(np.float32)
+    source_luma = pixels.mean(axis=-1)
+    source_chroma = pixels.max(axis=-1) - pixels.min(axis=-1)
     source_margin = pixels[..., dominant] - np.maximum(
         pixels[..., other_channels[0]],
         pixels[..., other_channels[1]],
@@ -1878,6 +2071,32 @@ def _source_preserving_saturated_glass_foreground(
     projection_strength = diffusion * source_evidence
     projection_strength = ndimage.gaussian_filter(projection_strength, sigma=1.3)
     projection_strength[~write_mask] = 0.0
+    # Bright source highlights on glass often still point partly in the screen
+    # hue direction because they are refracting the saturated background. Do
+    # not let screen-removal or local continuity average those ridges into flat
+    # cyan patches; darker/mid-luma source-family pixels remain repairable.
+    highlight_region = subject_region & ~shadow_layer & (alpha > 0.015)
+    source_highlight_structure = write_mask & (alpha > 0.015) & (
+        ((source_luma >= 185.0) & (source_chroma >= 36.0))
+        | ((source_luma >= 224.0) & (source_chroma <= 96.0))
+        | (alpha >= 0.92)
+    )
+    source_highlight_core = highlight_region & (
+        ((source_luma >= 185.0) & (source_chroma >= 36.0))
+        | ((source_luma >= 224.0) & (source_chroma <= 96.0))
+    )
+    source_highlight_distance = ndimage.distance_transform_edt(~source_highlight_core)
+    # Specular bands are often a bright core plus a lower-luma chromatic skirt
+    # after green-screen mixing. Preserve that local structure as source-owned
+    # foreground; otherwise chroma-continuity repair can flatten the skirt into
+    # a blocky cyan patch beside the highlight.
+    source_highlight_foreground_keep = source_highlight_core | (
+        (source_highlight_distance <= 12.0)
+        & highlight_region
+        & (source_luma >= 86.0)
+        & (source_chroma >= 34.0)
+    )
+    projection_strength[source_highlight_structure] = 0.0
     projection_strength = np.clip(projection_strength, 0.0, 0.92).astype(np.float32)
 
     C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
@@ -1947,6 +2166,7 @@ def _source_preserving_saturated_glass_foreground(
         local_chroma = local_srgb.max(axis=-1) - local_srgb.min(axis=-1)
         chroma_continuity_mask = (
             write_mask
+            & ~source_highlight_foreground_keep
             & (seed_density >= 0.045)
             & (straight_chroma < 72.0)
             & ((local_chroma - straight_chroma) >= 12.0)
@@ -1978,6 +2198,7 @@ def _source_preserving_saturated_glass_foreground(
         )
         nearest_continuity_mask = (
             continuity_region
+            & ~source_highlight_foreground_keep
             & (dist_to_chroma_seed <= 18.0)
             & (straight_chroma < 58.0)
             & ((nearest_chroma - straight_chroma) >= 12.0)
@@ -1993,7 +2214,7 @@ def _source_preserving_saturated_glass_foreground(
             )
             premultiplied[nearest_continuity_mask] = repaired_straight * alpha[nearest_continuity_mask, None]
 
-    final_write_mask = write_mask | chroma_continuity_mask | nearest_continuity_mask
+    final_write_mask = (write_mask & ~source_highlight_foreground_keep) | chroma_continuity_mask | nearest_continuity_mask
     repaired = foreground_linear.copy()
     repaired[final_write_mask] = np.clip(
         premultiplied[final_write_mask] / np.maximum(alpha[final_write_mask, None], 1e-3),
@@ -2007,6 +2228,8 @@ def _source_preserving_saturated_glass_foreground(
         "projection_pixels": int(project_mask.sum()),
         "smooth_pixels": int(smooth_mask.sum()),
         "seed_pixels": int(seed.sum()),
+        "source_highlight_protected_pixels": int(source_highlight_structure.sum()),
+        "source_highlight_foreground_kept_pixels": int(source_highlight_foreground_keep.sum()),
         "chroma_continuity_pixels": int(chroma_continuity_mask.sum()),
         "nearest_chroma_continuity_pixels": int(nearest_continuity_mask.sum()),
         "mean_projection_strength": float(projection_strength[project_mask].mean()) if project_mask.any() else 0.0,
