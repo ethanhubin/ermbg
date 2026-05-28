@@ -20,6 +20,8 @@ import requests
 from loguru import logger
 from PIL import Image
 
+from ermbg.comfy import DEFAULT_COMFY_URL
+
 from .generator import ProbeGenerator
 from .prompts import color_phrase
 
@@ -54,7 +56,7 @@ class ComfyUIProbeGenerator(ProbeGenerator):
 
     def __init__(
         self,
-        url: str = "http://192.168.0.8:8000",
+        url: str = DEFAULT_COMFY_URL,
         workflow_path: Path | str | None = None,
         timeout: float = 600.0,
         poll_interval: float = 1.0,

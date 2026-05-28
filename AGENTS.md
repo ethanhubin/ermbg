@@ -4,13 +4,14 @@
 
 ### ComfyUI Server (REMOTE — preferred over local model loads)
 
-A long-running ComfyUI server is reachable at **`http://192.168.0.8:8000`**.
+ComfyUI is reached through `COMFY_URL` from the environment or local `.env`.
+If it is not configured, code falls back to **`http://192.168.0.8:8000`**.
 
 - **Hardware**: Windows + RTX 4090 (24 GB VRAM), 64 GB RAM, ComfyUI 0.21.1
 - **Always running** — do **not** propose installing diffusers / SDXL / FLUX / RMBG models locally on the Mac. The Mac is for orchestration (CLI, lightweight CV/numpy, BiRefNet-matting via MPS) only. Heavy generation/inference goes to ComfyUI.
 - **Mac local model budget**: BiRefNet-matting (≈1 GB MPS) yes; SDXL (16+ GB MPS) no — already proven OOM on Phase 1.
 
-**Confirmed installed nodes / models** (full list cached in `/tmp/comfy_object_info.json` after `curl -s http://192.168.0.8:8000/object_info > /tmp/comfy_object_info.json`):
+**Confirmed installed nodes / models** (full list cached in `/tmp/comfy_object_info.json` after `curl -s "${COMFY_URL:-http://192.168.0.8:8000}/object_info" > /tmp/comfy_object_info.json`):
 
 - Generation backends: Qwen-Image-Edit 2511 fp8, Flux Dev fp8, Flux 2 Klein 9b, FLUX schnell, Z-Image-Turbo
 - Background removal: `Image Rembg` (isnet-general-use / u2net / u2netp / silueta / isnet-anime), `BriaRemoveImageBackground`, `RemoveBackground`, `LayerMask: RmBgUltra V2`

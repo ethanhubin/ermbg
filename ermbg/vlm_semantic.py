@@ -22,6 +22,7 @@ import requests
 from PIL import Image, ImageDraw
 
 from . import io
+from .comfy import DEFAULT_COMFY_URL
 from .colorspace import oklab_distance, srgb_to_oklab
 from .despill import has_dominant_screen_channel
 from .planner import RiskRegion
@@ -424,7 +425,7 @@ class ComfyQwenVLMSemanticPriorClient:
     def __init__(
         self,
         *,
-        url: str = "http://192.168.0.8:8000",
+        url: str = DEFAULT_COMFY_URL,
         model: str = "Qwen3-VL-4B-Instruct-FP8",
         quantization: str = "none",
         keep_model_loaded: bool = True,

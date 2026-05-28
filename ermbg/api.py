@@ -30,6 +30,7 @@ import numpy as np
 from PIL import Image
 
 from . import io as ermbg_io
+from .comfy import DEFAULT_COMFY_URL
 from .matting import matte as _matte_internal
 from .qa import run_qa
 from .router import Strategy, classify_strategy
@@ -140,7 +141,7 @@ def matte_image(
     vlm_provider: str = "openai",
     vlm_model: str = "gpt-4o-mini",
     vlm_prior_mode: str = "shadow",
-    comfy_url: str = "http://192.168.0.8:8000",
+    comfy_url: str = DEFAULT_COMFY_URL,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 

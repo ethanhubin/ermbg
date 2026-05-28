@@ -94,7 +94,7 @@ CV: pixel membership, alpha, foreground RGB, shadow opacity
 Provider:
 
 - `openai`
-- `comfy-qwen`:使用远端 ComfyUI `http://192.168.0.8:8000`
+- `comfy-qwen`:使用 `COMFY_URL` 指向的 ComfyUI
 
 ## Python API
 
@@ -115,6 +115,16 @@ print(s.bg_type, s.image_type, s.notes)
 完整示例见 [examples/quickstart.py](examples/quickstart.py)。
 
 ## ComfyUI
+
+ComfyUI HTTP address is local configuration. Set `COMFY_URL` in your shell or
+in the gitignored local `.env` file, for example:
+
+```bash
+COMFY_URL=http://127.0.0.1:8000
+```
+
+If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
+address used by this repository.
 
 `comfy_nodes/` 提供:
 
