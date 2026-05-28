@@ -152,6 +152,22 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         subject_alpha[soft_background_leak] = 0.0
         exterior_bg |= soft_background_leak
 
+    glass_internal_shadow, glass_internal_shadow_info = _reclassify_glass_internal_shadow_as_hole(
+        bg,
+        hole,
+        soft_subject,
+        opaque_subject,
+        shadow,
+    )
+    if glass_internal_shadow.any():
+        # In saturated-screen glass, mild scalar darkening inside a broad
+        # transparent basin is often the old background seen through glass, not
+        # a reusable black shadow layer. Reclassify only components embedded in
+        # the proved glass interior; exterior/contact-shadow components stay in
+        # shadow so G02/G03-style cast shadows are preserved.
+        shadow &= ~glass_internal_shadow
+        hole |= glass_internal_shadow
+
     # Background-colored enclosed openings are true holes only after the broad
     # topology/shape proof in _enclosed_hole_mask; thin same-color markings stay
     # in opaque_subject as subject-owned decoration.
@@ -275,6 +291,8 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
             "edge_background_residual_pixels": int(known_bg_projection.sum()),
             "internal_background_material_pixels": int(internal_bg_material.sum()),
             "opaque_glass_leak_pixels": int(opaque_glass_leak.sum()),
+            "glass_internal_shadow_reclassified_pixels": int(glass_internal_shadow.sum()),
+            "glass_internal_shadow_reclassification": glass_internal_shadow_info,
             "internal_hole_shadow_pixels": int(internal_hole_shadow.sum()),
             "soft_background_leak_pixels": int(soft_background_leak.sum()),
             "exterior_translucent_soft_pixels": int(exterior_translucent_soft.sum()),
@@ -399,6 +417,86 @@ def _strict_background_family_darkening_mask(image_srgb: np.ndarray, bg: tuple[i
     # subject material can be dark and green-dominant but has a different
     # channel ratio, especially in the secondary channels.
     return (scale >= 0.03) & (scale <= 0.98) & (err <= 0.008) & darker & (norm_delta <= 0.10)
+
+
+def _reclassify_glass_internal_shadow_as_hole(
+    bg: tuple[int, int, int],
+    subject_hole: np.ndarray,
+    soft_subject: np.ndarray,
+    opaque_subject: np.ndarray,
+    shadow: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Move saturated-screen glass-interior darkening out of shadow export.
+
+    For G04-like green glass, generated source pixels inside the transparent
+    basin can satisfy the scalar-darkening equation ``C ~= scale * B``. The
+    exterior shadow detector is physically correct for cast/contact shadows,
+    but exporting these interior basin fragments as neutral black shadow makes
+    grey dirt on new backgrounds. The guard is deliberately topology-based:
+    only broad glass basins with both same-background holes and soft material
+    are eligible, and components must live mostly in that interior context.
+    """
+    out = np.zeros(shadow.shape, dtype=bool)
+    bg_arr = np.asarray(bg, dtype=np.uint8)
+    dominant = int(np.argmax(bg_arr))
+    other_channels = [idx for idx in range(3) if idx != dominant]
+    if int(bg_arr[dominant]) - int(max(bg_arr[other_channels])) < 40:
+        return out, {"method": "glass_internal_shadow_reclassification", "applied": False, "reason": "background is not saturated"}
+
+    img_area = float(shadow.size)
+    hole_fraction = float(subject_hole.sum()) / img_area
+    soft_fraction = float(soft_subject.sum()) / img_area
+    if hole_fraction < 0.08 or soft_fraction < 0.04:
+        return out, {
+            "method": "glass_internal_shadow_reclassification",
+            "applied": False,
+            "reason": "no broad glass basin",
+            "hole_fraction": hole_fraction,
+            "soft_fraction": soft_fraction,
+        }
+
+    hole_density = ndimage.uniform_filter(subject_hole.astype(np.float32), size=31)
+    basin_context = hole_density >= 0.08
+    anchored_context = ndimage.binary_dilation(subject_hole, iterations=8) & ndimage.binary_dilation(
+        soft_subject | opaque_subject,
+        iterations=8,
+    )
+    interior_context = basin_context | anchored_context
+
+    labels, n = ndimage.label(shadow)
+    component_infos: list[dict[str, Any]] = []
+    rejected = 0
+    for label_id in range(1, n + 1):
+        comp = labels == label_id
+        area = int(comp.sum())
+        if area < 8:
+            rejected += 1
+            continue
+        interior_pixels = int((comp & interior_context).sum())
+        interior_fraction = interior_pixels / float(area)
+        if interior_fraction < 0.65:
+            rejected += 1
+            continue
+        out |= comp
+        ys, xs = np.nonzero(comp)
+        component_infos.append(
+            {
+                "area": area,
+                "interior_fraction": interior_fraction,
+                "bbox_xyxy": [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)],
+            }
+        )
+
+    return out, {
+        "method": "glass_internal_shadow_reclassification",
+        "applied": bool(out.any()),
+        "pixels": int(out.sum()),
+        "components": component_infos,
+        "rejected_components": rejected,
+        "hole_fraction": hole_fraction,
+        "soft_fraction": soft_fraction,
+        "interior_fraction_min": 0.65,
+    }
 
 
 def _soft_background_family_leak_mask(

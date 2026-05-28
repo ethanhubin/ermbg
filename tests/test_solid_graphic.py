@@ -359,6 +359,8 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     )
 
     assert result.accepted is True
+    assert result.debug["glass_internal_shadow_reclassified_pixels"] > 5000
+    assert result.ownership_masks["shadow_layer"][382:754, 1026:1081].mean() < 0.05
     assert int(false_hue.sum()) < 400
 
 
