@@ -251,12 +251,45 @@ class ErmbgClassify:
         return (s.bg_type, s.image_type, json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+class ConvertMasksToImages:
+    """Small compatibility node for ERMBG workflows.
+
+    Some ComfyUI installs do not include a generic MASK -> IMAGE converter.
+    Keeping this node in ERMBG makes the remote AutoMatte workflow depend only
+    on core Comfy nodes plus ERMBG's own custom nodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"masks": ("MASK",)}}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "run"
+    CATEGORY = "ERMBG"
+
+    def run(self, masks: torch.Tensor):
+        if masks.ndim == 2:
+            masks = masks.unsqueeze(0)
+        if masks.ndim == 3:
+            images = masks.unsqueeze(-1).repeat(1, 1, 1, 3)
+        elif masks.ndim == 4 and masks.shape[-1] == 1:
+            images = masks.repeat(1, 1, 1, 3)
+        elif masks.ndim == 4 and masks.shape[-1] == 3:
+            images = masks
+        else:
+            raise ValueError(f"Unsupported MASK tensor shape: {tuple(masks.shape)}")
+        return (torch.clamp(images.float(), 0.0, 1.0),)
+
+
 NODE_CLASS_MAPPINGS = {
     "ErmbgAutoMatte": ErmbgAutoMatte,
     "ErmbgClassify": ErmbgClassify,
+    "Convert Masks to Images": ConvertMasksToImages,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ErmbgAutoMatte": "ERMBG AutoMatte",
     "ErmbgClassify": "ERMBG Classify (preview)",
+    "Convert Masks to Images": "Convert Masks to Images",
 }

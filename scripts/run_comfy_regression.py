@@ -16,6 +16,7 @@ import requests
 from PIL import Image, ImageDraw
 
 from ermbg import classify_image, matte_image
+from ermbg.comfy import DEFAULT_COMFY_URL
 
 
 def _json_safe(value: Any) -> Any:
@@ -249,7 +250,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", default="out/comfy_ermbg_regression", help="Batch root under out/")
     parser.add_argument("--case-id", default="", help="Override case id; defaults to case.json id or parent folder")
     parser.add_argument("--phase", default="remote", help="Run label appended to the case directory")
-    parser.add_argument("--comfy-url", default="http://192.168.0.8:8000")
+    parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     parser.add_argument("--shadow-mode", default="on", choices=["on", "auto", "off"])
     parser.add_argument("--background", type=int, nargs=3, default=(0, 200, 0), metavar=("R", "G", "B"))
     parser.add_argument("--subject-threshold", type=float, default=35.0)

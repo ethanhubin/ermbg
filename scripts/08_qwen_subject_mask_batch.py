@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ermbg import io
+from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.probe.comfyui_subject_mask import ComfyUISubjectMaskWorkflow
 from ermbg.vlm_semantic import (
     ComfyQwenVLMSemanticPriorClient,
@@ -310,7 +311,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--sample-root", type=Path, action="append", default=list(DEFAULT_SAMPLE_ROOTS))
     p.add_argument("--out-dir", type=Path, default=Path("out/qwen_subject_mask_all_20260526"))
-    p.add_argument("--comfy-url", default="http://192.168.0.8:8000")
+    p.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     p.add_argument("--qwen-model", default="Qwen3-VL-4B-Instruct-FP8")
     p.add_argument("--timeout", type=float, default=900.0)
     p.add_argument("--limit", type=int, default=0)

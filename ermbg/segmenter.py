@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from . import metrics
+from .comfy import DEFAULT_COMFY_URL
 
 
 @dataclass
@@ -181,7 +182,7 @@ class ComfyRembgSegmenter:
 
     def __init__(
         self,
-        url: str = "http://192.168.0.8:8000",
+        url: str = DEFAULT_COMFY_URL,
         timeout: float = 600.0,
         poll_interval: float = 1.0,
     ) -> None:

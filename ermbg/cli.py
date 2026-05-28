@@ -24,6 +24,7 @@ from PIL import Image
 
 from . import io
 from .api import matte_image
+from .comfy import DEFAULT_COMFY_URL
 from .diagnose import BackgroundDiagnoser
 from .matting import matte as run_matte
 from .probe.generator import PROBE_COLORS
@@ -121,7 +122,7 @@ def segment(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/smoke"), help="Output directory"),
     backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg | comfy-ermbg"),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Run coarse subject segmentation + build a rough trimap."""
     image = io.load_rgb(input_path)
@@ -149,7 +150,7 @@ def diagnose(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/diagnose"), help="Output directory"),
     backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg"),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Background diagnosis: is the image suitable for direct analytic matting?"""
     image = io.load_rgb(input_path)
@@ -211,7 +212,7 @@ def matte(
         "shadow",
         help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
     ),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg or --vlm-provider comfy-qwen"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg or --vlm-provider comfy-qwen"),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -390,7 +391,7 @@ def phase1(
     backend: str = typer.Option("auto"),
     input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
     shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL for --backend comfy-rmbg"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
     matte_only_when_ready: bool = typer.Option(
         False,
         help="If true, only run matting when diagnose verdict='ready'. Default: always matte.",
@@ -504,7 +505,7 @@ def probe(
     out_dir: Path = typer.Option(Path("samples/outputs/probes"), help="Output directory"),
     backend: str = typer.Option("auto", help="Segmenter backend"),
     seed: int = typer.Option(42, help="Random seed"),
-    comfy_url: str = typer.Option("http://192.168.0.8:8000", help="ComfyUI server URL"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL"),
 ):
     """(Legacy) generate one probe image. Not part of the main matting pipeline."""
     image = io.load_rgb(input_path)

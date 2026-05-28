@@ -129,6 +129,16 @@ print(s.bg_type, s.image_type, s.notes)
 
 ## ComfyUI
 
+ComfyUI HTTP address is local configuration. Set `COMFY_URL` in your shell or
+in the gitignored local `.env` file, for example:
+
+```bash
+COMFY_URL=http://127.0.0.1:8000
+```
+
+If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
+address used by this repository.
+
 正式 Web 抠图路径是 **`comfy-ermbg`**:Mac 侧负责上传、HTTP 编排和轻量诊断,
 远端 ComfyUI `ErmbgAutoMatte` 节点运行完整 ERMBG pipeline。后续算法更新
 不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。

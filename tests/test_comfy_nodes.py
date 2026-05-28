@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 # as a package. For tests, add the repo root so the import resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from comfy_nodes.ermbg_nodes import ErmbgAutoMatte, ErmbgClassify, _dev_reload_ermbg_modules, _mask_to_numpy  # noqa: E402
+from comfy_nodes.ermbg_nodes import ConvertMasksToImages, ErmbgAutoMatte, ErmbgClassify, _dev_reload_ermbg_modules, _mask_to_numpy  # noqa: E402
 
 
 def _green_with_red_subject(h=128, w=128):
@@ -115,3 +115,11 @@ def test_mask_to_numpy_accepts_batched_and_unbatched_masks():
     assert _mask_to_numpy(mask_2d).shape == (32, 48)
     assert _mask_to_numpy(mask_3d).shape == (32, 48)
     assert _mask_to_numpy(mask_4d).shape == (32, 48)
+
+
+def test_convert_masks_to_images_node():
+    mask = torch.ones((1, 16, 20), dtype=torch.float32) * 0.5
+    images, = ConvertMasksToImages().run(mask)
+    assert images.shape == (1, 16, 20, 3)
+    assert images.dtype == torch.float32
+    assert float(images.min()) == pytest.approx(0.5)

@@ -4,13 +4,14 @@
 
 ### ComfyUI Server (REMOTE — preferred over local model loads)
 
-A long-running ComfyUI server is reachable at **`http://192.168.0.8:8000`**.
+ComfyUI is reached through `COMFY_URL` from the environment or local `.env`.
+If it is not configured, code falls back to **`http://192.168.0.8:8000`**.
 
 - **Hardware**: Windows + RTX 4090 (24 GB VRAM), 64 GB RAM. Verify ComfyUI version with `/system_stats` before version-sensitive work.
 - **Always running** — do **not** install or run SDXL / FLUX / Qwen / RMBG generation models locally on the Mac. The Mac is for orchestration, CLI, lightweight CV/numpy, and allowed local BiRefNet-matting only. Heavy generation/inference goes to ComfyUI.
 - **Mac local model budget**: BiRefNet-matting (≈1 GB MPS) is allowed; SDXL/FLUX/Qwen-scale models are not allowed locally.
 
-**Installed nodes / models** (cache the full list with `curl -s http://192.168.0.8:8000/object_info > /tmp/comfy_object_info.json` when needed; do not call `/object_info` on latency-sensitive hot paths):
+**Installed nodes / models** (cache the full list with `curl -s "${COMFY_URL:-http://192.168.0.8:8000}/object_info" > /tmp/comfy_object_info.json` when needed; do not call `/object_info` on latency-sensitive hot paths):
 
 - Generation backends: Qwen-Image-Edit 2511 fp8, Flux Dev fp8, Flux 2 Klein 9b, FLUX schnell, Z-Image-Turbo
 - Background removal: `Image Rembg` (isnet-general-use / u2net / u2netp / silueta / isnet-anime), `BriaRemoveImageBackground`, `RemoveBackground`, `LayerMask: RmBgUltra V2`
@@ -141,10 +142,11 @@ After any change to [ermbg/web.py](ermbg/web.py), Web UI behavior, Web API behav
 - If Web reports a ComfyUI connection error, compare from the same shell before changing algorithm code:
 
   ```bash
-  curl -sS --connect-timeout 3 http://192.168.0.8:8000/queue
+  curl -sS --connect-timeout 3 "${COMFY_URL:-http://192.168.0.8:8000}/queue"
   .venv/bin/python - <<'PY'
+  import os
   import requests
-  print(requests.get("http://192.168.0.8:8000/system_stats", timeout=3).status_code)
+  print(requests.get(os.environ.get("COMFY_URL", "http://192.168.0.8:8000") + "/system_stats", timeout=3).status_code)
   PY
   ```
 
