@@ -181,6 +181,8 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         shadow_alpha_seed,
     )
     shadow_alpha, shadow_feather, shadow_feather_info = _feather_broad_exterior_shadow_alpha(
+        image_srgb,
+        bg,
         shadow_alpha,
         shadow & ~internal_hole_shadow,
         exterior_bg,
@@ -1221,19 +1223,22 @@ def _luminance_shadow_rgba_from_known_bg(
 
 
 def _feather_broad_exterior_shadow_alpha(
+    image_srgb: np.ndarray,
+    bg: tuple[int, int, int],
     alpha: np.ndarray,
     exterior_shadow: np.ndarray,
     exterior_bg: np.ndarray,
     subject_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Smooth broad soft cast-shadow tails without changing hard shadows.
+    """Solve broad soft cast-shadow tails as a continuous known-B field.
 
-    Solid-background graphics recover shadow support from scalar-darkening
-    evidence. On generated soft shadows the faint tail can fall below that
-    evidence gate in a noisy, component-shaped way, so the exported alpha ends
-    in a jagged hard boundary on white. Only broad exterior components with a
-    measurable low-alpha tail are feathered; hard UI shadows and hole-side
-    internal darkening stay exact.
+    Once a broad exterior region is proven to be shadow, the remaining problem
+    is not classification but field recovery: on a known background
+    ``C ~= scale * B`` and the reusable black shadow is ``alpha = 1 - scale``.
+    Generated green-screen tails contain measurement noise and faint pixels
+    below the strict seed mask, so solve a weighted continuous field from the
+    source luminance and constrain its outside boundary to zero. Hard UI
+    shadows and hole-side internal darkening stay exact by component gates.
     """
     out = alpha.astype(np.float32).copy()
     added = np.zeros(alpha.shape, dtype=bool)
@@ -1243,6 +1248,23 @@ def _feather_broad_exterior_shadow_alpha(
             "applied": False,
             "reason": "no exterior shadow",
         }
+
+    C = io.srgb_to_linear(image_srgb).astype(np.float32)
+    B = io.srgb_to_linear(np.asarray(bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
+    weights_y = np.asarray([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    bg_y = max(float(np.sum(B * weights_y)), 1e-6)
+    target_y = np.sum(C * weights_y.reshape(1, 1, 3), axis=-1)
+    raw_alpha = np.clip(1.0 - target_y / bg_y, 0.0, 1.0).astype(np.float32)
+    denom = max(float(np.dot(B, B)), 1e-6)
+    scale = np.clip(np.sum(C * B.reshape(1, 1, 3), axis=-1) / denom, 0.0, 1.2)
+    recon = scale[..., None] * B.reshape(1, 1, 3)
+    scalar_err = np.sqrt(np.mean((C - recon) ** 2, axis=-1))
+    # Soft evidence, not ownership: it says whether source pixels still obey a
+    # scaled-known-background model. The broad component already supplied the
+    # semantic "this is shadow" anchor.
+    scalar_conf = np.exp(-((scalar_err / 0.045) ** 2)).astype(np.float32)
+    dark_conf = np.clip(raw_alpha / 0.09, 0.0, 1.0).astype(np.float32)
+    source_shadow_like = (raw_alpha > (0.7 / 255.0)) & (scalar_conf > 0.08)
 
     labels, n = ndimage.label(exterior_shadow)
     selected = np.zeros(alpha.shape, dtype=bool)
@@ -1285,46 +1307,61 @@ def _feather_broad_exterior_shadow_alpha(
         }
 
     selected_f = selected.astype(np.float32)
-    sigma_inner = 5.0
-    weighted = ndimage.gaussian_filter(out * selected_f, sigma=sigma_inner)
-    weights = ndimage.gaussian_filter(selected_f, sigma=sigma_inner)
-    smoothed = weighted / np.maximum(weights, 1e-6)
-    # Smooth low-alpha tail pixels strongly, but leave contact-dark portions
-    # mostly measured so the shadow does not detach from the object.
-    blend = 0.90 * np.clip((0.64 - out) / 0.64, 0.0, 1.0)
-    out[selected] = out[selected] * (1.0 - blend[selected]) + smoothed[selected] * blend[selected]
-
     dist = ndimage.distance_transform_edt(~selected)
-    max_feather_px = 14.0
+    max_feather_px = 24.0
     # Generated soft shadows often have small holes and horizontal missing
     # strips inside the accepted component. Close only a few pixels so we mend
     # local support discontinuities without changing the broad shadow shape.
     closed_support = ndimage.binary_closing(selected, structure=np.ones((5, 5), dtype=bool), iterations=2)
     gap_zone = closed_support & ~selected & ~subject_mask
-    feather_zone = (dist > 0.0) & (dist <= max_feather_px) & exterior_bg & ~subject_mask
-    repair_zone = gap_zone | feather_zone
-    if repair_zone.any():
-        # Direct convolution, not normalized convolution, produces a real fade
-        # to zero outside the measured support. The cap prevents the feather
-        # from creating a new visible dark rim beyond the source shadow body.
-        outer = ndimage.gaussian_filter(out * selected_f, sigma=5.8)
-        taper = np.exp(-((dist / 5.0) ** 2)).astype(np.float32)
-        outer = np.minimum(outer * taper, 0.16)
-        write = repair_zone & (outer > (1.0 / 255.0))
-        out[write] = np.maximum(out[write], outer[write])
-        added |= write
+    feather_zone = (
+        (dist > 0.0)
+        & (dist <= max_feather_px)
+        & ~subject_mask
+        & (source_shadow_like | exterior_bg)
+    )
+    solve_domain = selected | gap_zone | feather_zone
+    confidence = np.zeros(alpha.shape, dtype=np.float32)
+    confidence[selected] = np.maximum(0.45, scalar_conf[selected])
+    continuity_conf = np.clip(scalar_conf * dark_conf, 0.0, 1.0)
+    confidence[gap_zone | feather_zone] = np.maximum(
+        confidence[gap_zone | feather_zone],
+        continuity_conf[gap_zone | feather_zone],
+    )
+    confidence[~solve_domain] = 0.0
+
+    sigma_field = 7.0
+    # Include a zero-valued boundary in the denominator. This makes the solved
+    # field naturally decay to transparent instead of ending where the hard
+    # seed mask stopped.
+    boundary = ndimage.binary_dilation(solve_domain, iterations=12) & ~solve_domain & ~subject_mask
+    boundary_weight = boundary.astype(np.float32) * 0.75
+    numerator = ndimage.gaussian_filter(raw_alpha * confidence, sigma=sigma_field)
+    denominator = ndimage.gaussian_filter(confidence + boundary_weight, sigma=sigma_field)
+    field = numerator / np.maximum(denominator, 1e-6)
+    field = np.clip(field, 0.0, 1.0).astype(np.float32)
+
+    # In soft tails, trust the continuous known-B field more than the quantized
+    # per-pixel inverse solve. Near contact-dark regions, keep more of the
+    # measured alpha so the subject does not visually detach from its shadow.
+    blend = 0.96 * np.clip((0.70 - raw_alpha) / 0.70, 0.0, 1.0)
+    out[selected] = out[selected] * (1.0 - blend[selected]) + field[selected] * blend[selected]
+    write = (gap_zone | feather_zone) & (field > (1.0 / 255.0))
+    out[write] = np.maximum(out[write], np.minimum(field[write], 0.22))
+    added |= write
 
     out = np.clip(out, 0.0, 1.0).astype(np.float32)
     return out, added, {
-        "method": "broad_exterior_shadow_feather",
+        "method": "broad_exterior_shadow_continuous_field",
         "applied": True,
         "pixels": int(selected.sum()),
         "added_pixels": int(added.sum()),
         "component_count": len(components),
         "components": components,
         "max_feather_px": max_feather_px,
-        "inner_sigma": sigma_inner,
+        "field_sigma": sigma_field,
         "closed_gap_pixels": int(gap_zone.sum()),
+        "mean_scalar_confidence": float(confidence[solve_domain].mean()) if solve_domain.any() else 0.0,
     }
 
 
