@@ -31,9 +31,11 @@ from PIL import Image
 
 from . import io as ermbg_io
 from .matting import matte as _matte_internal
+from .matting import solid_graphic_to_matting_result
 from .qa import run_qa
 from .router import Strategy, classify_strategy
 from .segmenter import build_segmenter
+from .solid_graphic import analyze_solid_bg_graphic
 
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
 MaskLike = Union[str, Path, np.ndarray, Image.Image]
@@ -167,6 +169,7 @@ def matte_image(
     vlm_model: str = "gpt-4o-mini",
     vlm_prior_mode: str = "shadow",
     comfy_url: str = "http://192.168.0.8:8000",
+    solid_graphic_prepass: bool = True,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -197,6 +200,9 @@ def matte_image(
             still computes alpha, foreground colors, and shadow strength.
         vlm_provider: ``openai`` or ``comfy-qwen``.
         vlm_prior_mode: ``shadow`` (default), ``material``, or ``all``.
+        solid_graphic_prepass: when true, high-confidence solid-background
+            graphics use the analytic ownership-first path before constructing
+            a local matting segmenter.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
     subject_support = _to_mask(subject_mask, rgb.shape[:2], "subject_mask")
@@ -229,15 +235,33 @@ def matte_image(
             comfy_url=comfy_url,
         )
 
-    seg = _get_segmenter(
-        backend=backend,
-        model_id=matting_model,
-        input_size=input_size,
-        comfy_url=comfy_url,
-    )
     semantic_prior = None
     soft_preview = None
-    if vlm_prior:
+    result = None
+    can_try_solid_graphic = (
+        solid_graphic_prepass
+        and backend != "comfy-rmbg"
+        and subject_support is None
+        and not vlm_prior
+        and despill is None
+        and use_keyer is None
+        and shadow_mode != "off"
+        and strat_preview.bg_type in {"saturated", "white", "black", "grey"}
+    )
+    if can_try_solid_graphic:
+        solid = analyze_solid_bg_graphic(rgb)
+        if solid.accepted:
+            result = solid_graphic_to_matting_result(solid, strat_preview, shadow_mode=shadow_mode)
+
+    if result is None:
+        seg = _get_segmenter(
+            backend=backend,
+            model_id=matting_model,
+            input_size=input_size,
+            comfy_url=comfy_url,
+        )
+
+    if result is None and vlm_prior:
         from .diagnose import BackgroundDiagnoser
         from .shadow import estimate_shadow_alpha
         from .vlm_semantic import (
@@ -296,17 +320,19 @@ def matte_image(
                 raise ValueError(f"Unknown vlm_provider: {vlm_provider!r}")
             semantic_prior = client.classify_request(request, regions, rgb.shape[:2])
 
-    result = _matte_internal(
-        rgb,
-        source_alpha=alpha,
-        segmenter=seg,
-        despill=despill,
-        use_keyer=use_keyer,
-        subject_support=subject_support,
-        semantic_prior=semantic_prior,
-        soft_mask=soft_preview,
-        shadow_mode=shadow_mode,
-    )
+    if result is None:
+        result = _matte_internal(
+            rgb,
+            source_alpha=alpha,
+            segmenter=seg,
+            despill=despill,
+            use_keyer=use_keyer,
+            subject_support=subject_support,
+            semantic_prior=semantic_prior,
+            soft_mask=soft_preview,
+            shadow_mode=shadow_mode,
+            solid_graphic_prepass=False,
+        )
 
     # Build report.
     report: dict[str, Any] = {

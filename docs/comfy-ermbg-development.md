@@ -19,6 +19,15 @@ Do not accept a local-only pass as proof that Web is fixed. A change is not
 production-ready until the remote node and Web endpoint exercise the updated
 code.
 
+## Next Algorithm Priority
+
+The next major algorithm track is documented in
+[`docs/solid-bg-graphic-plan.md`](solid-bg-graphic-plan.md). The short version:
+known solid-background graphics should become the primary path, with the
+general BiRefNet/full-matting route as fallback. For UI icons, game assets,
+buttons, badges, and other crisp assets on known solid backgrounds, decide
+ownership from known `B` plus exterior topology before computing alpha.
+
 ## Generality Contract
 
 Use real regressions to reveal a failure class, but do not solve only the

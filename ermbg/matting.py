@@ -42,6 +42,7 @@ from .shadow import (
     remove_small_display_shadow_components,
     shadow_alpha_to_display_alpha,
 )
+from .solid_graphic import SolidGraphicResult, analyze_solid_bg_graphic
 from .types import MattingResult, Trimap
 
 
@@ -111,6 +112,7 @@ def matte(
     soft_mask: np.ndarray | None = None,
     shadow_mode: str = "on",
     legacy_analytic_alpha: bool = False,
+    solid_graphic_prepass: bool | None = None,
 ) -> MattingResult:
     """Run the matting pipeline on one sRGB uint8 image.
 
@@ -137,6 +139,9 @@ def matte(
             ``"off"`` skips shadow detection/compositing for faster previews,
             and ``"auto"`` currently maps to ``"on"`` for quality.
         legacy_analytic_alpha: run the old projection+guided-filter path.
+        solid_graphic_prepass: try the analytic ownership-first path before
+            building/running the matting net. ``None`` enables it only when no
+            segmenter or precomputed soft mask was injected.
     """
     if image_srgb.dtype != np.uint8:
         raise ValueError("matte() expects sRGB uint8 input")
@@ -156,6 +161,29 @@ def matte(
     # ------------------------------------------------------------------ Pass-through fast path
     if strategy.passthrough and source_alpha is not None and not legacy_analytic_alpha:
         return _passthrough_result(image_srgb, source_alpha, strategy)
+
+    if solid_graphic_prepass is None:
+        solid_graphic_prepass = segmenter is None and soft_mask is None
+    can_try_solid_graphic = (
+        solid_graphic_prepass
+        and not legacy_analytic_alpha
+        and soft_mask is None
+        and subject_support is None
+        and semantic_prior is None
+        and despill is None
+        and use_keyer is None
+        and shadow_mode != "off"
+        and strategy.bg_type in {"saturated", "white", "black", "grey"}
+    )
+    if can_try_solid_graphic:
+        solid = analyze_solid_bg_graphic(image_srgb)
+        if solid.accepted:
+            logger.info(
+                f"solid_graphic: accepted confidence={solid.confidence:.3f} "
+                f"bg={solid.background_color}"
+            )
+            return solid_graphic_to_matting_result(solid, strategy, shadow_mode=shadow_mode)
+        logger.info(f"solid_graphic: fallback ({solid.reason})")
 
     # ------------------------------------------------------------------ Matting net
     if soft_mask is None:
@@ -561,6 +589,87 @@ def _empty_shadow_result(shape: tuple[int, int], *, reason: str) -> tuple[np.nda
     }
 
 
+def solid_graphic_to_matting_result(
+    solid: SolidGraphicResult,
+    strategy: Strategy,
+    *,
+    shadow_mode: str,
+) -> MattingResult:
+    """Adapt the ownership-first solid-graphic engine to MattingResult."""
+    from .trimap import trimap_to_uint8
+
+    alpha = np.clip(solid.alpha.astype(np.float32), 0.0, 1.0)
+    subject_alpha = np.clip(solid.subject_alpha.astype(np.float32), 0.0, 1.0)
+    shadow_alpha = np.clip(alpha - subject_alpha, 0.0, 1.0)
+    rgba_rgb_srgb = io.linear_to_srgb_u8(solid.rgba_rgb_linear)
+    foreground_srgb = io.linear_to_srgb_u8(solid.foreground_linear)
+    alpha_u8 = (alpha * 255.0 + 0.5).astype(np.uint8)
+    trimap = _trimap_from_alpha(alpha)
+    shadow_pixels = int((shadow_alpha > 0.0).sum())
+    if shadow_pixels:
+        yy, xx = np.nonzero(shadow_alpha > 0.0)
+        bbox = [int(xx.min()), int(yy.min()), int(xx.max()) + 1, int(yy.max()) + 1]
+    else:
+        bbox = [0, 0, 0, 0]
+
+    return MattingResult(
+        rgba=np.dstack([rgba_rgb_srgb, alpha_u8]),
+        alpha=alpha,
+        foreground_srgb=foreground_srgb,
+        foreground_linear=solid.foreground_linear,
+        trimap=trimap,
+        background_color=solid.background_color,
+        diagnosis=None,
+        debug={
+            "soft_mask": subject_alpha,
+            "subject_alpha": subject_alpha,
+            "shadow_alpha": shadow_alpha,
+            "shadow_alpha_physical": shadow_alpha,
+            "shadow": {
+                "method": "solid_bg_graphic_scalar_darkening",
+                "detected": bool(shadow_pixels),
+                "applied": bool(shadow_pixels),
+                "pixels": shadow_pixels,
+                "bbox_xyxy": bbox,
+                "mean_alpha": float(shadow_alpha[shadow_alpha > 0.0].mean()) if shadow_pixels else 0.0,
+                "p95_alpha": float(np.percentile(shadow_alpha[shadow_alpha > 0.0], 95.0)) if shadow_pixels else 0.0,
+                "max_alpha": float(shadow_alpha.max()) if shadow_pixels else 0.0,
+                "accepted_components": 1 if shadow_pixels else 0,
+                "component_areas": [shadow_pixels] if shadow_pixels else [],
+                "rejected_components": 0,
+                "reason": "solid_bg_graphic ownership" if shadow_pixels else "no shadow layer",
+                "mode": shadow_mode,
+                "source": "solid_bg_graphic",
+            },
+            "solid_graphic": {
+                "accepted": solid.accepted,
+                "reason": solid.reason,
+                "confidence": solid.confidence,
+                "background_color": list(solid.background_color),
+                "debug": solid.debug,
+            },
+            "ownership_masks": solid.ownership_masks,
+            "trimap_u8": trimap_to_uint8(trimap),
+            "despill_method": "solid_bg_graphic",
+            "keyer": {"used": False, "strategy_mode": strategy.keyer_mode},
+            "strategy": {
+                "name": "solid_bg_graphic",
+                "bg_type": strategy.bg_type,
+                "image_type": strategy.image_type,
+                "keyer_mode": None,
+                "despill": "solid_bg_graphic",
+                "passthrough": False,
+                "notes": "Analytic ownership-first solid-background graphic path.",
+                "extras": {
+                    **strategy.extras,
+                    "fallback_strategy": strategy.name,
+                    "solid_graphic_confidence": solid.confidence,
+                },
+            },
+        },
+    )
+
+
 def _new_path(
     soft: np.ndarray,
     C_lin: np.ndarray,
@@ -607,4 +716,4 @@ def _legacy_path(
     return alpha, np.clip(F_lin, 0.0, 1.0), trimap
 
 
-__all__ = ["matte", "MattingResult"]
+__all__ = ["matte", "MattingResult", "solid_graphic_to_matting_result"]

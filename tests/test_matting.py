@@ -65,6 +65,64 @@ def test_matte_reuses_precomputed_soft_mask_without_segmenter_call():
     assert np.abs(result.alpha - alpha_gt).mean() < 0.03
 
 
+def test_matte_solid_graphic_prepass_skips_segmenter(monkeypatch):
+    h, w = 96, 112
+    image = np.full((h, w, 3), (0, 200, 0), dtype=np.uint8)
+    image[20:70, 30:82] = (220, 40, 30)
+
+    def explode_build_segmenter(*args, **kwargs):
+        raise AssertionError("solid graphic prepass should avoid building segmenter")
+
+    monkeypatch.setattr("ermbg.matting.build_segmenter", explode_build_segmenter)
+
+    result = matte(image)
+
+    assert result.debug["strategy"]["name"] == "solid_bg_graphic"
+    assert result.debug["solid_graphic"]["accepted"] is True
+    assert result.alpha[25:65, 35:77].mean() > 0.99
+    assert float(result.alpha[:8, :8].max()) == 0.0
+
+
+def test_matte_injected_segmenter_keeps_legacy_repair_path():
+    h, w = 96, 96
+    image = np.full((h, w, 3), (0, 200, 0), dtype=np.uint8)
+    image[20:76, 24:72] = (25, 80, 220)
+
+    soft = np.zeros((h, w), dtype=np.float32)
+    soft[20:46, 24:72] = 1.0
+    soft[46:76, 24:72] = 0.08
+
+    result = matte(image, segmenter=_StubSegmenter(soft), shadow_mode="on")
+
+    assert result.debug["strategy"]["name"] == "saturated_bg"
+    assert "solid_graphic" not in result.debug
+
+
+def test_matte_solid_graphic_owns_saturated_hard_edge_antialiasing(monkeypatch):
+    """Default clean solid-screen graphics should resolve hard edges before the
+    BiRefNet/keyer repair stack is involved."""
+    h, w = 96, 96
+    bg = np.array((0, 200, 0), dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    image[20:76, 20:76] = (40, 110, 230)
+    image[20:22, 20:76] = (3, 170, 20)
+    image[74:76, 20:76] = (3, 170, 20)
+    image[20:76, 20:22] = (3, 170, 20)
+    image[20:76, 74:76] = (3, 170, 20)
+
+    def explode_build_segmenter(*args, **kwargs):
+        raise AssertionError("solid graphic hard edge should not build segmenter")
+
+    monkeypatch.setattr("ermbg.matting.build_segmenter", explode_build_segmenter)
+
+    result = matte(image)
+
+    assert result.debug["strategy"]["name"] == "solid_bg_graphic"
+    assert result.alpha[28:68, 28:68].min() > 0.99
+    assert result.debug["ownership_masks"]["soft_subject_layer"][20:22, 26:70].mean() > 0.95
+    assert "saturated_hard_edge_key_resolve" not in result.debug["keyer"]
+
+
 def test_matte_repairs_pale_panel_on_known_white_background():
     """A pale colored panel on known white should be repaired from full-color
     known-B evidence, not require an external subject mask."""

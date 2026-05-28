@@ -43,6 +43,8 @@ WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
+SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
+GAME_EVAL_RUN_PREFIXES = (LOCAL_OWNERSHIP_EVAL_PREFIX, SOLID_GRAPHIC_EVAL_PREFIX)
 FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
@@ -2053,10 +2055,30 @@ def _game_eval_partial_summary_paths(root: Path) -> list[Path]:
     )
 
 
+def _solid_graphic_summary_path(root: Path) -> Path | None:
+    path = root / "summary.json"
+    if not path.is_file():
+        return None
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return None
+    batch = str(payload.get("batch", ""))
+    if root.name.startswith(SOLID_GRAPHIC_EVAL_PREFIX) or batch.startswith(f"out/{SOLID_GRAPHIC_EVAL_PREFIX}"):
+        return path
+    if payload.get("solid_graphic_prepass") is True or isinstance(payload.get("strategy_pairs"), dict):
+        return path
+    return None
+
+
 def _game_eval_root_has_data(root: Path) -> bool:
     if _game_report_path(root) is not None:
         return True
     if _game_eval_partial_summary_paths(root):
+        return True
+    if _solid_graphic_summary_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -2064,7 +2086,18 @@ def _game_eval_root_has_data(root: Path) -> bool:
 def _game_eval_root_is_complete(root: Path) -> bool:
     report_path = _game_report_path(root)
     if report_path is None:
-        return False
+        solid_path = _solid_graphic_summary_path(root)
+        if solid_path is None:
+            return False
+        report = _load_json(solid_path)
+        if not isinstance(report, dict):
+            return False
+        rows = report.get("rows")
+        case_count = report.get("case_count")
+        try:
+            return isinstance(rows, list) and len(rows) >= int(case_count or _game_eval_expected_case_count())
+        except (TypeError, ValueError):
+            return False
     report = _load_json(report_path)
     if not isinstance(report, dict):
         return False
@@ -2076,11 +2109,14 @@ def _game_eval_root_is_complete(root: Path) -> bool:
 
 def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
     out_root = PROJECT_ROOT / "out"
-    roots = [
-        path
-        for path in sorted(out_root.glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"))
-        if path.is_dir() and _game_eval_root_has_data(path)
-    ]
+    roots = []
+    for prefix in GAME_EVAL_RUN_PREFIXES:
+        roots.extend(
+            path
+            for path in sorted(out_root.glob(f"{prefix}*"))
+            if path.is_dir() and _game_eval_root_has_data(path)
+        )
+    roots = sorted(set(roots), key=lambda path: path.name, reverse=True)
     if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
         roots.insert(0, DEFAULT_GAME_EVAL_ROOT)
 
@@ -2103,7 +2139,7 @@ def _validate_game_eval_run_id(run_id: str) -> None:
         "/" in run_id
         or "\\" in run_id
         or run_id.startswith(".")
-        or not run_id.startswith(LOCAL_OWNERSHIP_EVAL_PREFIX)
+        or not any(run_id.startswith(prefix) for prefix in GAME_EVAL_RUN_PREFIXES)
     ):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
 
@@ -2299,6 +2335,13 @@ def _default_game_eval_root() -> Path:
         for path in sorted((PROJECT_ROOT / "out").glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"), reverse=True)
         if path.is_dir() and _game_eval_root_has_data(path)
     ]
+    if not roots:
+        roots = [
+            path
+            for prefix in GAME_EVAL_RUN_PREFIXES
+            for path in sorted((PROJECT_ROOT / "out").glob(f"{prefix}*"), reverse=True)
+            if path.is_dir() and _game_eval_root_has_data(path)
+        ]
     complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
     if complete_roots:
         return complete_roots[0]
@@ -2545,11 +2588,204 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
     }
 
 
+def _solid_graphic_artifact_url(branch: dict[str, object], field: str) -> str | None:
+    value = branch.get(field)
+    if not isinstance(value, str):
+        return None
+    path = Path(value)
+    if not path.is_absolute() and len(path.parts) == 1 and isinstance(branch.get("dir"), str):
+        path = Path(str(branch["dir"])) / path
+    return _image_url(path)
+
+
+def _solid_graphic_diff_url(root: Path, row: dict[str, object]) -> str | None:
+    for branch_name in ("new", "old"):
+        branch = row.get(branch_name)
+        if isinstance(branch, dict) and isinstance(branch.get("dir"), str):
+            candidate = _resolve_project_path(str(branch["dir"])).parent / "alpha_abs_diff.png"
+            if candidate.exists():
+                return _image_url(candidate)
+    sample_id = str(row.get("sample_id", ""))
+    case_id = str(row.get("case_id", ""))
+    variant = str(row.get("variant", ""))
+    if sample_id and case_id and variant:
+        return _image_url(root / f"{sample_id}_{case_id}_{variant}" / "alpha_abs_diff.png")
+    return None
+
+
+def _solid_graphic_candidate_reason(branch: dict[str, object]) -> str:
+    parts: list[str] = []
+    if isinstance(branch.get("solid_confidence"), (int, float)):
+        parts.append(f"confidence={float(branch['solid_confidence']):.3f}")
+    if isinstance(branch.get("alpha_mean"), (int, float)):
+        parts.append(f"alpha_mean={float(branch['alpha_mean']):.3f}")
+    if isinstance(branch.get("alpha_soft_fraction"), (int, float)):
+        parts.append(f"soft={float(branch['alpha_soft_fraction']):.3f}")
+    if isinstance(branch.get("elapsed_sec"), (int, float)):
+        parts.append(f"{float(branch['elapsed_sec']):.2f}s")
+    return ", ".join(parts)
+
+
+def _solid_graphic_diff_reason(diff: dict[str, object]) -> str:
+    parts: list[str] = []
+    labels = (
+        ("mean_abs", "mean"),
+        ("p95_abs", "p95"),
+        ("max_abs", "max"),
+        ("gt_05_fraction", ">0.05"),
+        ("gt_25_fraction", ">0.25"),
+    )
+    for key, label in labels:
+        value = diff.get(key)
+        if isinstance(value, (int, float)):
+            parts.append(f"{label}={float(value):.3f}")
+    return ", ".join(parts)
+
+
+def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -> dict[str, object]:
+    payload = _load_json(summary_path)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Solid graphic summary must be a JSON object.")
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=500, detail="Solid graphic summary is missing rows.")
+
+    cases: list[dict[str, object]] = []
+    ok_count = 0
+    for index, item in enumerate(rows, start=1):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "ok"))
+        is_ok = status != "error"
+        ok_count += 1 if is_ok else 0
+        case_id = str(item.get("case_id") or f"case_{index:02d}")
+        sample_id = str(item.get("sample_id") or f"G{index:02d}")
+        variant = str(item.get("variant") or _sample_variant_from_path(item.get("input")) or "green")
+        sample_code = f"{sample_id}-{variant[:1].upper()}"
+        new_branch = item.get("new") if isinstance(item.get("new"), dict) else {}
+        old_branch = item.get("old") if isinstance(item.get("old"), dict) else {}
+        if not new_branch and isinstance(item.get("outputs"), dict):
+            outputs = item["outputs"]
+            alpha_stats = item.get("alpha") if isinstance(item.get("alpha"), dict) else {}
+            solid_graphic = item.get("solid_graphic") if isinstance(item.get("solid_graphic"), dict) else {}
+            new_branch = {
+                "strategy": item.get("strategy", "solid_graphic"),
+                "solid_confidence": solid_graphic.get("confidence"),
+                "alpha_mean": alpha_stats.get("mean"),
+                "alpha_soft_fraction": alpha_stats.get("soft_fraction"),
+                "elapsed_sec": item.get("elapsed_sec"),
+                "dir": outputs.get("case_dir"),
+                "rgba": outputs.get("rgba"),
+                "ownership_counts": item.get("ownership_counts", {}),
+            }
+        diff = item.get("alpha_diff") if isinstance(item.get("alpha_diff"), dict) else {}
+        new_strategy = str(new_branch.get("strategy", "solid_graphic"))
+        old_strategy = str(old_branch.get("strategy", "fallback"))
+
+        candidates: list[dict[str, object]] = []
+        new_url = _solid_graphic_artifact_url(new_branch, "rgba")
+        if new_url:
+            candidates.append(
+                {
+                    "id": "new_solid_graphic" if old_branch else "solid_graphic",
+                    "label": f"new {new_strategy}" if old_branch else new_strategy,
+                    "selected": True,
+                    "tools": [new_strategy],
+                    "reason": _solid_graphic_candidate_reason(new_branch),
+                    "url": new_url,
+                }
+            )
+        old_url = _solid_graphic_artifact_url(old_branch, "rgba")
+        if old_url:
+            candidates.append(
+                {
+                    "id": "old_fallback",
+                    "label": "old fallback",
+                    "selected": False,
+                    "tools": [old_strategy],
+                    "reason": _solid_graphic_candidate_reason(old_branch),
+                    "url": old_url,
+                }
+            )
+        diff_url = _solid_graphic_diff_url(root, item)
+        if diff_url:
+            candidates.append(
+                {
+                    "id": "alpha_abs_diff",
+                    "label": "alpha diff",
+                    "selected": False,
+                    "tools": ["alpha_abs_diff"],
+                    "reason": _solid_graphic_diff_reason(diff),
+                    "url": diff_url,
+                }
+            )
+
+        ownership_counts = new_branch.get("ownership_counts")
+        if not isinstance(ownership_counts, dict):
+            ownership_counts = {}
+        verdict = f"{new_strategy} vs {old_strategy}" if old_branch else new_strategy
+        primary = str(item.get("primary_ambiguity", ""))
+        diff_reason = _solid_graphic_diff_reason(diff)
+        if diff_reason:
+            primary = f"{primary} · diff {diff_reason}" if primary else f"diff {diff_reason}"
+
+        cases.append(
+            {
+                "caseId": case_id,
+                "sampleId": sample_id,
+                "sampleCode": sample_code,
+                "sampleVariant": variant,
+                "runStatus": "ran" if is_ok else "error",
+                "category": "solid-graphic-compare",
+                "verdict": verdict if is_ok else status,
+                "expectedHit": is_ok,
+                "expectedAnyHit": is_ok,
+                "harmfulToolSelected": False,
+                "harmfulTools": [],
+                "shadowPolicyRequired": False,
+                "shadowPolicyHit": None,
+                "shadowCandidateCount": 0,
+                "regionCount": sum(int(value) for value in ownership_counts.values() if isinstance(value, int)),
+                "counts": ownership_counts,
+                "selectedTools": [new_strategy] if is_ok else [],
+                "primaryAmbiguity": primary,
+                "originalUrl": _image_url(item.get("input")),
+                "regionsUrl": None,
+                "matteUrl": new_url,
+                "candidates": candidates if is_ok else [],
+            }
+        )
+
+    case_count = int(payload.get("case_count", len(rows)) or len(rows))
+    progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
+    return {
+        "runId": root.name,
+        "model": "solid graphic comparison",
+        "success": f"{ok_count}/{case_count}",
+        "expectedHit": "n/a",
+        "expectedAnyHit": "n/a",
+        "harmfulTools": "0/0",
+        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str(root.relative_to(PROJECT_ROOT)),
+        "vlmRoot": str((PROJECT_ROOT / "samples" / "vlm_eval_game").relative_to(PROJECT_ROOT)),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "progress": progress,
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
 def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
     report_path = _game_report_path(root)
     if report_path is None:
         if _game_eval_partial_summary_paths(root):
             return _game_eval_data_from_partial_summaries(root)
+        solid_path = _solid_graphic_summary_path(root)
+        if solid_path is not None:
+            return _game_eval_data_from_solid_graphic_summary(root, solid_path)
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name

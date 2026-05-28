@@ -285,6 +285,75 @@ def test_game_eval_page_renders_running_partial_summary(monkeypatch, tmp_path):
     assert '"percent": 50.0' in response.text
 
 
+def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_panel"
+    sample_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
+
+    run_root = tmp_path / "out" / "solid_graphic_game9_compare_20260527"
+    case_root = run_root / "G05_ui_panel_green"
+    new_root = case_root / "new_solid_graphic"
+    old_root = case_root / "old_fallback"
+    new_root.mkdir(parents=True)
+    old_root.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(new_root / "green_rgba.png")
+    Image.new("RGBA", (8, 8), (220, 0, 0, 255)).save(old_root / "green_rgba.png")
+    Image.new("RGB", (8, 8), (20, 20, 20)).save(case_root / "alpha_abs_diff.png")
+    (run_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "batch": "out/solid_graphic_game9_compare_20260527",
+                "case_count": 1,
+                "rows": [
+                    {
+                        "sample_id": "G05",
+                        "case_id": "ui_panel",
+                        "variant": "green",
+                        "input": "samples/vlm_eval_game/ui_panel/green.png",
+                        "primary_ambiguity": "same_bg_enclosed_region",
+                        "status": "ok",
+                        "new": {
+                            "strategy": "solid_bg_graphic",
+                            "solid_confidence": 0.94,
+                            "alpha_mean": 0.4,
+                            "alpha_soft_fraction": 0.02,
+                            "dir": "out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/new_solid_graphic",
+                            "rgba": "green_rgba.png",
+                            "ownership_counts": {"opaque_subject": 64},
+                        },
+                        "old": {
+                            "strategy": "saturated_bg",
+                            "alpha_mean": 0.3,
+                            "alpha_soft_fraction": 0.08,
+                            "dir": "out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/old_fallback",
+                            "rgba": "green_rgba.png",
+                        },
+                        "alpha_diff": {"mean_abs": 0.24, "p95_abs": 0.8, "max_abs": 1.0},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", run_root)
+
+    client = TestClient(app)
+    response = client.get("/eval/game?run=solid_graphic_game9_compare_20260527")
+
+    assert response.status_code == 200
+    assert "solid_graphic_game9_compare_20260527" in response.text
+    assert "solid graphic comparison" in response.text
+    assert "new solid_bg_graphic" in response.text
+    assert "old fallback" in response.text
+    assert "alpha diff" in response.text
+    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/new_solid_graphic/green_rgba.png" in response.text
+    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/alpha_abs_diff.png" in response.text
+
+
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(

@@ -60,8 +60,24 @@ def test_matte_image_ndarray_returns_response(_force_grabcut):
     assert r.rgba.dtype == np.uint8
     assert r.alpha.shape == (128, 128)
     assert r.foreground_srgb.shape == (128, 128, 3)
-    assert r.strategy_name == "saturated_bg"
+    assert r.strategy_name == "solid_bg_graphic"
     assert r.output_dir is None
+
+
+def test_matte_image_solid_graphic_prepass_skips_segmenter(monkeypatch):
+    import ermbg.api as api
+
+    def fail_build_segmenter(**kwargs):
+        raise AssertionError("solid graphic prepass should not build a segmenter")
+
+    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(img)
+
+    assert r.strategy_name == "solid_bg_graphic"
+    assert r.report["strategy"]["name"] == "solid_bg_graphic"
+    assert r.alpha[44:86, 44:86].mean() > 0.99
 
 
 def test_matte_image_reuses_cached_segmenter(monkeypatch):
@@ -89,8 +105,8 @@ def test_matte_image_reuses_cached_segmenter(monkeypatch):
     monkeypatch.setattr(api, "build_segmenter", stub_build_segmenter)
 
     img = _solid_green_with_red_subject()
-    matte_image(img, backend="grabcut", matting_model="cache-test")
-    matte_image(img, backend="grabcut", matting_model="cache-test")
+    matte_image(img, backend="grabcut", matting_model="cache-test", solid_graphic_prepass=False)
+    matte_image(img, backend="grabcut", matting_model="cache-test", solid_graphic_prepass=False)
 
     assert len(built) == 1
     assert built[0].calls == 2
