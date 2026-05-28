@@ -23,6 +23,20 @@ def _composite(bg: np.ndarray, fg: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return io.linear_to_srgb_u8(C)
 
 
+def _rgb_neighbor_jump_percentile(image: np.ndarray, mask: np.ndarray, crop: tuple[int, int, int, int], percentile: float) -> float:
+    x0, y0, x1, y1 = crop
+    pixels = image[y0:y1, x0:x1].astype(np.float32)
+    local_mask = mask[y0:y1, x0:x1]
+    dx = np.sqrt(np.mean((pixels[:, 1:] - pixels[:, :-1]) ** 2, axis=2))
+    dy = np.sqrt(np.mean((pixels[1:, :] - pixels[:-1, :]) ** 2, axis=2))
+    mx = local_mask[:, 1:] & local_mask[:, :-1]
+    my = local_mask[1:, :] & local_mask[:-1, :]
+    values = np.concatenate([dx[mx].ravel(), dy[my].ravel()])
+    if values.size == 0:
+        return 0.0
+    return float(np.percentile(values, percentile))
+
+
 def test_crisp_graphic_on_green_uses_exterior_topology():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     image = np.broadcast_to(bg, (96, 112, 3)).copy()
@@ -174,6 +188,7 @@ def test_exterior_scalar_shadow_is_separate_from_subject_alpha():
     assert result.ownership_masks["shadow_layer"][72:84, 40:92].mean() > 0.95
     assert result.ownership_masks["opaque_subject"][30:56, 48:80].mean() > 0.99
     assert result.debug["mask_pixels"]["shadow_layer"] > 500
+    assert result.debug["exterior_shadow_feather"]["applied"] is False
     assert result.debug["shadow_luminance_reconstruction"]["max_luminance_abs_error"] < 0.002
     rgba = np.dstack(
         [
@@ -378,6 +393,66 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     )
     assert int(remaining_corner_black_arc[corner].sum()) < 20
     assert int(false_hue.sum()) < 400
+    source_preserving = result.debug["source_preserving_glass_foreground"]
+    assert source_preserving["applied"] is True
+    assert source_preserving["smooth_pixels"] > 100000
+    assert source_preserving["chroma_continuity_pixels"] > 1000
+    assert source_preserving["nearest_chroma_continuity_pixels"] > 1000
+    gap_restore = result.debug["glass_color_shifted_gap_restore"]
+    assert gap_restore["applied"] is True
+    assert gap_restore["pixels"] > 1000
+    shadow_feather = result.debug["exterior_shadow_feather"]
+    assert shadow_feather["applied"] is True
+    assert shadow_feather["added_pixels"] > 1000
+
+    rgba = np.dstack([rgba_rgb, alpha_u8])
+    on_gray = composite(rgba, (128, 128, 128))
+    subject = result.ownership_masks["soft_subject_layer"] | result.ownership_masks["opaque_subject"]
+    visible_subject = subject & (result.alpha > 0.015)
+    bottom = np.s_[int(image.shape[0] * 0.62) : int(image.shape[0] * 0.86), int(image.shape[1] * 0.08) : int(image.shape[1] * 0.94)]
+    left_corner = np.s_[int(image.shape[0] * 0.45) : int(image.shape[0] * 0.78), 0 : int(image.shape[1] * 0.48)]
+    # Broad green-screen glass should preserve the continuous source signal in
+    # premultiplied color. The threshold guards against straight-F/mask
+    # fragmentation turning the bottom rim and corner into dithered cyan/black
+    # segments after export.
+    assert _rgb_neighbor_jump_percentile(
+        on_gray,
+        visible_subject,
+        (bottom[1].start, bottom[0].start, bottom[1].stop, bottom[0].stop),
+        95,
+    ) < 38.0
+    assert _rgb_neighbor_jump_percentile(
+        on_gray,
+        visible_subject,
+        (left_corner[1].start, left_corner[0].start, left_corner[1].stop, left_corner[0].stop),
+        95,
+    ) < 37.0
+    left_lower_bend = np.s_[820:900, 130:230]
+    fg_chroma = rgba_rgb.astype(np.int16).max(axis=-1) - rgba_rgb.astype(np.int16).min(axis=-1)
+    dirty_dark_neutral = (
+        visible_subject
+        & ~result.ownership_masks["shadow_layer"]
+        & (result.alpha > 0.025)
+        & (fg_luma < 70.0)
+        & (fg_chroma < 50)
+    )
+    # Local chroma continuity should stop source-premultiplied glass evidence
+    # from reintroducing a black/grey notch where a colored refractive line is
+    # adjacent but the density-based glass context has a small gap.
+    assert int(dirty_dark_neutral[left_lower_bend].sum()) == 0
+    # Color-shifted fragments that still carry red/blue source evidence should
+    # not be punched out as background holes, while the broad center basin must
+    # remain transparent. This guards the corner-gap class without encoding a
+    # one-pixel coordinate workaround.
+    assert float(result.alpha[791:815, 149:166].mean()) > 0.30
+    assert float(result.alpha[790:840, 220:315].mean()) < 0.02
+    shadow_alpha = np.clip(result.alpha - result.subject_alpha, 0.0, 1.0)
+    shadow_tail = shadow_alpha[900:1080, 80:1180]
+    # Broad generated cast shadows should export as a continuous soft field.
+    # The p99 guard ignores deliberate contact edges and catches noisy tail
+    # support/alpha discontinuities that are obvious on white backgrounds.
+    assert float(np.percentile(np.abs(np.diff(shadow_tail, axis=1)), 99.0)) < 0.04
+    assert float(np.percentile(np.abs(np.diff(shadow_tail, axis=0)), 99.0)) < 0.05
 
 
 def test_saturated_hard_edge_antialiasing_is_soft_subject_not_shadow():

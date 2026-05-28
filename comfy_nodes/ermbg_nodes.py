@@ -87,6 +87,7 @@ def _dev_reload_ermbg_modules() -> str:
         "ermbg.keyer",
         "ermbg.despill",
         "ermbg.shadow",
+        "ermbg.solid_graphic",
         "ermbg.router",
         "ermbg.matting",
     ]
