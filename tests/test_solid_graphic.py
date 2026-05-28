@@ -468,6 +468,22 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     assert float(np.percentile(np.abs(np.diff(shadow_tail, axis=0)), 99.0)) < 0.05
 
 
+def test_same_hue_ui_panel_texture_is_opaque_material_not_transparency():
+    path = Path("samples/vlm_eval_game/ui_hard_button_soft_shadow/green.png")
+    if not path.exists():
+        pytest.skip("G02 game sample is not present")
+    image = io.load_rgb(path)
+
+    result = analyze_solid_bg_graphic(image)
+
+    h, w = image.shape[:2]
+    panel = np.s_[int(h * 0.30) : int(h * 0.58), int(w * 0.26) : int(w * 0.74)]
+    assert result.accepted is True
+    assert result.debug["promoted_internal_background_material_pixels"] > 4000
+    assert int((result.alpha[panel] < 0.80).sum()) < 4200
+    assert float(np.percentile(result.alpha[panel], 2.0)) > 0.95
+
+
 def test_saturated_hard_edge_antialiasing_is_soft_subject_not_shadow():
     """A green-screen hard edge may be scalar-darkened B, but contour topology
     says it is antialiasing owned by the subject rather than a cast shadow."""

@@ -168,6 +168,59 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
         shadow &= ~glass_internal_shadow
         hole |= glass_internal_shadow
 
+    internal_bg_material = _internal_background_colored_material_mask(image_srgb, bg, opaque_subject, soft_subject)
+    broad_glass_basin = float(hole.mean()) > 0.08 and float(soft_subject.mean()) > 0.04
+    if internal_bg_material.any() and not broad_glass_basin:
+        subject_for_edge = opaque_subject | soft_subject
+        edge_band = subject_for_edge & ndimage.binary_dilation(~subject_for_edge, iterations=3)
+        labels, n = ndimage.label(soft_subject & ~edge_band)
+        expanded_internal_material = np.zeros_like(internal_bg_material)
+        for label_id in range(1, n + 1):
+            comp = labels == label_id
+            area = int(comp.sum())
+            if area < 16:
+                continue
+            core_fraction = float((comp & internal_bg_material).sum()) / float(area)
+            opaque_neighbor = ndimage.binary_dilation(comp, iterations=2) & opaque_subject
+            neighbor_fraction = float(opaque_neighbor.sum()) / float(area)
+            # Component-level ownership proof, not a target color threshold:
+            # if a soft internal component contains a same-B-family material
+            # core and is embedded in opaque subject, the whole component is
+            # subject texture/highlight. Glass cases are excluded above by the
+            # broad-basin guard, where soft components should remain alpha.
+            if core_fraction >= 0.03 and neighbor_fraction >= 0.20:
+                expanded_internal_material |= comp
+        internal_bg_material |= expanded_internal_material
+    embedded_soft_material = np.zeros_like(soft_subject)
+    if not broad_glass_basin:
+        subject_for_edge = opaque_subject | soft_subject
+        edge_band = subject_for_edge & ndimage.binary_dilation(~subject_for_edge, iterations=3)
+        labels, n = ndimage.label(soft_subject & ~edge_band)
+        for label_id in range(1, n + 1):
+            comp = labels == label_id
+            area = int(comp.sum())
+            if area < 4:
+                continue
+            opaque_neighbor = ndimage.binary_dilation(comp, iterations=2) & opaque_subject
+            neighbor_fraction = float(opaque_neighbor.sum()) / float(area)
+            # Interior soft islands fully embedded in opaque subject are
+            # anti-aliased texture/highlight strokes on opaque UI material. They
+            # are different from edge antialiasing and from glass basins; both
+            # are excluded by the edge and broad-glass gates above.
+            if neighbor_fraction >= 0.35:
+                embedded_soft_material |= comp
+        internal_bg_material |= embedded_soft_material
+    promoted_internal_material = internal_bg_material & soft_subject
+    if promoted_internal_material.any():
+        # A sizeable same-screen-family region embedded in opaque subject
+        # material is a painted/textured UI surface, not transparency. Earlier
+        # versions only protected its RGB from known-B projection; G02 shows the
+        # ownership also has to protect alpha, otherwise the button's central
+        # highlight/texture composites as grey holes on neutral backgrounds.
+        soft_subject &= ~promoted_internal_material
+        opaque_subject |= promoted_internal_material
+        subject_alpha[promoted_internal_material] = 1.0
+
     # Background-colored enclosed openings are true holes only after the broad
     # topology/shape proof in _enclosed_hole_mask; thin same-color markings stay
     # in opaque_subject as subject-owned decoration.
@@ -196,7 +249,6 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
     C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
     B_lin = io.srgb_to_linear(np.asarray(bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
     foreground_linear = _foreground_from_known_bg(C_lin, B_lin, subject_alpha)
-    internal_bg_material = _internal_background_colored_material_mask(image_srgb, bg, opaque_subject, soft_subject)
     opaque_glass_leak = _opaque_background_family_glass_leak_mask(
         image_srgb,
         bg,
@@ -361,6 +413,8 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
             "known_background_projection_pixels": int(known_bg_projection.sum()),
             "edge_background_residual_pixels": int(known_bg_projection.sum()),
             "internal_background_material_pixels": int(internal_bg_material.sum()),
+            "promoted_internal_background_material_pixels": int(promoted_internal_material.sum()),
+            "embedded_soft_material_pixels": int(embedded_soft_material.sum()),
             "opaque_glass_leak_pixels": int(opaque_glass_leak.sum()),
             "glass_internal_shadow_reclassified_pixels": int(glass_internal_shadow.sum()),
             "glass_internal_shadow_reclassification": glass_internal_shadow_info,

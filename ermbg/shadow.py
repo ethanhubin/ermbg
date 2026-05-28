@@ -59,6 +59,19 @@ class ShadowThresholds:
     hard_plateau_fraction_min: float = 0.10
     hard_seed_alpha_p75_min: float = 0.45
     hard_support_expansion_min: float = 2.50
+    # Boundary darkening rejection separates cast/contact shadows from subject
+    # edge residue. The values are evidence-driven: true shadows can satisfy
+    # the scalar background model, but they usually extend into exterior
+    # background. Dark antialiasing, outlines, and recovery residue stay tightly
+    # glued to the subject boundary and are already represented as semi-subject
+    # alpha. Treat that combination as a counter-signal instead of a shadow.
+    boundary_residue_distance_px: float = 6.0
+    boundary_residue_near_fraction_min: float = 0.80
+    boundary_residue_alpha_overlap_min: float = 0.45
+    boundary_residue_alpha_threshold: float = 0.05
+    boundary_residue_p90_distance_max_px: float = 8.0
+    boundary_residue_expansion_min: float = 6.0
+    boundary_residue_plateau_fraction_max: float = 0.35
     field_blur_sigma: float = 5.0
     contact_distance_ratio: float = 0.035
     contact_distance_px: int = 42
@@ -212,13 +225,21 @@ def estimate_shadow_alpha(
         dist,
         thresholds=t,
     )
+    shadow_alpha, residue_info = _remove_boundary_residue_shadow(
+        shadow_alpha,
+        subject_ownership,
+        dist,
+        boundary_info,
+        thresholds=t,
+    )
+    boundary_info.update(residue_info)
 
     min_total = max(8.0, float(t.min_total_area_ratio) * img_area)
     if float((shadow_alpha > 0).sum()) < min_total:
         shadow_alpha.fill(0.0)
         rejected += len(accepted)
         accepted = []
-        reason = "below minimum total shadow area"
+        reason = residue_info.get("boundary_residue_reason") or "below minimum total shadow area"
     else:
         reason = ""
 
@@ -654,6 +675,178 @@ def _remove_small_visible_shadow_components(
         "small_visible_min_area": float(min_area),
         "small_visible_core_alpha_threshold": float(core_alpha_threshold),
     }
+
+
+def _remove_boundary_residue_shadow(
+    shadow_alpha: np.ndarray,
+    subject_alpha: np.ndarray,
+    dist_to_subject: np.ndarray,
+    boundary_info: dict[str, Any],
+    *,
+    thresholds: ShadowThresholds,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Reject outline-like scalar darkening that belongs to subject edges.
+
+    Scalar darkening alone cannot tell a cast shadow from a dark antialiased
+    outline on saturated backgrounds. A genuine shadow should own exterior
+    background pixels; boundary residue instead remains very close to the
+    subject and overlaps the current semi-transparent subject alpha. This
+    feature gate is intentionally geometry-based so it covers a class of UI and
+    graphic assets without depending on sample ids or fixed coordinates.
+    """
+    visible = shadow_alpha >= float(thresholds.min_strength)
+    visible_pixels = int(visible.sum())
+    if visible_pixels == 0:
+        return shadow_alpha.astype(np.float32), {
+            "boundary_residue_rejected": False,
+            "boundary_residue_pixels": 0,
+        }
+
+    near_px = max(1.0, float(thresholds.boundary_residue_distance_px))
+    near_fraction = float((dist_to_subject[visible] <= near_px).mean())
+    p90_distance = float(np.percentile(dist_to_subject[visible], 90.0))
+    alpha_overlap = float(
+        (subject_alpha[visible] >= float(thresholds.boundary_residue_alpha_threshold)).mean()
+    )
+    alpha_overlap_rejected = (
+        near_fraction >= float(thresholds.boundary_residue_near_fraction_min)
+        and alpha_overlap >= float(thresholds.boundary_residue_alpha_overlap_min)
+        and p90_distance <= float(thresholds.boundary_residue_p90_distance_max_px)
+    )
+    support_expansion = float(boundary_info.get("support_expansion_ratio", 0.0))
+    plateau_fraction = float(boundary_info.get("support_plateau_fraction", 1.0))
+    weak_expanded_edge_rejected = (
+        near_fraction >= 0.95
+        and p90_distance <= max(near_px, float(thresholds.boundary_residue_p90_distance_max_px))
+        and support_expansion >= float(thresholds.boundary_residue_expansion_min)
+        and plateau_fraction <= float(thresholds.boundary_residue_plateau_fraction_max)
+    )
+    rejected = alpha_overlap_rejected or weak_expanded_edge_rejected
+    info = {
+        "boundary_residue_rejected": bool(rejected),
+        "boundary_residue_pixels": visible_pixels,
+        "boundary_residue_near_fraction": near_fraction,
+        "boundary_residue_alpha_overlap_fraction": alpha_overlap,
+        "boundary_residue_p90_distance_px": p90_distance,
+        "boundary_residue_distance_px": near_px,
+        "boundary_residue_alpha_threshold": float(thresholds.boundary_residue_alpha_threshold),
+        "boundary_residue_support_expansion_ratio": support_expansion,
+        "boundary_residue_plateau_fraction": plateau_fraction,
+    }
+    if not rejected:
+        return shadow_alpha.astype(np.float32), info
+    if weak_expanded_edge_rejected:
+        clipped, clip_info = _clip_boundary_residue_to_dominant_side(
+            shadow_alpha,
+            subject_alpha,
+            visible,
+            near_px=near_px,
+        )
+        info.update(clip_info)
+        if clipped.any():
+            info["boundary_residue_reason"] = "clipped outline residue while preserving one-sided contact shadow"
+            return clipped.astype(np.float32), info
+        info["boundary_residue_reason"] = "weak expanded boundary darkening lacks cast-shadow extent"
+    else:
+        info["boundary_residue_reason"] = "outline-like boundary darkening overlaps subject alpha"
+    return np.zeros_like(shadow_alpha, dtype=np.float32), info
+
+
+def _clip_boundary_residue_to_dominant_side(
+    shadow_alpha: np.ndarray,
+    subject_alpha: np.ndarray,
+    visible: np.ndarray,
+    *,
+    near_px: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Keep a one-sided contact shadow while removing outline-like residue.
+
+    When weak scalar darkening hugs the whole boundary, the safest operation is
+    usually not to delete every pixel. Real contact shadows often survive as a
+    coherent lobe on one side of the object, while antialiasing residue appears
+    as small counts spread along other sides. This keeps the dominant exterior
+    side only when it is clearly larger than the alternatives.
+    """
+    subject = subject_alpha >= 0.50
+    if not subject.any() or not visible.any():
+        return np.zeros_like(shadow_alpha, dtype=np.float32), {
+            "boundary_residue_side_clip_used": False,
+        }
+    ys, xs = np.where(subject)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    yy, xx = np.indices(subject.shape)
+    pad = max(1, int(round(near_px)))
+    side_masks = {
+        "top": (yy < y0) & (xx >= x0 - pad) & (xx < x1 + pad),
+        "bottom": (yy >= y1) & (xx >= x0 - pad) & (xx < x1 + pad),
+        "left": (xx < x0) & (yy >= y0 - pad) & (yy < y1 + pad),
+        "right": (xx >= x1) & (yy >= y0 - pad) & (yy < y1 + pad),
+    }
+    side_counts = {side: int((visible & mask).sum()) for side, mask in side_masks.items()}
+    dominant_side, dominant_count = max(side_counts.items(), key=lambda item: item[1])
+    second_count = max((count for side, count in side_counts.items() if side != dominant_side), default=0)
+    visible_pixels = int(visible.sum())
+    dominant_fraction = float(dominant_count) / max(float(visible_pixels), 1.0)
+    dominant_ratio = float(dominant_count) / max(float(second_count), 1.0)
+    keep = side_masks[dominant_side] & (shadow_alpha > 0.0)
+    # Require a clear one-sided lobe. The fraction/ratio gates are empirical,
+    # but keyed to observable topology: contact shadows are directional,
+    # outline residue is distributed around the object.
+    used = dominant_fraction >= 0.35 and dominant_ratio >= 2.0 and dominant_count >= 8
+    if not used:
+        keep = np.zeros_like(visible, dtype=bool)
+    clipped = _smooth_clipped_contact_shadow(shadow_alpha, keep)
+    return clipped, {
+        "boundary_residue_side_clip_used": bool(used),
+        "boundary_residue_dominant_side": dominant_side,
+        "boundary_residue_side_counts": side_counts,
+        "boundary_residue_dominant_fraction": dominant_fraction,
+        "boundary_residue_dominant_ratio": dominant_ratio,
+    }
+
+
+def _smooth_clipped_contact_shadow(shadow_alpha: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """Denoise a clipped one-sided contact shadow without growing new sides.
+
+    The clipped mask deliberately keeps only the dominant side, but the raw
+    scalar measurement can be speckled by antialiasing and compression. Close
+    tiny horizontal gaps and use normalized blur inside that side-limited
+    support, so the retained contact shadow resembles the smooth source
+    darkening while still staying out of rejected outline directions.
+    """
+    if not keep.any():
+        return np.zeros_like(shadow_alpha, dtype=np.float32)
+    support = cv2.morphologyEx(
+        keep.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 3)),
+        iterations=1,
+    ).astype(bool)
+    support = cv2.dilate(
+        support.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3)),
+        iterations=1,
+    ).astype(bool)
+    support &= keep | cv2.dilate(
+        keep.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+        iterations=1,
+    ).astype(bool)
+    weighted = cv2.GaussianBlur(
+        shadow_alpha.astype(np.float32) * keep.astype(np.float32),
+        (0, 0),
+        sigmaX=3.0,
+        sigmaY=1.0,
+    )
+    weights = cv2.GaussianBlur(
+        keep.astype(np.float32),
+        (0, 0),
+        sigmaX=3.0,
+        sigmaY=1.0,
+    )
+    smoothed = np.divide(weighted, np.maximum(weights, 1e-6))
+    return np.where(support, smoothed, 0.0).astype(np.float32)
 
 
 def remove_small_display_shadow_components(

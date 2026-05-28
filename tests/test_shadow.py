@@ -232,6 +232,36 @@ def test_estimate_shadow_alpha_rejects_clean_background():
     assert float(shadow_alpha.max()) == 0.0
 
 
+def test_estimate_shadow_alpha_rejects_outline_residue_as_shadow():
+    """Dark semitransparent edge residue is not a cast shadow.
+
+    The residue satisfies the same scalar-darkening equation as a physical
+    shadow, but it is tightly glued to the subject boundary and overlaps the
+    subject's own soft alpha. That geometry identifies antialiasing/outline
+    contamination rather than exterior shadow ownership.
+    """
+    h, w = 96, 160
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    subject = np.zeros((h, w), dtype=np.float32)
+    subject[28:64, 38:122] = 1.0
+
+    residue = np.zeros((h, w), dtype=bool)
+    residue[24:28, 40:120] = True
+    residue[64:68, 40:120] = True
+    residue[30:64, 34:38] = True
+    residue[30:64, 122:126] = True
+    subject[residue] = 0.12
+    image[residue] = _scaled_background_color(bg, 0.55)
+    image[subject >= 1.0] = (230, 170, 20)
+
+    shadow_alpha, info = estimate_shadow_alpha(image, subject, tuple(int(c) for c in bg))
+
+    assert info["detected"] is False
+    assert info["boundary"]["boundary_residue_rejected"] is True
+    assert float(shadow_alpha[residue].max()) == 0.0
+
+
 def test_subject_prior_prevents_dark_subject_interior_becoming_shadow():
     h, w = 96, 128
     bg = np.array([0, 200, 0], dtype=np.uint8)
