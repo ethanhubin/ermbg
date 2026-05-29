@@ -4,7 +4,7 @@
   "category": "character",
   "white": "samples/vlm_eval_game/character_complex_fullbody/white.png",
   "green": "samples/vlm_eval_game/character_complex_fullbody/green.png",
-  "green_status": "edited_from_white_reference_bg_not_pixel_exact_allowed",
+  "green_status": "gpt_image_edit_from_white_reference_no_lock_mask_bg_not_pixel_exact_allowed",
   "backgrounds": {
     "white": [
       255,
@@ -57,11 +57,14 @@
   "generation": {
     "white_method": "codex image_gen",
     "white_source_image": "/Users/ethanhu/.codex/generated_images/019e620b-778b-70b0-abbe-adbc38754bd1/ig_042e6aabfd8ff4c9016a152365bc20819195a3353c2e7f1ecb.png",
-    "green_method": "image_edit_from_white_reference",
-    "green_prompt_goal": "Keep subject pixels/shape/materials/holes/shadows unchanged; replace only background color with #00c800.",
-    "green_background_tolerance": "non_pixel_exact_allowed"
+    "green_method": "gpt-image-1.5 image_edit_from_white_reference_no_lock_mask",
+    "green_prompt_goal": "Regenerate the full image from the white reference on green #00c800 without a lock mask so translucent materials and soft edges are handled by the model.",
+    "green_background_tolerance": "non_pixel_exact_allowed",
+    "green_force_flat_background": false,
+    "green_subject_lock_mask": false,
+    "green_regenerated": "2026-05-30"
   },
   "white_note": "Portrait canvas padded horizontally to keep both dimensions at 1024+ without resizing the subject.",
-  "green_note": "Generated from the white reference; subject preservation prioritized. Green-screen background may contain AI variation/gradients and is not expected to be pixel-exact.",
-  "green_source": "/Users/ethanhu/.codex/generated_images/019e620b-778b-70b0-abbe-adbc38754bd1/ig_0581be115044acbe016a1546bee2a48191bff4ddeb79ead85e.png"
+  "green_note": "Regenerated from the white reference with no lock mask; subject preservation and translucent material behavior are prioritized. Green-screen background may contain mild AI color variation and is not expected to be pixel-exact.",
+  "green_source": "/Users/ethanhu/Desktop/Git/ERMBG/out/g09_green_regenerate_20260530_v002/g09_green_gpt_restored_1254x1692.png"
 }
