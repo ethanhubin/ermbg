@@ -585,7 +585,7 @@ def test_real_small_ui_icon_can_use_solid_graphic_prepass():
     if not path.exists():
         pytest.skip("real regression sample is not present")
 
-    result = matte_image(str(path), backend="auto", qa=False)
+    result = matte_image(str(path), backend="grabcut", qa=False)
 
     assert result.strategy_name == "solid_bg_graphic"
     assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"
@@ -596,7 +596,7 @@ def test_real_wide_star_button_can_use_solid_graphic_prepass():
     if not path.exists():
         pytest.skip("real regression sample is not present")
 
-    result = matte_image(str(path), backend="auto", qa=False)
+    result = matte_image(str(path), backend="grabcut", qa=False)
 
     assert result.strategy_name == "solid_bg_graphic"
     assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"

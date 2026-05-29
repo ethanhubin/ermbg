@@ -46,8 +46,37 @@ DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
 SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
 COMFY_ERMBG_EVAL_PREFIX = "comfy_"
-GAME_EVAL_RUN_PREFIXES = (LOCAL_OWNERSHIP_EVAL_PREFIX, SOLID_GRAPHIC_EVAL_PREFIX, COMFY_ERMBG_EVAL_PREFIX)
+CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
+ERMBG_EVAL_PREFIX = "ermbg_"
+RMBG_EVAL_PREFIX = "rmbg_"
+GAME_EVAL_RUN_PREFIXES = (
+    LOCAL_OWNERSHIP_EVAL_PREFIX,
+    SOLID_GRAPHIC_EVAL_PREFIX,
+    COMFY_ERMBG_EVAL_PREFIX,
+    CORRIDORKEY_EVAL_PREFIX,
+    ERMBG_EVAL_PREFIX,
+    RMBG_EVAL_PREFIX,
+)
 FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
+GAME_EVAL_VARIANTS = ("green", "white", "blue")
+DEFAULT_GAME_EVAL_TEST_PATH = "corridorkey"
+GAME_EVAL_TEST_PATHS = {
+    "corridorkey": {
+        "label": "CorridorKey",
+        "backend": "comfy-corridorkey",
+        "prefix": CORRIDORKEY_EVAL_PREFIX,
+    },
+    "ermbg": {
+        "label": "ERMBG",
+        "backend": "comfy-ermbg",
+        "prefix": ERMBG_EVAL_PREFIX,
+    },
+    "rmbg": {
+        "label": "RMBG",
+        "backend": "comfy-rmbg",
+        "prefix": RMBG_EVAL_PREFIX,
+    },
+}
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
     "same_bg_enclosed_region": (0, 153, 255, 235),
@@ -123,14 +152,14 @@ def _matte_page_html() -> str:
   <style>
     :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
     header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
     h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
     .header-actions { min-width: 0; display: flex; align-items: center; gap: 14px; }
     .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
-    main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+    main { width: min(1120px, 100%); height: calc(100vh - 56px); min-height: 0; margin: 0 auto; padding: 16px 24px; display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: stretch; overflow: hidden; }
     form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
-    form { min-width: 0; padding: 16px; display: grid; gap: 12px; align-content: start; }
+    form { min-width: 0; min-height: 0; max-height: 100%; padding: 16px; display: grid; gap: 12px; align-content: start; overflow-y: auto; }
     label { display: grid; gap: 8px; font-size: 13px; font-weight: 600; color: #47524c; }
     .inline-label { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 10px; }
     input, select, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
@@ -160,18 +189,41 @@ def _matte_page_html() -> str:
     .range-labels { display: flex; justify-content: space-between; color: #6a746f; font-size: 11px; font-weight: 700; }
     .source-preview { display: none; gap: 8px; }
     .source-preview.is-visible { display: grid; }
-    .source-frame { width: 100%; aspect-ratio: 4 / 3; max-height: 360px; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; overflow: hidden; }
-    .source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
-    .source-meta { min-height: 18px; font-size: 12px; line-height: 1.35; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .preview { min-height: 520px; display: grid; grid-template-rows: 48px 1fr 104px 56px; overflow: hidden; }
+    .mask-stage { width: 100%; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+    .canvas:not(.is-mask-mode) .mask-stage { display: none; }
+    .canvas.is-mask-mode .mask-stage { display: grid; }
+    .preview-stage { width: 100%; height: 100%; min-height: 0; display: grid; place-items: center; }
+    .canvas.is-mask-mode .preview-stage { display: none; }
+    .source-frame { position: relative; width: 100%; aspect-ratio: 4 / 3; max-height: 360px; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; overflow: hidden; }
+    .source-frame img { position: absolute; z-index: 1; left: 50%; top: 50%; display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; transform: translate(-50%, -50%) scale(1); transform-origin: center center; will-change: transform; }
+    .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; }
+    .mask-overlay { position: absolute; z-index: 2; display: none; touch-action: none; cursor: crosshair; opacity: 0.62; image-rendering: pixelated; transform-origin: center center; will-change: transform; }
+    .source-frame.has-mask .mask-overlay { display: block; }
+    .preview-statuses { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+    .preview-statuses .status { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mask-toolbar { display: none; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap; min-height: 42px; padding: 5px 16px; border-bottom: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .preview.is-mask-mode .mask-toolbar { display: flex; }
+    .mask-toolbar label { display: flex; align-items: center; font-size: 12px; gap: 6px; white-space: nowrap; }
+    .mask-toolbar button { width: auto; min-height: 32px; padding: 0 10px; white-space: nowrap; }
+    .mask-tools { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap; }
+    .mask-tools > label { width: auto; flex: 0 0 auto; }
+    .mask-mode-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; }
+    .mask-mode-button { min-height: 28px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 800; }
+    .mask-mode-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
+    #mask-brush-size { width: 104px; min-height: 32px; }
+    .mask-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 104px 56px; overflow: hidden; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
-    .preview-actions { border-top: 1px solid #d9dfd7; border-bottom: 0; }
+    .preview-actions { height: 56px; min-height: 56px; max-height: 56px; border-top: 1px solid #d9dfd7; border-bottom: 0; overflow: hidden; }
+    .preview-actions a.download { flex: 0 0 auto; min-width: 128px; padding: 0 18px; white-space: nowrap; }
     .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; flex-shrink: 0; }
     .tab { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 700; }
     .tab[aria-selected="true"] { background: #196f5a; color: #ffffff; }
     .status { font-size: 13px; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .canvas, .candidate-thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); }
-    .canvas { min-height: 416px; display: grid; place-items: center; padding: 16px; overflow: hidden; touch-action: none; background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    .canvas { min-height: 0; height: 100%; display: grid; place-items: stretch; padding: 16px; overflow: hidden; touch-action: none; background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    .canvas.is-mask-mode { padding: 0; }
+    .canvas.is-mask-mode .source-frame { border: 0; border-radius: 0; }
     .canvas.has-image { cursor: grab; }
     .canvas.is-dragging { cursor: grabbing; }
     .canvas.bg-white { background: #ffffff; }
@@ -180,9 +232,12 @@ def _matte_page_html() -> str:
     .canvas.bg-green { background: #00c853; }
     .canvas.bg-blue { background: #4aa3ff; }
     img { max-width: 100%; max-height: 68vh; object-fit: contain; image-rendering: auto; }
-    .result-image { transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; }
+    .canvas img { max-width: 100%; max-height: 100%; }
+    .result-image { transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
-    .candidate-panel { min-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; }
+    .candidate-panel { height: 104px; min-height: 104px; max-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }
+    .preview.is-mask-mode .candidate-panel { display: none; min-height: 0; padding: 0; border: 0; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
     .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
     .candidate-tab { width: 92px; min-width: 92px; min-height: 76px; display: grid; grid-template-rows: 48px auto; gap: 5px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
@@ -190,7 +245,7 @@ def _matte_page_html() -> str:
     .candidate-thumb { width: 100%; height: 48px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
     .candidate-thumb img { width: 100%; height: 100%; object-fit: contain; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .preview { min-height: 420px; grid-template-rows: auto 1fr 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 312px; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } }
+    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
   </style>
 </head>
 <body>
@@ -205,16 +260,12 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <div class="source-preview" id="source-preview" aria-live="polite">
-        <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
-        <div class="source-meta" id="source-meta">未选择图片</div>
-      </div>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="comfy-corridorkey" selected>comfy-corridorkey</option><option value="comfy-ermbg">comfy-ermbg</option><option value="grabcut">grabcut</option><option value="auto">auto</option><option value="birefnet">birefnet</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>auto</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option><option value="comfy-ermbg">comfy-ermbg</option><option value="grabcut">grabcut</option><option value="birefnet">birefnet</option></select></label>
       <button id="submit" type="submit">抠图</button>
-      <details class="settings" id="corridorkey-settings">
+      <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
         <div class="settings-grid">
-          <label class="inline-label">幕布<select id="ck-screen-mode" name="corridorkey_screen_mode"><option value="auto" selected>自动</option><option value="green">绿底</option><option value="blue">蓝底</option></select></label>
+          <input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">
           <label class="inline-label">预设<select id="ck-preset" name="corridorkey_preset"><option value="auto" selected>自动</option><option value="detail_safe">细节保护</option><option value="spill_safe">强去溢色</option><option value="manual">手动参数</option></select></label>
           <label class="inline-label">色彩空间<select id="ck-gamma-space" name="corridorkey_gamma_space"><option value="sRGB" selected>sRGB</option><option value="Linear">Linear</option></select></label>
           <div class="settings-row">
@@ -225,7 +276,7 @@ def _matte_page_html() -> str:
             <label>去斑点<select id="ck-auto-despeckle" name="corridorkey_auto_despeckle"><option value="On" selected>开启</option><option value="Off">关闭</option></select></label>
             <label>斑点尺寸<input id="ck-despeckle-size" name="corridorkey_despeckle_size" type="number" min="0" max="4096" step="1" value="400"></label>
           </div>
-          <label class="check-label"><span>自动 mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
+          <label class="check-label"><span>自动 Mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
           <label class="check-label"><span>颜色保护</span><input id="ck-color-protection" name="corridorkey_color_protection" type="checkbox" checked></label>
           <div class="color-range">
             <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">8 / 16</output></div>
@@ -240,25 +291,48 @@ def _matte_page_html() -> str:
         </div>
       </details>
     </form>
-    <section class="preview" aria-label="result preview">
+    <section class="preview" id="preview-panel" aria-label="result preview">
       <div class="preview-bar">
         <strong>PNG 预览</strong>
         <div class="tabs" role="tablist" aria-label="预览背景">
-          <button class="tab" type="button" role="tab" aria-selected="true" data-bg="checker">棋盘</button>
+          <button class="tab" type="button" role="tab" aria-selected="true" data-view="mask">遮罩</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="checker">棋盘</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="white">白底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="black">黑底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="gray">灰底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="green">绿幕</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="blue">蓝底</button>
         </div>
-        <span class="status" id="status">等待上传</span>
       </div>
-      <div class="canvas" id="canvas"><span class="empty">结果会显示在这里</span></div>
+      <div class="mask-toolbar" id="mask-toolbar" aria-label="遮罩工具栏">
+        <div class="mask-tools" id="mask-tools">
+          <button id="sam-mask-button" type="button">Sam3</button>
+          <span class="mask-mode-toggle" role="group" aria-label="画笔模式">
+            <button class="mask-mode-button" type="button" aria-pressed="true" data-mask-mode="keep">保留</button>
+            <button class="mask-mode-button" type="button" aria-pressed="false" data-mask-mode="erase">擦除</button>
+          </span>
+          <label>尺寸<input id="mask-brush-size" type="range" min="4" max="96" step="1" value="28"></label>
+          <div class="mask-actions">
+            <button id="mask-clear-button" type="button">清空</button>
+          </div>
+        </div>
+      </div>
+      <div class="canvas" id="canvas">
+        <div class="preview-stage" id="preview-stage"><span class="empty">结果会显示在这里</span></div>
+        <div class="source-preview mask-stage" id="source-preview" aria-live="polite">
+          <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
+        </div>
+      </div>
       <div class="candidate-panel" aria-label="候选结果">
         <span class="candidate-title">候选</span>
         <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图"><span class="empty">候选会显示在这里</span></div>
       </div>
-      <div class="preview-actions"><span class="status" id="meta">RGBA PNG</span><a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a></div>
+      <div class="preview-actions">
+        <span class="preview-statuses">
+          <span class="status" id="status">等待上传</span>
+        </span>
+        <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
+      </div>
     </section>
   </main>
   <script>
@@ -268,58 +342,107 @@ def _matte_page_html() -> str:
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
+    const previewPanel = document.getElementById("preview-panel");
     const canvas = document.getElementById("canvas");
+    const previewStage = document.getElementById("preview-stage");
     const download = document.getElementById("download");
     const candidateList = document.getElementById("candidate-list");
-    const metaEl = document.getElementById("meta");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
-    const sourceMeta = document.getElementById("source-meta");
     const corridorSettings = document.getElementById("corridorkey-settings");
-    const corridorSettingControls = Array.from(corridorSettings.querySelectorAll("input, select"));
+    const corridorSettingControls = Array.from(document.querySelectorAll("[name^='corridorkey_']"));
+    const autoMask = document.getElementById("ck-auto-mask");
+    const samMaskButton = document.getElementById("sam-mask-button");
+    const metaEl = statusEl;
+    const sourceMeta = statusEl;
+    const samMaskStatus = statusEl;
+    const maskBrushModeButtons = Array.from(document.querySelectorAll("[data-mask-mode]"));
+    const maskBrushSize = document.getElementById("mask-brush-size");
+    const maskClearButton = document.getElementById("mask-clear-button");
     const protectRange = document.getElementById("ck-protect-range");
     const protectBg = document.getElementById("ck-protect-bg");
     const protectFg = document.getElementById("ck-protect-fg");
     const protectRangeValue = document.getElementById("ck-protect-range-value");
-    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const backgroundTabs = Array.from(document.querySelectorAll("[data-bg]"));
+    const viewTabs = Array.from(document.querySelectorAll("[data-view]"));
+    const maskToolbarControls = Array.from(document.querySelectorAll("#mask-toolbar input, #mask-toolbar select, #mask-toolbar button"));
     let sourceUrl = null;
     let candidates = [];
     let activeCandidateIndex = -1;
+    let activeView = "mask";
+    let activeBackground = "checker";
     let resultImage = null;
     let previewScale = 1;
     let previewPanX = 0;
     let previewPanY = 0;
     let dragStart = null;
+    let corridorkeyHintMaskFile = null;
+    let sourceImage = null;
+    let maskCanvas = null;
+    let maskCtx = null;
+    let samMaskImageData = null;
+    let maskPainting = false;
+    let samMaskRequestId = 0;
+    let maskBrushMode = "keep";
+    let maskScale = 1;
+    let maskPanX = 0;
+    let maskPanY = 0;
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); }
     function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
     function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
-    function setPreviewBackground(mode) { canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.bg === mode))); }
+    function syncPreviewMode() { const maskMode = activeView === "mask"; previewPanel.classList.toggle("is-mask-mode", maskMode); canvas.classList.toggle("is-mask-mode", maskMode); viewTabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.view === activeView))); backgroundTabs.forEach((tab) => tab.setAttribute("aria-selected", String(activeView === "preview" && tab.dataset.bg === activeBackground))); if (maskMode) layoutMaskCanvas(); }
+    function setPreviewView(view) { activeView = view; syncPreviewMode(); }
+    function setPreviewBackground(mode) { activeBackground = mode; activeView = "preview"; canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); syncPreviewMode(); }
     function resetPreviewTransform() { previewScale = 1; previewPanX = 0; previewPanY = 0; dragStart = null; applyPreviewTransform(); }
     function applyPreviewTransform() { if (resultImage) resultImage.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewScale})`; }
-    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); canvas.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
+    function resetMaskTransform() { maskScale = 1; maskPanX = 0; maskPanY = 0; applyMaskTransform(); }
+    function maskTransformCss() { return `translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})`; }
+    function applyMaskTransform() { const transform = maskTransformCss(); if (sourceImage) sourceImage.style.transform = transform; if (maskCanvas) maskCanvas.style.transform = transform; }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
+    function clearMaskState() { corridorkeyHintMaskFile = null; samMaskImageData = null; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
+    function layoutMaskCanvas() { if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) return; const frameRect = sourceFrame.getBoundingClientRect(); if (frameRect.width <= 0 || frameRect.height <= 0) { requestAnimationFrame(layoutMaskCanvas); return; } const fit = Math.min(frameRect.width / sourceImage.naturalWidth, frameRect.height / sourceImage.naturalHeight); if (!Number.isFinite(fit) || fit <= 0) return; const displayWidth = Math.max(1, sourceImage.naturalWidth * fit); const displayHeight = Math.max(1, sourceImage.naturalHeight * fit); const transform = maskTransformCss(); sourceImage.style.width = `${displayWidth}px`; sourceImage.style.height = `${displayHeight}px`; sourceImage.style.maxWidth = "none"; sourceImage.style.maxHeight = "none"; sourceImage.style.left = "50%"; sourceImage.style.top = "50%"; sourceImage.style.transform = transform; if (maskCanvas) { maskCanvas.style.left = "50%"; maskCanvas.style.top = "50%"; maskCanvas.style.width = `${displayWidth}px`; maskCanvas.style.height = `${displayHeight}px`; maskCanvas.style.transform = transform; } }
+    function ensureMaskCanvas(width, height) { if (!maskCanvas) { maskCanvas = document.createElement("canvas"); maskCanvas.className = "mask-overlay"; sourceFrame.appendChild(maskCanvas); maskCanvas.addEventListener("pointerdown", beginMaskPaint); maskCanvas.addEventListener("pointermove", paintMask); maskCanvas.addEventListener("pointerup", endMaskPaint); maskCanvas.addEventListener("pointercancel", endMaskPaint); } maskCanvas.width = width; maskCanvas.height = height; maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true }); layoutMaskCanvas(); }
+    function exportHintMaskFile() { return new Promise((resolve) => { if (!maskCanvas || !maskCtx) { corridorkeyHintMaskFile = null; resolve(null); return; } const width = maskCanvas.width; const height = maskCanvas.height; const pixels = maskCtx.getImageData(0, 0, width, height); const exportCanvas = document.createElement("canvas"); exportCanvas.width = width; exportCanvas.height = height; const exportCtx = exportCanvas.getContext("2d"); const out = exportCtx.createImageData(width, height); for (let i = 0; i < pixels.data.length; i += 4) { const value = pixels.data[i + 3] > 8 ? 255 : 0; out.data[i] = value; out.data[i + 1] = value; out.data[i + 2] = value; out.data[i + 3] = 255; } exportCtx.putImageData(out, 0, 0); exportCanvas.toBlob((blob) => { if (!blob) { resolve(null); return; } corridorkeyHintMaskFile = new File([blob], "edited_hint_mask.png", { type: "image/png" }); resolve(corridorkeyHintMaskFile); }, "image/png"); }); }
+    function updateHintMaskFile() { exportHintMaskFile(); }
+    function waitForSourceImage() { return new Promise((resolve, reject) => { if (!sourceImage) { reject(new Error("请先选择图片")); return; } if (sourceImage.complete && sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) { resolve(sourceImage); return; } const done = () => { cleanup(); if (sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) resolve(sourceImage); else reject(new Error("图片预览尚未载入")); }; const fail = () => { cleanup(); reject(new Error("图片预览载入失败")); }; const cleanup = () => { sourceImage.removeEventListener("load", done); sourceImage.removeEventListener("error", fail); }; sourceImage.addEventListener("load", done, { once: true }); sourceImage.addEventListener("error", fail, { once: true }); }); }
+    function loadMaskOverlay(dataUrl) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = async () => { try { setPreviewView("mask"); sourcePreview.classList.add("is-visible"); await waitForSourceImage(); const width = sourceImage && sourceImage.naturalWidth > 0 ? sourceImage.naturalWidth : img.naturalWidth; const height = sourceImage && sourceImage.naturalHeight > 0 ? sourceImage.naturalHeight : img.naturalHeight; if (width <= 0 || height <= 0) throw new Error("mask 尺寸无效"); ensureMaskCanvas(width, height); maskCtx.clearRect(0, 0, width, height); maskCtx.globalCompositeOperation = "source-over"; maskCtx.drawImage(img, 0, 0, width, height); const pixels = maskCtx.getImageData(0, 0, width, height); const data = pixels.data; for (let i = 0; i < data.length; i += 4) { const value = data[i]; data[i] = 0; data[i + 1] = 190; data[i + 2] = 255; data[i + 3] = value > 8 ? 190 : 0; } maskCtx.putImageData(pixels, 0, 0); samMaskImageData = maskCtx.getImageData(0, 0, width, height); requestAnimationFrame(() => { layoutMaskCanvas(); maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); }); updateHintMaskFile(); samMaskStatus.textContent = "已绘制 SAM3 mask"; resolve(); } catch (error) { reject(error); } }; img.onerror = () => reject(new Error("SAM3 mask 载入失败")); img.src = dataUrl; }); }
+    function canvasPoint(event) { const rect = maskCanvas.getBoundingClientRect(); return { x: ((event.clientX - rect.left) / rect.width) * maskCanvas.width, y: ((event.clientY - rect.top) / rect.height) * maskCanvas.height }; }
+    function setMaskBrushMode(mode) { maskBrushMode = mode === "erase" ? "erase" : "keep"; maskBrushModeButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.maskMode === maskBrushMode))); }
+    function drawMaskBrush(event) { if (!maskCanvas || !maskCtx) return; const p = canvasPoint(event); const radius = Number(maskBrushSize.value || 28); maskCtx.save(); maskCtx.globalCompositeOperation = maskBrushMode === "erase" ? "destination-out" : "source-over"; maskCtx.fillStyle = "rgba(0,190,255,0.62)"; maskCtx.beginPath(); maskCtx.arc(p.x, p.y, radius, 0, Math.PI * 2); maskCtx.fill(); maskCtx.restore(); updateHintMaskFile(); samMaskStatus.textContent = "edited mask"; }
+    function beginMaskPaint(event) { if (!maskCanvas) return; event.preventDefault(); event.stopPropagation(); maskPainting = true; maskCanvas.setPointerCapture(event.pointerId); drawMaskBrush(event); }
+    function paintMask(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); drawMaskBrush(event); }
+    function endMaskPaint(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); maskPainting = false; try { maskCanvas.releasePointerCapture(event.pointerId); } catch (_) {} }
     function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
-    function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); canvas.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); canvas.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); }
+    function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); setPreviewView("preview"); }
     function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
-    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "comfy-ermbg"; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
+    async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); samMaskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); samMaskStatus.textContent = "SAM3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "SAM3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; samMaskStatus.textContent = elapsed ? `已生成 SAM3 mask · ${elapsed}` : "已生成 SAM3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); samMaskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); if (autoMask.checked) generateSamMask(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); samMaskStatus.textContent = "未生成 mask"; statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); if (autoMask.checked) generateSamMask(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
     backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
     protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
     protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
-    tabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
-    canvas.addEventListener("wheel", (event) => { if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
-    canvas.addEventListener("pointerdown", (event) => { if (!resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
+    autoMask.addEventListener("change", () => { if (autoMask.checked) generateSamMask(); });
+    samMaskButton.addEventListener("click", () => generateSamMask());
+    maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
+    maskClearButton.addEventListener("click", () => { if (!maskCanvas || !maskCtx) return; maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); updateHintMaskFile(); samMaskStatus.textContent = "edited mask"; });
+    window.addEventListener("resize", () => layoutMaskCanvas());
+    viewTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewView(tab.dataset.view)));
+    backgroundTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
+    canvas.addEventListener("wheel", (event) => { if (activeView === "mask") { if (!sourceImage) return; event.preventDefault(); const rect = sourceFrame.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = maskScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; maskScale = Math.min(8, Math.max(1, maskScale * factor)); maskPanX = pointerX - ((pointerX - maskPanX) * maskScale) / previousScale; maskPanY = pointerY - ((pointerY - maskPanY) * maskScale) / previousScale; if (maskScale === 1) { maskPanX = 0; maskPanY = 0; } applyMaskTransform(); return; } if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
+    canvas.addEventListener("pointerdown", (event) => { if (activeView === "mask" || !resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
-    canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => resetPreviewTransform());
-    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => { if (activeView !== "mask") resetPreviewTransform(); });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); const hintMaskFile = backend.value === "comfy-corridorkey" ? await exportHintMaskFile() : null; if (hintMaskFile) formData.append("corridorkey_hint_mask", hintMaskFile); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
     syncColorProtectionRange();
     syncBackendSettings();
+    syncPreviewMode();
     loadPendingSlice();
   </script>
 </body>
@@ -802,12 +925,12 @@ def _matte_page_html() -> str:
       <label>
         后端
         <select id="backend" name="backend">
-          <option value="grabcut">grabcut</option>
-          <option value="comfy-ermbg" selected>comfy-ermbg</option>
+          <option value="auto" selected>auto</option>
           <option value="comfy-corridorkey">comfy-corridorkey</option>
-          <option value="auto">auto</option>
-          <option value="birefnet">birefnet</option>
           <option value="comfy-rmbg">comfy-rmbg</option>
+          <option value="comfy-ermbg">comfy-ermbg</option>
+          <option value="grabcut">grabcut</option>
+          <option value="birefnet">birefnet</option>
         </select>
       </label>
       <div class="slice-settings" id="slice-settings">
@@ -1637,6 +1760,15 @@ def _rgb_png_data_url(rgb: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _mask_png_data_url(mask: np.ndarray) -> str:
+    arr = np.clip(mask.astype(np.float32), 0.0, 1.0)
+    u8 = np.clip(arr * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(u8, mode="L").save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def _json_safe_debug(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         summary: dict[str, object] = {
@@ -1786,6 +1918,48 @@ def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, result: SliceResult) 
     }
 
 
+@app.post("/api/sam-mask")
+def sam_mask_endpoint(
+    file: Annotated[UploadFile, File()],
+    threshold: Annotated[float, Form()] = 0.5,
+    refine_iterations: Annotated[int, Form()] = 2,
+) -> dict[str, object]:
+    if not 0.0 <= threshold <= 1.0:
+        raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
+    if not 0 <= refine_iterations <= 5:
+        raise HTTPException(status_code=400, detail="refine_iterations must be between 0 and 5")
+
+    image = _load_upload_image(file)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    server_started_at = time.perf_counter()
+    try:
+        from .probe.comfyui_sam3_mask import ComfyUISAM3MaskClient
+
+        result = ComfyUISAM3MaskClient().mask(
+            image_rgb,
+            threshold=threshold,
+            refine_iterations=refine_iterations,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SAM3 mask failed: {e}") from e
+
+    return {
+        "backend": "comfy-sam3",
+        "server_elapsed_sec": time.perf_counter() - server_started_at,
+        "mask": _mask_png_data_url(result.mask),
+        "debug": _json_safe_debug(result.debug),
+    }
+
+
+def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
+    auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
+    if requested_backend == "auto" and isinstance(auto_route, dict):
+        selected = auto_route.get("selected_backend")
+        if isinstance(selected, str) and selected:
+            return selected
+    return requested_backend
+
+
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
@@ -1800,6 +1974,7 @@ def matte_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
+    effective_backend = _effective_backend(backend, result)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     selected_rgba = result.rgba
     local_ownership_used = False
@@ -1808,10 +1983,10 @@ def matte_endpoint(
             image_rgb,
             result.rgba,
             result.background_color,
-            backend=backend,
+            backend=effective_backend,
             soft_mask=result.debug.get("soft_mask"),
             shadow_mode=WEB_SHADOW_MODE,
-        ) if backend not in REMOTE_DIRECT_BACKENDS else None
+        ) if effective_backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception:
         local_candidate = None
     if local_candidate is not None:
@@ -1835,6 +2010,7 @@ def matte_endpoint(
 @app.post("/api/matte-candidates")
 def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
+    corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
     backend: Annotated[str, Form()] = "grabcut",
     corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
     corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
@@ -1868,6 +2044,7 @@ def matte_candidates_endpoint(
         raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
 
     image = _load_upload_image(file)
+    hint_mask = _load_upload_image(corridorkey_hint_mask) if corridorkey_hint_mask is not None else None
     server_started_at = time.perf_counter()
     try:
         result = matte_image(
@@ -1886,17 +2063,19 @@ def matte_candidates_endpoint(
             corridorkey_protection_fg_min=corridorkey_protection_fg_min,
             corridorkey_screen_mode=corridorkey_screen_mode,
             corridorkey_preset=corridorkey_preset,
+            corridorkey_hint_mask=hint_mask,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    if backend in REMOTE_DIRECT_BACKENDS:
+    effective_backend = _effective_backend(backend, result)
+    if effective_backend in REMOTE_DIRECT_BACKENDS:
         candidates = [
             MatteCandidate(
                 id="auto",
-                label="远端 ERMBG" if backend == "comfy-ermbg" else "远端 CorridorKey",
+                label="远端 ERMBG" if effective_backend == "comfy-ermbg" else "远端 CorridorKey",
                 rgba=result.rgba,
                 selected=True,
                 debug={"remote": result.debug},
@@ -1909,10 +2088,10 @@ def matte_candidates_endpoint(
             image_rgb,
             result.rgba,
             result.background_color,
-            backend=backend,
+            backend=effective_backend,
             soft_mask=result.debug.get("soft_mask"),
             shadow_mode=WEB_SHADOW_MODE,
-        ) if backend not in REMOTE_DIRECT_BACKENDS else None
+        ) if effective_backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception as e:
         local_candidate = None
         for candidate in candidates:
@@ -1924,7 +2103,8 @@ def matte_candidates_endpoint(
     return {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
-        "backend": backend,
+        "backend": effective_backend,
+        "requested_backend": backend,
         "server_elapsed_sec": time.perf_counter() - server_started_at,
         "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
@@ -2076,7 +2256,7 @@ def _game_sample_paths(case_id: str) -> dict[str, str]:
         if isinstance(payload, dict):
             paths = {
                 variant: path
-                for variant in ("white", "green")
+                for variant in ("white", "green", "blue")
                 if isinstance(path := payload.get(variant), str)
             }
             if paths:
@@ -2084,6 +2264,7 @@ def _game_sample_paths(case_id: str) -> dict[str, str]:
     return {
         "white": f"samples/vlm_eval_game/{case_id}/white.png",
         "green": f"samples/vlm_eval_game/{case_id}/green.png",
+        "blue": f"samples/vlm_eval_game/{case_id}/blue.png",
     }
 
 
@@ -2091,7 +2272,7 @@ def _sample_variant_from_path(path_value: object) -> str | None:
     if not isinstance(path_value, str):
         return None
     stem = Path(path_value).stem.lower()
-    if stem in {"white", "green"}:
+    if stem in {"white", "green", "blue"}:
         return stem
     return None
 
@@ -2128,12 +2309,19 @@ def _game_eval_samples() -> list[dict[str, object]]:
             continue
         sample_id = item.get("sample_id")
         sample_id = sample_id if isinstance(sample_id, str) else f"G{index:02d}"
+        sample_paths = _game_sample_paths(item["id"])
+        thumb_url = (
+            _image_url(sample_paths.get("green"))
+            or _image_url(sample_paths.get("white"))
+            or _image_url(sample_paths.get("blue"))
+        )
         samples.append(
             {
                 "sampleId": sample_id,
                 "caseId": item["id"],
                 "category": item.get("category", ""),
                 "primaryAmbiguity": item.get("primary_ambiguity", ""),
+                "thumbnailUrl": thumb_url,
                 "defaultSelected": sample_id in FAST_GAME_EVAL_SAMPLE_IDS,
             }
         )
@@ -2244,19 +2432,28 @@ def _game_eval_root_is_complete(root: Path) -> bool:
         return False
 
 
-def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
-    out_root = PROJECT_ROOT / "out"
-    roots = []
-    for prefix in GAME_EVAL_RUN_PREFIXES:
-        roots.extend(
-            path
-            for path in sorted(out_root.glob(f"{prefix}*"))
-            if path.is_dir() and _game_eval_root_has_data(path)
-        )
-    roots = sorted(set(roots), key=lambda path: path.name, reverse=True)
-    if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
-        roots.insert(0, DEFAULT_GAME_EVAL_ROOT)
+def _game_eval_root_sort_key(root: Path) -> tuple[float, str]:
+    try:
+        mtime = root.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (mtime, root.name)
 
+
+def _game_eval_data_roots() -> list[Path]:
+    out_root = PROJECT_ROOT / "out"
+    roots = [
+        path
+        for path in out_root.iterdir()
+        if path.is_dir() and _game_eval_root_has_data(path)
+    ] if out_root.exists() else []
+    if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
+        roots.append(DEFAULT_GAME_EVAL_ROOT)
+    return sorted(set(roots), key=_game_eval_root_sort_key, reverse=True)
+
+
+def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
+    roots = _game_eval_data_roots()
     selected = (selected_root or _default_game_eval_root()).resolve()
     runs: list[dict[str, object]] = []
     for root in roots:
@@ -2271,13 +2468,12 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     return runs
 
 
+def _is_valid_game_eval_run_id(run_id: str) -> bool:
+    return bool(run_id) and "/" not in run_id and "\\" not in run_id and not run_id.startswith(".")
+
+
 def _validate_game_eval_run_id(run_id: str) -> None:
-    if (
-        "/" in run_id
-        or "\\" in run_id
-        or run_id.startswith(".")
-        or not any(run_id.startswith(prefix) for prefix in GAME_EVAL_RUN_PREFIXES)
-    ):
+    if not _is_valid_game_eval_run_id(run_id):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
 
 
@@ -2286,31 +2482,33 @@ def _game_eval_run_path(run_id: str) -> Path:
     root = (PROJECT_ROOT / "out" / run_id).resolve()
     if not _is_relative_to(root, (PROJECT_ROOT / "out").resolve()):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
     return root
 
 
 def _next_game_eval_run_id(prefix: str = LOCAL_OWNERSHIP_EVAL_PREFIX) -> str:
     out_root = PROJECT_ROOT / "out"
-    version_re = re.compile(rf"^{re.escape(prefix)}(?:v)?(\d+)")
+    stamp = datetime.now().strftime("%Y%m%d")
+    version_re = re.compile(rf"^{re.escape(prefix)}{stamp}_v(\d+)$")
     versions = []
-    for path in out_root.glob(f"{prefix}*"):
+    for path in out_root.glob(f"{prefix}{stamp}_v*"):
         match = version_re.match(path.name)
         if match:
             versions.append(int(match.group(1)))
     version = max(versions, default=0) + 1
-    stamp = datetime.now().strftime("%Y%m%d")
-    return f"{LOCAL_OWNERSHIP_EVAL_PREFIX}v{version:03d}_web_{stamp}"
+    return f"{prefix}{stamp}_v{version:03d}"
 
 
-def _game_eval_expected_case_count() -> int:
+def _game_eval_expected_case_count(variants: tuple[str, ...] = GAME_EVAL_VARIANTS) -> int:
     manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
     if not manifest_path.exists():
-        return 18
+        return 9 * len(variants)
     manifest = _load_json(manifest_path)
     cases = manifest.get("cases") if isinstance(manifest, dict) else None
     if isinstance(cases, list) and cases:
-        return len(cases) * 2
-    return 18
+        return len(cases) * len(variants)
+    return 9 * len(variants)
 
 
 def _game_eval_batch_progress(
@@ -2338,7 +2536,10 @@ def _game_eval_batch_progress(
             ok = completed - errors
         if isinstance(report, dict):
             try:
-                report_total = int(report.get("case_count", 0))
+                if isinstance(runs, list) and isinstance(report.get("run_count"), int):
+                    report_total = int(report["run_count"])
+                else:
+                    report_total = int(report.get("case_count", 0))
                 total = report_total if prefer_report_total and report_total > 0 else max(total, report_total)
             except (TypeError, ValueError):
                 pass
@@ -2367,9 +2568,18 @@ def _game_eval_batch_progress(
     }
 
 
+def _game_eval_status_report_path(root: Path) -> Path | None:
+    return (
+        _game_report_path(root)
+        or _solid_graphic_summary_path(root)
+        or _comfy_ermbg_summary_path(root)
+        or _game_matte_summary_path(root)
+    )
+
+
 def _game_eval_batch_status(run_id: str) -> dict[str, object]:
     root = _game_eval_run_path(run_id)
-    report_path = _game_report_path(root)
+    report_path = _game_eval_status_report_path(root)
     with _GAME_EVAL_JOBS_LOCK:
         job = _GAME_EVAL_JOBS.get(run_id)
     process = job.get("process") if isinstance(job, dict) else None
@@ -2426,21 +2636,69 @@ def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
     return deduped
 
 
-def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, object]:
+def _selected_game_eval_variants(payload: dict[str, Any] | None) -> list[str]:
+    if not payload:
+        return list(GAME_EVAL_VARIANTS)
+    raw = payload.get("variants")
+    if raw is None:
+        return list(GAME_EVAL_VARIANTS)
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=400, detail="variants must be a list.")
+    variants = [str(item).strip().lower() for item in raw if str(item).strip()]
+    invalid = sorted(set(variants) - set(GAME_EVAL_VARIANTS))
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown variant: {', '.join(invalid)}")
+    deduped: list[str] = []
+    for variant in variants:
+        if variant not in deduped:
+            deduped.append(variant)
+    if raw and not deduped:
+        raise HTTPException(status_code=400, detail="Select at least one variant.")
+    return deduped
+
+
+def _selected_game_eval_test_path(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return DEFAULT_GAME_EVAL_TEST_PATH
+    raw = payload.get("test_path", payload.get("path", payload.get("backend")))
+    if raw is None:
+        return DEFAULT_GAME_EVAL_TEST_PATH
+    selected = str(raw).strip().lower()
+    backend_to_path = {
+        str(config["backend"]): path_key
+        for path_key, config in GAME_EVAL_TEST_PATHS.items()
+    }
+    selected = backend_to_path.get(selected, selected)
+    if selected not in GAME_EVAL_TEST_PATHS:
+        raise HTTPException(status_code=400, detail=f"Unknown test_path: {raw}")
+    return selected
+
+
+def _start_game_eval_batch(
+    sample_ids: list[str] | None = None,
+    variants: list[str] | None = None,
+    test_path: str = DEFAULT_GAME_EVAL_TEST_PATH,
+) -> dict[str, object]:
     selected_sample_ids = list(sample_ids or [])
-    run_id = _next_game_eval_run_id(LOCAL_OWNERSHIP_EVAL_PREFIX)
+    selected_variants = list(variants or GAME_EVAL_VARIANTS)
+    path_config = GAME_EVAL_TEST_PATHS.get(test_path, GAME_EVAL_TEST_PATHS[DEFAULT_GAME_EVAL_TEST_PATH])
+    backend = str(path_config["backend"])
+    run_id = _next_game_eval_run_id(str(path_config["prefix"]))
     out_dir = PROJECT_ROOT / "out" / run_id
     out_dir.mkdir(parents=True, exist_ok=False)
     log_path = out_dir / "web_batch.log"
-    script_path = PROJECT_ROOT / "scripts" / "10_local_ownership_batch.py"
+    script_path = PROJECT_ROOT / "scripts" / "run_corridorkey_game_eval.py"
     command = [
         sys.executable,
         str(script_path),
         "--out-dir",
         str(out_dir),
+        "--backend",
+        backend,
     ]
     if selected_sample_ids:
         command.extend(["--sample-id", ",".join(selected_sample_ids)])
+    command.extend(["--variants", ",".join(selected_variants)])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT)
     with log_path.open("ab") as log:
@@ -2458,35 +2716,32 @@ def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, obj
         "log": str(log_path.relative_to(PROJECT_ROOT)),
         "pid": process.pid,
         "started_at": datetime.now().isoformat(timespec="seconds"),
+        "backend": backend,
+        "test_path": test_path,
+        "test_path_label": path_config["label"],
         "sample_ids": selected_sample_ids,
+        "variants": selected_variants,
     }
     (out_dir / "web_launch.json").write_text(json.dumps(launch, indent=2, ensure_ascii=False), encoding="utf-8")
     with _GAME_EVAL_JOBS_LOCK:
         _GAME_EVAL_JOBS[run_id] = {
             "process": process,
             "log": log_path,
+            "backend": backend,
+            "test_path": test_path,
             "sample_ids": selected_sample_ids,
-            "expected_total": len(selected_sample_ids) * 2 if selected_sample_ids else _game_eval_expected_case_count(),
+            "variants": selected_variants,
+            "expected_total": (
+                len(selected_sample_ids) * len(selected_variants)
+                if selected_sample_ids
+                else _game_eval_expected_case_count(tuple(selected_variants))
+            ),
         }
     return _game_eval_batch_status(run_id)
 
 
 def _default_game_eval_root() -> Path:
-    roots = [
-        path
-        for path in sorted((PROJECT_ROOT / "out").glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"), reverse=True)
-        if path.is_dir() and _game_eval_root_has_data(path)
-    ]
-    if not roots:
-        roots = [
-            path
-            for prefix in GAME_EVAL_RUN_PREFIXES
-            for path in sorted((PROJECT_ROOT / "out").glob(f"{prefix}*"), reverse=True)
-            if path.is_dir() and _game_eval_root_has_data(path)
-        ]
-    complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
-    if complete_roots:
-        return complete_roots[0]
+    roots = _game_eval_data_roots()
     if roots:
         return roots[0]
     return DEFAULT_GAME_EVAL_ROOT
@@ -2950,7 +3205,8 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
 def _case_id_from_comfy_run(item: dict[str, object], index: int) -> tuple[str, str, str]:
     metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
     input_path = item.get("input")
-    variant = _sample_variant_from_path(input_path) or "green"
+    item_variant = item.get("sample_variant")
+    variant = str(item_variant) if isinstance(item_variant, str) and item_variant else (_sample_variant_from_path(input_path) or "green")
     sample_id = str(metadata.get("sample_id") or "")
     case_id = str(metadata.get("id") or "")
     case_label = str(item.get("case") or "")
@@ -3219,7 +3475,11 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
 
 @app.post("/eval/game/run")
 def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
-    return _start_game_eval_batch(_selected_game_eval_sample_ids(payload))
+    return _start_game_eval_batch(
+        _selected_game_eval_sample_ids(payload),
+        _selected_game_eval_variants(payload),
+        _selected_game_eval_test_path(payload),
+    )
 
 
 @app.get("/eval/game/run/{run_id}/status")
@@ -3657,7 +3917,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       width: min(720px, 100%);
       max-height: min(760px, calc(100vh - 40px));
       display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto auto auto 1fr auto;
       overflow: hidden;
       border: 1px solid #d6ddd4;
       border-radius: 8px;
@@ -3693,22 +3953,81 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       cursor: pointer;
     }}
     .eval-tools .selection-count {{ margin-left: auto; color: #53615a; font-size: 12px; font-weight: 800; }}
+    .path-tools, .variant-tools {{
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 10px 16px;
+      border-bottom: 1px solid #e2e8df;
+      color: #53615a;
+      font-size: 13px;
+      font-weight: 800;
+    }}
+    .path-tools label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+    }}
+    .path-tools select {{
+      min-width: 180px;
+      min-height: 34px;
+      padding: 0 10px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+      font: inherit;
+      font-weight: 800;
+    }}
+    .variant-option {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+    }}
+    .variant-option input {{ width: 15px; height: 15px; min-height: 0; margin: 0; }}
     .sample-list {{ min-height: 0; overflow: auto; padding: 8px 16px; }}
     .sample-option {{
       display: grid;
-      grid-template-columns: 22px 72px 1fr;
+      grid-template-columns: 22px 58px 72px;
       gap: 10px;
-      align-items: start;
-      min-height: 44px;
-      padding: 10px 0;
+      align-items: center;
+      min-height: 64px;
+      padding: 8px 0;
       border-bottom: 1px solid #edf1ea;
       color: #17201c;
       font-size: 13px;
       font-weight: 700;
     }}
     .sample-option:last-child {{ border-bottom: 0; }}
-    .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 2px 0 0; }}
-    .sample-detail {{ color: #5f6c66; font-size: 12px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }}
+    .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 0; }}
+    .sample-thumb {{
+      width: 58px;
+      height: 58px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid #cbd5c8;
+      border-radius: 6px;
+      background: #00c800;
+    }}
+    .sample-thumb img {{
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }}
+    .sample-code {{
+      margin: 0;
+      justify-content: center;
+    }}
     .eval-actions {{
       display: flex;
       justify-content: flex-end;
@@ -3791,6 +4110,21 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <button type="button" id="clear-all-samples">取消全选</button>
         <span class="selection-count" id="selection-count"></span>
       </div>
+      <div class="path-tools" aria-label="选择测试路径">
+        <label for="eval-test-path">测试路径
+          <select id="eval-test-path" name="eval-test-path">
+            <option value="corridorkey" selected>CorridorKey</option>
+            <option value="ermbg">ERMBG</option>
+            <option value="rmbg">RMBG</option>
+          </select>
+        </label>
+      </div>
+      <div class="variant-tools" aria-label="选择测试变体">
+        <span>变体</span>
+        <label class="variant-option"><input type="checkbox" name="eval-variant" value="white" checked>白底</label>
+        <label class="variant-option"><input type="checkbox" name="eval-variant" value="green" checked>绿底</label>
+        <label class="variant-option"><input type="checkbox" name="eval-variant" value="blue" checked>蓝底</label>
+      </div>
       <div class="sample-list" id="sample-list"></div>
       <div class="eval-actions">
         <button type="button" id="cancel-eval-panel">取消</button>
@@ -3839,6 +4173,8 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const batchStatusEl = document.getElementById("batch-status");
     const evalPanel = document.getElementById("eval-panel");
     const sampleList = document.getElementById("sample-list");
+    const testPathSelect = document.getElementById("eval-test-path");
+    const variantInputs = Array.from(document.querySelectorAll('input[name="eval-variant"]'));
     const selectAllSamplesButton = document.getElementById("select-all-samples");
     const clearAllSamplesButton = document.getElementById("clear-all-samples");
     const cancelEvalPanelButton = document.getElementById("cancel-eval-panel");
@@ -4016,11 +4352,20 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return sampleCheckboxes().filter((input) => input.checked).map((input) => input.value);
     }}
 
+    function selectedVariants() {{
+      return variantInputs.filter((input) => input.checked).map((input) => input.value);
+    }}
+
+    function selectedTestPath() {{
+      return testPathSelect ? testPathSelect.value : "corridorkey";
+    }}
+
     function updateSelectionCount() {{
       const selected = selectedSampleIds().length;
       const total = sampleCheckboxes().length;
-      selectionCountEl.textContent = `${{selected}}/${{total}}`;
-      confirmStartEvalButton.disabled = selected === 0;
+      const variants = selectedVariants().length;
+      selectionCountEl.textContent = `${{selected}}/${{total}} · ${{variants}} variants`;
+      confirmStartEvalButton.disabled = selected === 0 || variants === 0;
     }}
 
     function renderSampleList() {{
@@ -4034,14 +4379,21 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         checkbox.value = sample.sampleId;
         checkbox.checked = sample.defaultSelected === true;
         checkbox.addEventListener("change", updateSelectionCount);
+        const thumb = document.createElement("span");
+        thumb.className = "sample-thumb";
+        if (sample.thumbnailUrl) {{
+          const image = document.createElement("img");
+          image.src = sample.thumbnailUrl;
+          image.alt = sample.sampleId || "";
+          thumb.appendChild(image);
+        }}
         const code = document.createElement("span");
+        code.className = "sample-code";
         code.textContent = sample.sampleId;
-        const detail = document.createElement("span");
-        detail.className = "sample-detail";
-        detail.textContent = `${{sample.caseId || ""}} · ${{sample.category || ""}} · ${{sample.primaryAmbiguity || ""}}`;
+        label.title = `${{sample.sampleId || ""}} · ${{sample.caseId || ""}}`;
         label.appendChild(checkbox);
+        label.appendChild(thumb);
         label.appendChild(code);
-        label.appendChild(detail);
         sampleList.appendChild(label);
       }});
       updateSelectionCount();
@@ -4067,7 +4419,9 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
     async function startSelectedEval() {{
       const sampleIds = selectedSampleIds();
-      if (!sampleIds.length) return;
+      const variants = selectedVariants();
+      const testPath = selectedTestPath();
+      if (!sampleIds.length || !variants.length) return;
       setBatchStatus("启动中", true);
       setBatchProgress({{ percent: 0 }});
       try {{
@@ -4075,7 +4429,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         const response = await fetch("/eval/game/run", {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ sample_ids: sampleIds }}),
+          body: JSON.stringify({{ sample_ids: sampleIds, variants, test_path: testPath }}),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
@@ -4170,6 +4524,8 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     startFullEvalButton.addEventListener("click", openEvalPanel);
     selectAllSamplesButton.addEventListener("click", () => setAllSamples(true));
     clearAllSamplesButton.addEventListener("click", () => setAllSamples(false));
+    if (testPathSelect) testPathSelect.addEventListener("change", updateSelectionCount);
+    variantInputs.forEach((input) => input.addEventListener("change", updateSelectionCount));
     cancelEvalPanelButton.addEventListener("click", closeEvalPanel);
     confirmStartEvalButton.addEventListener("click", startSelectedEval);
     evalPanel.addEventListener("click", (event) => {{

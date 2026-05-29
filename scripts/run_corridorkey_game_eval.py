@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run remote CorridorKey over the game-eval green variants."""
+"""Run a remote matting backend over game-eval screen-color variants."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from ermbg.comfy import DEFAULT_COMFY_URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
+EVAL_BACKENDS = ("comfy-corridorkey", "comfy-ermbg", "comfy-rmbg")
 
 
 def _json_safe(value: Any) -> Any:
@@ -47,12 +49,82 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
+def _load_manifest(manifest_path: Path) -> dict[str, Any]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("manifest.json must contain a JSON object")
+    return payload
+
+
+def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
+    payload = _load_manifest(manifest_path)
     cases = payload.get("cases")
     if not isinstance(cases, list):
         raise ValueError("manifest.json must contain a cases list")
     return [case for case in cases if isinstance(case, dict)]
+
+
+def _next_versioned_out_dir(prefix: str) -> Path:
+    out_root = PROJECT_ROOT / "out"
+    out_root.mkdir(parents=True, exist_ok=True)
+    date = datetime.now().strftime("%Y%m%d")
+    base = f"{prefix}_{date}"
+    version = 1
+    while (out_root / f"{base}_v{version:03d}").exists():
+        version += 1
+    return out_root / f"{base}_v{version:03d}"
+
+
+def _variant_slug(variants: str) -> str:
+    items = [item.strip() for item in variants.split(",") if item.strip()]
+    return "_".join(items) if items else "screen"
+
+
+def _backend_slug(backend: str) -> str:
+    return backend.removeprefix("comfy-").replace("-", "_")
+
+
+def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
+    for src_name, dst_name in [
+        (f"{stem}_rgba.png", "rgba.png"),
+        (f"{stem}_alpha.png", "alpha.png"),
+        (f"{stem}_foreground.png", "foreground.png"),
+        (f"{stem}_shadow.png", "shadow.png"),
+        (f"{stem}_shadow_layer.png", "shadow_layer.png"),
+        (f"{stem}_shadow_physical.png", "shadow_physical.png"),
+        (f"{stem}_corridorkey_subject_rgba.png", "corridorkey_subject_rgba.png"),
+        (f"{stem}_corridorkey_subject_alpha.png", "corridorkey_subject_alpha.png"),
+        (f"{stem}_corridorkey_hint.png", "corridorkey_hint.png"),
+        (f"{stem}_corridorkey_raw_alpha.png", "corridorkey_raw_alpha.png"),
+        (f"{stem}_key_color_protection.png", "key_color_protection.png"),
+    ]:
+        src = case_dir / src_name
+        if src.exists():
+            shutil.copy2(src, case_dir / dst_name)
+
+
+def _case_outputs(case_dir: Path) -> dict[str, str]:
+    names = {
+        "input": "input.png",
+        "rgba": "rgba.png",
+        "alpha": "alpha.png",
+        "foreground": "foreground.png",
+        "shadow": "shadow.png",
+        "shadow_layer": "shadow_layer.png",
+        "shadow_physical": "shadow_physical.png",
+        "corridorkey_subject_rgba": "corridorkey_subject_rgba.png",
+        "corridorkey_subject_alpha": "corridorkey_subject_alpha.png",
+        "hint": "corridorkey_hint.png",
+        "raw_alpha": "corridorkey_raw_alpha.png",
+        "key_color_protection": "key_color_protection.png",
+        "contact_sheet": "contact_sheet.png",
+    }
+    outputs = {}
+    for key, name in names.items():
+        path = case_dir / name
+        if path.exists():
+            outputs[key] = _rel(path)
+    return outputs
 
 
 def _checker_bg(size: tuple[int, int], cell: int = 16) -> Image.Image:
@@ -135,97 +207,91 @@ def _coverage_metrics(input_path: Path, alpha_path: Path, background: tuple[int,
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    cases = _load_cases(args.manifest)
+    manifest = _load_manifest(args.manifest)
+    cases = [case for case in manifest.get("cases", []) if isinstance(case, dict)]
     if args.sample_id:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
         cases = [case for case in cases if str(case.get("sample_id", "")) in sample_ids]
+    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
+    if not variants:
+        raise ValueError("--variants must include at least one variant")
 
     out_root = args.out_dir
     out_root.mkdir(parents=True, exist_ok=True)
     runs: list[dict[str, Any]] = []
-    total = len(cases)
-    for index, case in enumerate(cases, start=1):
+    total = len(cases) * len(variants)
+    run_index = 0
+    for case_index, case in enumerate(cases, start=1):
         case_id = str(case["id"])
-        sample_id = str(case.get("sample_id") or f"G{index:02d}")
-        input_path = PROJECT_ROOT / str(case["green"])
-        case_dir = out_root / f"{sample_id}_{case_id}_green"
-        case_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(input_path, case_dir / "input.png")
-        print(f"[{index}/{total}] {sample_id}-G {case_id}", flush=True)
-        start = time.perf_counter()
-        try:
-            result = matte_image(
-                input_path,
-                backend="comfy-corridorkey",
-                output_dir=case_dir,
-                qa=False,
-                comfy_url=args.comfy_url,
-            )
-            elapsed = time.perf_counter() - start
-            stem = input_path.stem
-            for src_name, dst_name in [
-                (f"{stem}_rgba.png", "rgba.png"),
-                (f"{stem}_alpha.png", "alpha.png"),
-                (f"{stem}_foreground.png", "foreground.png"),
-                (f"{stem}_corridorkey_hint.png", "corridorkey_hint.png"),
-                (f"{stem}_corridorkey_raw_alpha.png", "corridorkey_raw_alpha.png"),
-                (f"{stem}_key_color_protection.png", "key_color_protection.png"),
-            ]:
-                src = case_dir / src_name
-                if src.exists():
-                    shutil.copy2(src, case_dir / dst_name)
-            _write_contact_sheet(case_dir)
-            background = tuple(int(c) for c in case.get("backgrounds", {}).get("green", [0, 200, 0]))
-            metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
-            summary = {
-                "status": "ok",
-                "case": f"{sample_id}_{case_id}_green",
-                "backend": "comfy-corridorkey",
-                "input": _rel(input_path),
-                "sample_variant": "green",
-                "elapsed_sec_client": elapsed,
-                "outputs": {
-                    "input": _rel(case_dir / "input.png"),
-                    "rgba": _rel(case_dir / "rgba.png"),
-                    "alpha": _rel(case_dir / "alpha.png"),
-                    "foreground": _rel(case_dir / "foreground.png"),
-                    "hint": _rel(case_dir / "corridorkey_hint.png"),
-                    "raw_alpha": _rel(case_dir / "corridorkey_raw_alpha.png"),
-                    "key_color_protection": _rel(case_dir / "key_color_protection.png"),
-                    "contact_sheet": _rel(case_dir / "contact_sheet.png"),
-                },
-                "remote_debug": _json_safe(result.debug),
-                "quality_metrics": metrics,
-                "case_metadata": case,
+        sample_id = str(case.get("sample_id") or f"G{case_index:02d}")
+        for variant in variants:
+            run_index += 1
+            if variant not in case:
+                print(f"[{run_index}/{total}] {sample_id}-{variant[:1].upper()} {case_id}: SKIP missing variant", flush=True)
+                continue
+            input_path = PROJECT_ROOT / str(case[variant])
+            case_dir = out_root / f"{sample_id}_{case_id}_{variant}"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_path, case_dir / "input.png")
+            print(f"[{run_index}/{total}] {sample_id}-{variant[:1].upper()} {case_id}", flush=True)
+            start = time.perf_counter()
+            try:
+                result = matte_image(
+                    input_path,
+                    backend=args.backend,
+                    output_dir=case_dir,
+                    qa=False,
+                    comfy_url=args.comfy_url,
+                )
+                elapsed = time.perf_counter() - start
+                stem = input_path.stem
+                _copy_backend_outputs(case_dir, stem)
+                _write_contact_sheet(case_dir)
+                background = tuple(int(c) for c in case.get("backgrounds", {}).get(variant, []))
+                if len(background) != 3:
+                    background = tuple(int(c) for c in manifest.get("backgrounds", {}).get(variant, [0, 200, 0]))
+                metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
+                summary = {
+                    "status": "ok",
+                    "case": f"{sample_id}_{case_id}_{variant}",
+                    "backend": args.backend,
+                    "input": _rel(input_path),
+                    "sample_variant": variant,
+                    "elapsed_sec_client": elapsed,
+                    "outputs": _case_outputs(case_dir),
+                    "remote_debug": _json_safe(result.debug),
+                    "quality_metrics": metrics,
+                    "case_metadata": case,
+                }
+                print(
+                    f"  alpha_mean={metrics['alpha_mean']:.3f} "
+                    f"coverage={metrics['expected_subject_alpha_coverage_gt_128']:.3f} "
+                    f"elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
+            except Exception as exc:
+                summary = {
+                    "status": "error",
+                    "case": f"{sample_id}_{case_id}_{variant}",
+                    "backend": args.backend,
+                    "input": _rel(input_path),
+                    "sample_variant": variant,
+                    "error": str(exc),
+                    "case_metadata": case,
+                }
+                print(f"  ERROR {exc}", flush=True)
+            (case_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            runs.append(summary)
+            aggregate = {
+                "backend": args.backend,
+                "batch": _rel(out_root),
+                "case_count": len(cases),
+                "run_count": len(cases) * len(variants),
+                "ok_count": sum(1 for row in runs if row.get("status") == "ok"),
+                "variants": variants,
+                "runs": runs,
             }
-            print(
-                f"  alpha_mean={metrics['alpha_mean']:.3f} "
-                f"coverage={metrics['expected_subject_alpha_coverage_gt_128']:.3f} "
-                f"elapsed={elapsed:.1f}s",
-                flush=True,
-            )
-        except Exception as exc:
-            summary = {
-                "status": "error",
-                "case": f"{sample_id}_{case_id}_green",
-                "backend": "comfy-corridorkey",
-                "input": _rel(input_path),
-                "sample_variant": "green",
-                "error": str(exc),
-                "case_metadata": case,
-            }
-            print(f"  ERROR {exc}", flush=True)
-        (case_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-        runs.append(summary)
-        aggregate = {
-            "backend": "comfy-corridorkey",
-            "batch": _rel(out_root),
-            "case_count": len(cases),
-            "ok_count": sum(1 for row in runs if row.get("status") == "ok"),
-            "variant": "green",
-            "runs": runs,
-        }
-        (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+            (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return aggregate
 
@@ -233,17 +299,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "out" / "comfy_corridorkey_game_green_20260529")
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Output batch directory. Default: out/<backend>_game_<variants>_<YYYYMMDD>_vNNN.",
+    )
+    parser.add_argument("--backend", default="comfy-corridorkey", choices=EVAL_BACKENDS)
     parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. G02,G04,G06")
+    parser.add_argument("--variants", default="green", help="Comma-separated variants from manifest, e.g. green,blue")
     parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     parser.add_argument("--subject-threshold", type=float, default=35.0)
-    summary = run(parser.parse_args())
+    args = parser.parse_args()
+    if args.out_dir is None:
+        args.out_dir = _next_versioned_out_dir(f"{_backend_slug(args.backend)}_game_{_variant_slug(args.variants)}")
+    summary = run(args)
     print(
         json.dumps(
             {
                 "batch": summary["batch"],
                 "backend": summary["backend"],
-                "case_count": summary["case_count"],
+                "run_count": summary["run_count"],
                 "ok_count": summary["ok_count"],
                 "summary": str((PROJECT_ROOT / summary["batch"] / "summary.json") if not str(summary["batch"]).startswith("/") else Path(summary["batch"]) / "summary.json"),
             },

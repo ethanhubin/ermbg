@@ -20,7 +20,7 @@ AI image model  ->  known background image  ->  ERMBG  ->  RGBA asset
 - **Known-B foreground recovery**:已知背景时用 linear-RGB unmix,不只靠经验 chroma 脚本。
 - **RGBA hygiene check**:脏透明 PNG 的白边/黑边/旧背景泄漏/硬二值 alpha 会被识别并重抠。
 - **CorridorKey game UI mainline**:游戏 UI 资产优先走远端 `comfy-corridorkey`,
-  ERMBG 负责背景/色彩分析、参数适配、mask hint、QA 和回退。
+  ERMBG 负责背景/色彩分析、参数适配、mask hint、ShadowPatch、QA 和回退。
 - **Keyer + matting 融合**:补小漏检、守住 topology、修 hard edge、对同色歧义生成候选。
 - **Local ownership 归属判断**:对 hole / soft subject / shadow-like layer 做本地多假设评分,
   默认走本地确定性证据。
@@ -141,9 +141,18 @@ COMFY_URL=http://127.0.0.1:8000
 If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
 address used by this repository.
 
-当前游戏 UI 资产主线是 **`comfy-corridorkey`**:Mac 侧负责上传、HTTP 编排、
-背景/色彩分析、参数适配和 Web 候选管理,远端 ComfyUI `CorridorKey` 节点负责
-成熟绿幕细节抠图。`comfy-ermbg` 保留为完整 ERMBG pipeline、诊断对照和回退路径。
+当前游戏 UI 资产自动路径是:蓝/绿已知幕布走 **`comfy-corridorkey` +
+ShadowPatch**,未知背景直接走 **`comfy-rmbg` fallback**。Mac 侧负责上传、
+HTTP 编排、背景/色彩分析、参数适配和 Web 候选管理,远端 ComfyUI
+`CorridorKey` 节点负责成熟绿幕细节抠图。`comfy-ermbg` 暂不进入自动路径,
+只保留为显式诊断/对照 backend。
+
+CorridorKey 路径会在远端主体层返回后运行本地 **ShadowPatch**:只有当本地
+known-background 阴影证据置信度高、且 CorridorKey 没有保留该阴影 alpha 时,
+才在主体层下方补一个独立 shadow layer。触发要保守;一旦触发,阴影支持会相对
+激进地覆盖完整软阴影尾部,最终由 CorridorKey 主体层在合成时遮住主体区域。
+这条路径不依赖 color protection 或 Hint 来救阴影。
+
 后续 Web/API 行为更新不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
 
 `comfy_nodes/` 提供:

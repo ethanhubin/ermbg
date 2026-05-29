@@ -1,9 +1,10 @@
 # Comfy ERMBG Development Workflow
 
-`comfy-ermbg` is the production matting path. The Web UI and slice-to-matte flow
-send images to the remote ComfyUI `ErmbgAutoMatte` node because local full
-matting is too slow for normal use. Treat the local Python package as the source
-implementation and the Comfy custom node as the deployed runtime wrapper.
+`comfy-ermbg` is currently a diagnostic/comparison backend, not the automatic
+production route. The Web/API automatic path routes green/blue screen assets to
+`comfy-corridorkey` plus local ShadowPatch, and unknown backgrounds directly to
+`comfy-rmbg` fallback. Treat the local Python package as the source
+implementation and the Comfy custom nodes as deployed runtime wrappers.
 
 ## What Must Move Together
 
@@ -12,7 +13,7 @@ When changing matting behavior, update and verify the whole chain:
 1. Local implementation under `ermbg/`.
 2. Comfy wrapper under `comfy_nodes/`.
 3. Remote ComfyUI custom-node install on `http://192.168.0.8:8000`.
-4. Web/API path using backend `comfy-ermbg`.
+4. Web/API path using `backend=auto`, plus explicit backend smoke where needed.
 5. Regression samples and batch summaries under `samples/` and `out/`.
 
 Do not accept a local-only pass as proof that Web is fixed. A change is not
@@ -25,7 +26,17 @@ The current game UI mainline is documented in
 [`docs/corridorkey-game-ui-plan.md`](corridorkey-game-ui-plan.md). The short
 version: use remote CorridorKey as the detail matting engine for game UI assets,
 while ERMBG provides screen/color analysis, parameter adaptation, mask hints,
-QA, Web controls, and fallback routing.
+ShadowPatch, QA, Web controls, and fallback routing. The current automatic route
+is green/blue screen -> `comfy-corridorkey` + ShadowPatch, unknown background ->
+`comfy-rmbg` fallback. `comfy-ermbg` is temporarily outside the automatic path
+and remains an explicit diagnostic/comparison backend.
+
+For `comfy-corridorkey`, local ERMBG code now owns the post-CorridorKey
+ShadowPatch step. The remote node still produces the subject layer; the Mac-side
+API measures known-background scalar darkening and composites a separate shadow
+layer underneath only when the patch gate confirms both high-confidence shadow
+evidence and missing CorridorKey shadow alpha. This route is part of the
+CorridorKey mainline, not a `comfy-ermbg` fallback.
 
 The earlier solid-background/local-ownership plan remains available in
 [`docs/solid-bg-graphic-plan.md`](solid-bg-graphic-plan.md) as historical
@@ -48,6 +59,9 @@ Good examples:
   matting recall inside the subject component."
 - "A dark region matches scalar known-background darkening and is outside
   subject ownership, so preserve it as shadow rather than opaque material."
+- "CorridorKey preserved the subject but missed a measured cast shadow, so add a
+  ShadowPatch layer underneath only when CorridorKey alpha is low over the
+  shadow support."
 
 Bad examples:
 
@@ -59,8 +73,10 @@ Bad examples:
 
 When a fix needs empirical gates, write a nearby comment that distinguishes the
 invariant from the experience-driven value, and add a focused synthetic test
-for the mechanism. For production regressions, also run the real sample through
-`backend="comfy-ermbg"` and Web smoke.
+for the mechanism. For CorridorKey ShadowPatch changes, test both the positive
+case (missing shadow gets patched below the subject) and the negative case
+(CorridorKey already preserved shadow alpha, so the patch is skipped). For
+production regressions, also run the real sample through Web smoke.
 
 ## Fast SSH Sync
 
