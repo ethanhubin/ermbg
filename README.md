@@ -19,6 +19,8 @@ AI image model  ->  known background image  ->  ERMBG  ->  RGBA asset
 - **自动路由**:干净 RGBA、绿/品红/青等饱和底、白/黑/灰底、噪声底自动分流。
 - **Known-B foreground recovery**:已知背景时用 linear-RGB unmix,不只靠经验 chroma 脚本。
 - **RGBA hygiene check**:脏透明 PNG 的白边/黑边/旧背景泄漏/硬二值 alpha 会被识别并重抠。
+- **CorridorKey game UI mainline**:游戏 UI 资产优先走远端 `comfy-corridorkey`,
+  ERMBG 负责背景/色彩分析、参数适配、mask hint、QA 和回退。
 - **Keyer + matting 融合**:补小漏检、守住 topology、修 hard edge、对同色歧义生成候选。
 - **Local ownership 归属判断**:对 hole / soft subject / shadow-like layer 做本地多假设评分,
   默认走本地确定性证据。
@@ -139,9 +141,10 @@ COMFY_URL=http://127.0.0.1:8000
 If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
 address used by this repository.
 
-正式 Web 抠图路径是 **`comfy-ermbg`**:Mac 侧负责上传、HTTP 编排和轻量诊断,
-远端 ComfyUI `ErmbgAutoMatte` 节点运行完整 ERMBG pipeline。后续算法更新
-不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
+当前游戏 UI 资产主线是 **`comfy-corridorkey`**:Mac 侧负责上传、HTTP 编排、
+背景/色彩分析、参数适配和 Web 候选管理,远端 ComfyUI `CorridorKey` 节点负责
+成熟绿幕细节抠图。`comfy-ermbg` 保留为完整 ERMBG pipeline、诊断对照和回退路径。
+后续 Web/API 行为更新不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
 
 `comfy_nodes/` 提供:
 
@@ -211,6 +214,8 @@ checker 合成、白/黑底对比和 alpha 对比。
 
 ## 文档索引
 
+- [docs/corridorkey-game-ui-plan.md](docs/corridorkey-game-ui-plan.md):
+  当前开发主线:CorridorKey 游戏 UI 工作流、自动参数适配、蓝底路线和 Web mask 兜底。
 - [docs/local-ownership.md](docs/local-ownership.md):
   当前工程接力入口:local ownership、执行层仲裁、G02/G04/G06 现状和复现命令。
 - [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md):

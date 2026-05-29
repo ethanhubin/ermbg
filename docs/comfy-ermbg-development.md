@@ -21,12 +21,16 @@ code.
 
 ## Next Algorithm Priority
 
-The next major algorithm track is documented in
-[`docs/solid-bg-graphic-plan.md`](solid-bg-graphic-plan.md). The short version:
-known solid-background graphics should become the primary path, with the
-general BiRefNet/full-matting route as fallback. For UI icons, game assets,
-buttons, badges, and other crisp assets on known solid backgrounds, decide
-ownership from known `B` plus exterior topology before computing alpha.
+The current game UI mainline is documented in
+[`docs/corridorkey-game-ui-plan.md`](corridorkey-game-ui-plan.md). The short
+version: use remote CorridorKey as the detail matting engine for game UI assets,
+while ERMBG provides screen/color analysis, parameter adaptation, mask hints,
+QA, Web controls, and fallback routing.
+
+The earlier solid-background/local-ownership plan remains available in
+[`docs/solid-bg-graphic-plan.md`](solid-bg-graphic-plan.md) as historical
+reference and fallback design material. It is no longer the primary detail
+matting roadmap for game UI assets.
 
 ## Generality Contract
 
