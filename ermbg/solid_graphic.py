@@ -753,18 +753,26 @@ def _restore_saturated_glass_color_shifted_gaps(
     )
     secondary_value = np.maximum(pixels[..., other_channels[0]], pixels[..., other_channels[1]])
     bg_close = _known_background_mask(image_srgb, bg)
+    gray = pixels.mean(axis=-1)
+    source_grad = np.hypot(ndimage.sobel(gray, axis=0), ndimage.sobel(gray, axis=1))
+    # Some refractive rim gaps are nearly the same color as B, so color-shift
+    # alone misses them and leaves dashed alpha. A local source edge next to
+    # proved glass support is still source evidence; broad flat centers have no
+    # such edge signal and remain transparent.
+    source_edge = source_grad >= 18.0
 
     dist_to_subject = ndimage.distance_transform_edt(~subject_region)
     subject_density = ndimage.uniform_filter(subject_region.astype(np.float32), size=21)
     hole_density = ndimage.uniform_filter(subject_hole.astype(np.float32), size=31)
     local_glass_context = (dist_to_subject <= 14.0) & ((subject_density >= 0.05) | (hole_density >= 0.08))
     color_shifted = (secondary_shift >= 0.28) | ((secondary_shift >= 0.20) & (secondary_value >= 52.0))
+    gap_signal = color_shifted | source_edge
     candidates = (
         (subject_hole | exterior_bg)
         & ~shadow_layer
-        & ~bg_close
+        & (~bg_close | source_edge)
         & local_glass_context
-        & color_shifted
+        & gap_signal
     )
 
     labels, n = ndimage.label(candidates)
@@ -773,11 +781,18 @@ def _restore_saturated_glass_color_shifted_gaps(
     for label_id in range(1, n + 1):
         comp = labels == label_id
         area = int(comp.sum())
-        if area < 3 or area > 1600:
+        if area < 3:
             continue
         ys, xs = np.nonzero(comp)
         width = int(xs.max() - xs.min() + 1)
         height = int(ys.max() - ys.min() + 1)
+        thin_glass_line = min(width, height) <= 14
+        # Missing refractive rim strokes can be long but remain only a few
+        # pixels thick; rejecting by area alone leaves dashed alpha cracks along
+        # the whole glass frame. Broad transparent centers are still rejected by
+        # the thickness guard below.
+        if area > (6000 if thin_glass_line else 1600):
+            continue
         if min(width, height) > 36 and area > 360:
             continue
         out |= comp
@@ -1931,7 +1946,7 @@ def _solve_saturated_glass_continuous_field(
     boundary = ndimage.binary_dilation(domain, iterations=7) & ~domain & subject_hole
     boundary_weight = boundary.astype(np.float32) * 0.55
     alpha_conf = domain_f * np.clip(alpha / 0.48, 0.22, 1.0)
-    sigma_alpha = 2.4
+    sigma_alpha = 3.0
     alpha_num = ndimage.gaussian_filter(alpha * alpha_conf, sigma=sigma_alpha)
     alpha_den = ndimage.gaussian_filter(alpha_conf + boundary_weight, sigma=sigma_alpha)
     alpha_field = alpha_num / np.maximum(alpha_den, 1e-6)
@@ -1945,7 +1960,7 @@ def _solve_saturated_glass_continuous_field(
         | ((source_luma >= 190.0) & (source_chroma >= 45.0))
         | (alpha >= 0.92)
     )
-    alpha_blend = 0.34 * np.clip((0.88 - alpha) / 0.88, 0.0, 1.0)
+    alpha_blend = 0.50 * np.clip((0.88 - alpha) / 0.88, 0.0, 1.0)
     alpha_blend[alpha_highlight_protect] *= 0.20
     alpha_write = domain & (alpha_blend > 1e-4)
 
@@ -2124,6 +2139,12 @@ def _source_preserving_saturated_glass_foreground(
     source_evidence *= np.clip((1.0 - norm_delta) / (1.0 - 0.35), 0.20, 1.0)
     projection_strength = diffusion * source_evidence
     projection_strength = ndimage.gaussian_filter(projection_strength, sigma=1.3)
+    # Do not let the diffused screen-removal field eat refractive glass color.
+    # Pure spill/background pixels stay close to the normalized B direction, but
+    # real cyan/green glass lines carry secondary-channel evidence; projecting
+    # those pixels creates the broken blue/purple cracks seen on G04 rims.
+    secondary_evidence_gate = np.clip((0.78 - norm_delta) / (0.78 - 0.22), 0.0, 1.0)
+    projection_strength *= secondary_evidence_gate.astype(np.float32)
     projection_strength[~write_mask] = 0.0
     # Bright source highlights on glass often still point partly in the screen
     # hue direction because they are refracting the saturated background. Do
@@ -2147,7 +2168,11 @@ def _source_preserving_saturated_glass_foreground(
     source_highlight_foreground_keep = source_highlight_core | (
         (source_highlight_distance <= 12.0)
         & highlight_region
-        & (source_luma >= 86.0)
+        # Keep the specular skirt only when the source still has enough light to
+        # be plausible highlight structure. Low-luma pixels that are merely
+        # green-screen-family evidence are exactly the straight-F residue that
+        # shows up as broken blue/black cracks on glass rims.
+        & (source_luma >= 122.0)
         & (source_chroma >= 34.0)
     )
     projection_strength[source_highlight_structure] = 0.0
@@ -2201,11 +2226,74 @@ def _source_preserving_saturated_glass_foreground(
     straight_f32 = straight_srgb.astype(np.float32)
     straight_chroma = straight_f32.max(axis=-1) - straight_f32.min(axis=-1)
     straight_luma = straight_f32.mean(axis=-1)
+    source_bg_residue_mask = np.zeros(alpha.shape, dtype=bool)
+    secondary_source_evidence = norm_delta >= 0.28
+    source_bg_residue_repair_seed = (
+        write_mask
+        & (alpha > 0.035)
+        & source_bg_family
+        & secondary_source_evidence
+        & (source_luma >= 72.0)
+    )
+    source_bg_residue_seed_density = ndimage.gaussian_filter(
+        source_bg_residue_repair_seed.astype(np.float32) * np.clip(alpha / 0.42, 0.25, 1.0),
+        sigma=2.2,
+    )
+    if float(source_bg_residue_seed_density.max(initial=0.0)) > 1e-5:
+        denom = np.maximum(source_bg_residue_seed_density, 1e-6)
+        local_residue_repair_color = np.empty_like(premultiplied)
+        for channel in range(3):
+            local_residue_repair_color[..., channel] = (
+                ndimage.gaussian_filter(
+                    C_lin[..., channel]
+                    * source_bg_residue_repair_seed.astype(np.float32)
+                    * np.clip(alpha / 0.42, 0.25, 1.0),
+                    sigma=2.2,
+                )
+                / denom
+            )
+        local_residue_repair_color = np.clip(local_residue_repair_color, 0.0, 1.0)
+        source_bg_residue_mask = (
+            write_mask
+            & source_bg_family
+            & ~source_highlight_foreground_keep
+            & (alpha > 0.025)
+            & (alpha < 0.86)
+            & (source_luma < 190.0)
+            & secondary_source_evidence
+            & (source_bg_residue_seed_density >= 0.018)
+        )
+        if source_bg_residue_mask.any():
+            # In broad glass, low-luma pixels that still point in the screen
+            # direction often explode into blue/purple straight foreground after
+            # inverse compositing. Repair them from the local source color field
+            # where secondary-channel evidence proves the pixel is refractive
+            # glass, not pure B. This uses the original continuous information
+            # instead of painting an invented color over the crack.
+            residue_blend = 0.90 * np.clip(source_bg_residue_seed_density / 0.12, 0.0, 1.0)
+            repaired_straight = (
+                straight_after[source_bg_residue_mask] * (1.0 - residue_blend[source_bg_residue_mask, None])
+                + local_residue_repair_color[source_bg_residue_mask]
+                * residue_blend[source_bg_residue_mask, None]
+            )
+            premultiplied[source_bg_residue_mask] = repaired_straight * alpha[source_bg_residue_mask, None]
+            straight_after[source_bg_residue_mask] = repaired_straight
+            straight_srgb = io.linear_to_srgb_u8(straight_after)
+            straight_f32 = straight_srgb.astype(np.float32)
+            straight_chroma = straight_f32.max(axis=-1) - straight_f32.min(axis=-1)
+            straight_luma = straight_f32.mean(axis=-1)
     # Projection can correctly remove screen-green but still collapse a thin
     # refractive line to neutral grey. Restore color only from nearby
     # high-chroma glass pixels in the same proved basin; this is a local
     # continuity constraint on source-owned color, not a synthetic tint.
-    chroma_seed = write_mask & (alpha >= 0.05) & (straight_chroma >= 66.0) & (straight_luma >= 85.0)
+    reliable_chroma_source = ~source_bg_family | (source_luma >= 145.0) | (alpha >= 0.70)
+    chroma_seed = (
+        write_mask
+        & reliable_chroma_source
+        & (alpha >= 0.05)
+        & (straight_chroma >= 66.0)
+        & (straight_luma >= 85.0)
+    )
     seed_weight = chroma_seed.astype(np.float32) * np.clip(alpha / 0.40, 0.25, 1.0)
     seed_density = ndimage.gaussian_filter(seed_weight, sigma=2.0)
     if float(seed_density.max(initial=0.0)) > 1e-5:
@@ -2268,7 +2356,12 @@ def _source_preserving_saturated_glass_foreground(
             )
             premultiplied[nearest_continuity_mask] = repaired_straight * alpha[nearest_continuity_mask, None]
 
-    final_write_mask = (write_mask & ~source_highlight_foreground_keep) | chroma_continuity_mask | nearest_continuity_mask
+    final_write_mask = (
+        (write_mask & ~source_highlight_foreground_keep)
+        | source_bg_residue_mask
+        | chroma_continuity_mask
+        | nearest_continuity_mask
+    )
     repaired = foreground_linear.copy()
     repaired[final_write_mask] = np.clip(
         premultiplied[final_write_mask] / np.maximum(alpha[final_write_mask, None], 1e-3),
@@ -2284,6 +2377,7 @@ def _source_preserving_saturated_glass_foreground(
         "seed_pixels": int(seed.sum()),
         "source_highlight_protected_pixels": int(source_highlight_structure.sum()),
         "source_highlight_foreground_kept_pixels": int(source_highlight_foreground_keep.sum()),
+        "source_bg_residue_repaired_pixels": int(source_bg_residue_mask.sum()),
         "chroma_continuity_pixels": int(chroma_continuity_mask.sum()),
         "nearest_chroma_continuity_pixels": int(nearest_continuity_mask.sum()),
         "mean_projection_strength": float(projection_strength[project_mask].mean()) if project_mask.any() else 0.0,

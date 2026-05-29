@@ -51,11 +51,20 @@ def test_index_serves_upload_ui():
     assert 'href="/eval/game"' in response.text
     assert 'role="tablist"' in response.text
     assert ".source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
-    assert ".source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; border:" in response.text
+    assert ".source-frame { width: 100%; aspect-ratio: 4 / 3; max-height: 360px; min-height: 148px; display: grid; place-items: center; border:" in response.text
     assert 'file.addEventListener("change", () => { if (!file.files.length) return; resetResult();' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="comfy-ermbg" selected>comfy-ermbg</option>' in response.text
+    assert '<option value="comfy-corridorkey" selected>comfy-corridorkey</option>' in response.text
+    assert '<option value="comfy-ermbg">comfy-ermbg</option>' in response.text
+    assert 'id="corridorkey-settings"' in response.text
+    assert "<summary>[设置]</summary>" in response.text
+    assert 'name="corridorkey_screen_mode"' in response.text
+    assert 'name="corridorkey_preset"' in response.text
+    assert 'name="corridorkey_despill_strength"' in response.text
+    assert 'name="corridorkey_auto_mask"' in response.text
+    assert 'name="corridorkey_protection_bg_max"' in response.text
+    assert "syncBackendSettings()" in response.text
     assert 'canvas.addEventListener("wheel"' in response.text
     assert 'canvas.addEventListener("pointerdown"' in response.text
     assert "selected: candidate.selected === true" in response.text
@@ -120,12 +129,12 @@ def test_game_eval_page_serves_result_table():
     assert '"progress": {' in response.text
     assert '"/eval/game/regions/ui_hard_button_no_shadow?variant=green' in response.text
     assert "local_ownership" in response.text
-    assert "<th class=\"regions-col\">regions</th>" in response.text
-    assert "<th class=\"preview-col\">purple</th>" in response.text
-    assert "<th class=\"preview-col\">green ref</th>" in response.text
+    assert "<th class=\"regions-col\">regions</th>" not in response.text
+    for heading in ("原图", "alpha mask", "白底", "黑底", "透明底", "绿底", "紫底", "蓝底"):
+        assert f"<th class=\"preview-col\">{heading}</th>" in response.text
     assert "<th class=\"preview-col\">gray</th>" not in response.text
-    assert "<th class=\"preview-col\">blue</th>" not in response.text
     assert 'data-bg="green"' in response.text
+    assert 'data-bg="blue"' in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
     assert "/eval/game/file/out/local_ownership_" in response.text
@@ -382,6 +391,7 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     case_root = run_root / "G05_green_remote"
     case_root.mkdir(parents=True)
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(case_root / "rgba.png")
+    Image.new("L", (8, 8), 255).save(case_root / "alpha.png")
     Image.new("RGB", (8, 8), (200, 200, 200)).save(case_root / "contact_sheet.png")
     (run_root / "summary.json").write_text(
         json.dumps(
@@ -395,6 +405,7 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
                         "elapsed_sec_client": 6.2,
                         "outputs": {
                             "rgba": "out/comfy_full_test_20260529/G05_green_remote/rgba.png",
+                            "alpha": "out/comfy_full_test_20260529/G05_green_remote/alpha.png",
                             "contact_sheet": "out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png",
                         },
                         "remote_debug": {"timings": {"total_sec": 5.1}},
@@ -422,9 +433,10 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     assert "comfy_full_test_20260529" in response.text
     assert "comfy-ermbg remote" in response.text
     assert "comfy-ermbg" in response.text
-    assert "contact sheet" in response.text
+    assert "contact sheet" not in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/rgba.png" in response.text
-    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/alpha.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png" not in response.text
 
 
 def test_game_eval_file_serves_eval_image():
@@ -609,6 +621,68 @@ def test_matte_candidates_endpoint_serializes_comfy_ermbg_debug(monkeypatch):
     ]
     assert payload["candidates"][0]["debug"]["remote"]["prompt_id"] == "prompt-1"
     assert payload["candidates"][0]["debug"]["remote"]["soft_mask"]["shape"] == [16, 16]
+
+
+def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del qa
+        captured.update(kwargs)
+        assert backend == "comfy-corridorkey"
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="comfy_corridorkey",
+            background_color=(0, 200, 0),
+            debug={"prompt_id": "prompt-ck", "color_protection": {"enabled": True}},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "comfy-corridorkey",
+            "corridorkey_gamma_space": "Linear",
+            "corridorkey_despill_strength": "0.25",
+            "corridorkey_refiner_strength": "1.5",
+            "corridorkey_auto_despeckle": "Off",
+            "corridorkey_despeckle_size": "64",
+            "corridorkey_auto_mask": "false",
+            "corridorkey_color_protection": "false",
+            "corridorkey_protection_bg_max": "6",
+            "corridorkey_protection_fg_min": "14",
+            "corridorkey_screen_mode": "blue",
+            "corridorkey_preset": "manual",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["shadow_mode"] == "on"
+    assert captured["corridorkey_gamma_space"] == "Linear"
+    assert captured["corridorkey_despill_strength"] == 0.25
+    assert captured["corridorkey_refiner_strength"] == 1.5
+    assert captured["corridorkey_auto_despeckle"] == "Off"
+    assert captured["corridorkey_despeckle_size"] == 64
+    assert captured["corridorkey_auto_mask"] is False
+    assert captured["corridorkey_color_protection"] is False
+    assert captured["corridorkey_protection_bg_max"] == 6.0
+    assert captured["corridorkey_protection_fg_min"] == 14.0
+    assert captured["corridorkey_screen_mode"] == "blue"
+    assert captured["corridorkey_preset"] == "manual"
+    payload = response.json()
+    assert payload["candidates"][0]["label"] == "远端 CorridorKey"
 
 
 def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatch):

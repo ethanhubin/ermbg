@@ -38,7 +38,8 @@ from .candidates import MatteCandidate, generate_matte_candidates
 from .local_ownership import generate_local_ownership_candidate
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
-ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet", "comfy-rmbg", "comfy-ermbg"}
+ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet", "comfy-rmbg", "comfy-ermbg", "comfy-corridorkey"}
+REMOTE_DIRECT_BACKENDS = {"comfy-ermbg", "comfy-corridorkey"}
 WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
@@ -129,17 +130,39 @@ def _matte_page_html() -> str:
     .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
     main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
     form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
-    form { min-width: 0; padding: 16px; display: grid; gap: 12px; }
+    form { min-width: 0; padding: 16px; display: grid; gap: 12px; align-content: start; }
     label { display: grid; gap: 8px; font-size: 13px; font-weight: 600; color: #47524c; }
+    .inline-label { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 10px; }
     input, select, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
     input[type="file"] { padding: 8px; }
     button, a.download { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; border: 0; border-radius: 6px; background: #196f5a; color: #ffffff; text-decoration: none; font-weight: 700; cursor: pointer; }
     button:disabled, a.download[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
-    .source-preview { display: none; gap: 10px; }
+    .settings { display: none; border: 1px solid #d9dfd7; border-radius: 6px; background: #fbfcfa; }
+    .settings.is-visible { display: block; }
+    .settings summary { min-height: 38px; display: flex; align-items: center; padding: 0 10px; color: #196f5a; font-size: 13px; font-weight: 800; cursor: pointer; user-select: none; }
+    .settings-grid { display: grid; gap: 12px; padding: 0 10px 10px; }
+    .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .settings label { font-size: 12px; gap: 6px; }
+    .check-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 38px; }
+    .check-label input { width: 18px; min-height: 18px; }
+    .color-range { display: grid; gap: 8px; padding: 8px 0 2px; }
+    .range-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 700; color: #47524c; }
+    .range-value { min-width: 58px; text-align: right; color: #196f5a; font-variant-numeric: tabular-nums; }
+    .dual-range { --range-low: 16%; --range-high: 33%; position: relative; height: 34px; }
+    .range-rail, .range-fill { position: absolute; left: 0; right: 0; top: 15px; height: 6px; border-radius: 999px; pointer-events: none; }
+    .range-rail { background: linear-gradient(90deg, #00c853 0%, #c8d28c 45%, #f2bc24 72%, #d84646 100%); opacity: 0.78; }
+    .range-fill { left: var(--range-low); right: calc(100% - var(--range-high)); background: rgba(25, 111, 90, 0.58); box-shadow: 0 0 0 1px rgba(25, 111, 90, 0.18); }
+    .dual-range input[type="range"] { position: absolute; inset: 0; width: 100%; min-height: 34px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; border: 0; pointer-events: none; }
+    .dual-range input[type="range"]::-webkit-slider-runnable-track { height: 6px; background: transparent; border: 0; }
+    .dual-range input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin-top: -6px; border: 2px solid #ffffff; border-radius: 50%; background: #196f5a; box-shadow: 0 1px 4px rgba(12, 17, 15, 0.28); pointer-events: auto; cursor: ew-resize; }
+    .dual-range input[type="range"]::-moz-range-track { height: 6px; background: transparent; border: 0; }
+    .dual-range input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 2px solid #ffffff; border-radius: 50%; background: #196f5a; box-shadow: 0 1px 4px rgba(12, 17, 15, 0.28); pointer-events: auto; cursor: ew-resize; }
+    .range-labels { display: flex; justify-content: space-between; color: #6a746f; font-size: 11px; font-weight: 700; }
+    .source-preview { display: none; gap: 8px; }
     .source-preview.is-visible { display: grid; }
-    .source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; }
+    .source-frame { width: 100%; aspect-ratio: 4 / 3; max-height: 360px; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; overflow: hidden; }
     .source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
-    .source-meta { min-height: auto; font-size: 12px; line-height: 1.4; color: #5d6862; overflow-wrap: anywhere; }
+    .source-meta { min-height: 18px; font-size: 12px; line-height: 1.35; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .preview { min-height: 520px; display: grid; grid-template-rows: 48px 1fr 104px 56px; overflow: hidden; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
     .preview-actions { border-top: 1px solid #d9dfd7; border-bottom: 0; }
@@ -167,7 +190,7 @@ def _matte_page_html() -> str:
     .candidate-thumb { width: 100%; height: 48px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
     .candidate-thumb img { width: 100%; height: 100%; object-fit: contain; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .preview { min-height: 420px; grid-template-rows: auto 1fr 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 312px; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } }
+    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .preview { min-height: 420px; grid-template-rows: auto 1fr 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 312px; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } }
   </style>
 </head>
 <body>
@@ -186,8 +209,36 @@ def _matte_page_html() -> str:
         <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
         <div class="source-meta" id="source-meta">未选择图片</div>
       </div>
-      <label>后端<select id="backend" name="backend"><option value="comfy-ermbg" selected>comfy-ermbg</option><option value="grabcut">grabcut</option><option value="auto">auto</option><option value="birefnet">birefnet</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="comfy-corridorkey" selected>comfy-corridorkey</option><option value="comfy-ermbg">comfy-ermbg</option><option value="grabcut">grabcut</option><option value="auto">auto</option><option value="birefnet">birefnet</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
       <button id="submit" type="submit">抠图</button>
+      <details class="settings" id="corridorkey-settings">
+        <summary>[设置]</summary>
+        <div class="settings-grid">
+          <label class="inline-label">幕布<select id="ck-screen-mode" name="corridorkey_screen_mode"><option value="auto" selected>自动</option><option value="green">绿底</option><option value="blue">蓝底</option></select></label>
+          <label class="inline-label">预设<select id="ck-preset" name="corridorkey_preset"><option value="auto" selected>自动</option><option value="detail_safe">细节保护</option><option value="spill_safe">强去溢色</option><option value="manual">手动参数</option></select></label>
+          <label class="inline-label">色彩空间<select id="ck-gamma-space" name="corridorkey_gamma_space"><option value="sRGB" selected>sRGB</option><option value="Linear">Linear</option></select></label>
+          <div class="settings-row">
+            <label>去溢色<input id="ck-despill" name="corridorkey_despill_strength" type="number" min="0" max="1" step="0.01" value="1"></label>
+            <label>精修强度<input id="ck-refiner" name="corridorkey_refiner_strength" type="number" min="0" max="4" step="0.1" value="1"></label>
+          </div>
+          <div class="settings-row">
+            <label>去斑点<select id="ck-auto-despeckle" name="corridorkey_auto_despeckle"><option value="On" selected>开启</option><option value="Off">关闭</option></select></label>
+            <label>斑点尺寸<input id="ck-despeckle-size" name="corridorkey_despeckle_size" type="number" min="0" max="4096" step="1" value="400"></label>
+          </div>
+          <label class="check-label"><span>自动 mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
+          <label class="check-label"><span>颜色保护</span><input id="ck-color-protection" name="corridorkey_color_protection" type="checkbox" checked></label>
+          <div class="color-range">
+            <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">8 / 16</output></div>
+            <div class="dual-range" id="ck-protect-range">
+              <span class="range-rail"></span>
+              <span class="range-fill"></span>
+              <input id="ck-protect-bg" name="corridorkey_protection_bg_max" type="range" min="0" max="64" step="0.5" value="8" aria-label="背景端点">
+              <input id="ck-protect-fg" name="corridorkey_protection_fg_min" type="range" min="0.5" max="64" step="0.5" value="16" aria-label="保护端点">
+            </div>
+            <div class="range-labels"><span>背景</span><span>过渡</span><span>保护</span></div>
+          </div>
+        </div>
+      </details>
     </form>
     <section class="preview" aria-label="result preview">
       <div class="preview-bar">
@@ -224,6 +275,12 @@ def _matte_page_html() -> str:
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
     const sourceMeta = document.getElementById("source-meta");
+    const corridorSettings = document.getElementById("corridorkey-settings");
+    const corridorSettingControls = Array.from(corridorSettings.querySelectorAll("input, select"));
+    const protectRange = document.getElementById("ck-protect-range");
+    const protectBg = document.getElementById("ck-protect-bg");
+    const protectFg = document.getElementById("ck-protect-fg");
+    const protectRangeValue = document.getElementById("ck-protect-range-value");
     const tabs = Array.from(document.querySelectorAll(".tab"));
     let sourceUrl = null;
     let candidates = [];
@@ -236,7 +293,10 @@ def _matte_page_html() -> str:
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); }
+    function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
+    function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
     function setPreviewBackground(mode) { canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.bg === mode))); }
     function resetPreviewTransform() { previewScale = 1; previewPanX = 0; previewPanY = 0; dragStart = null; applyPreviewTransform(); }
     function applyPreviewTransform() { if (resultImage) resultImage.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewScale})`; }
@@ -247,14 +307,19 @@ def _matte_page_html() -> str:
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
     function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "comfy-ermbg"; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
+    backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
+    protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
+    protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
     tabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
     canvas.addEventListener("wheel", (event) => { if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
     canvas.addEventListener("pointerdown", (event) => { if (!resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
     canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => resetPreviewTransform());
-    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    syncColorProtectionRange();
+    syncBackendSettings();
     loadPendingSlice();
   </script>
 </body>
@@ -739,6 +804,7 @@ def _matte_page_html() -> str:
         <select id="backend" name="backend">
           <option value="grabcut">grabcut</option>
           <option value="comfy-ermbg" selected>comfy-ermbg</option>
+          <option value="comfy-corridorkey">comfy-corridorkey</option>
           <option value="auto">auto</option>
           <option value="birefnet">birefnet</option>
           <option value="comfy-rmbg">comfy-rmbg</option>
@@ -1745,7 +1811,7 @@ def matte_endpoint(
             backend=backend,
             soft_mask=result.debug.get("soft_mask"),
             shadow_mode=WEB_SHADOW_MODE,
-        ) if backend != "comfy-ermbg" else None
+        ) if backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception:
         local_candidate = None
     if local_candidate is not None:
@@ -1770,24 +1836,67 @@ def matte_endpoint(
 def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
     backend: Annotated[str, Form()] = "grabcut",
+    corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
+    corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
+    corridorkey_despeckle_size: Annotated[int, Form()] = 400,
+    corridorkey_auto_mask: Annotated[bool, Form()] = False,
+    corridorkey_color_protection: Annotated[bool, Form()] = True,
+    corridorkey_protection_bg_max: Annotated[float, Form()] = 8.0,
+    corridorkey_protection_fg_min: Annotated[float, Form()] = 16.0,
+    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
+    corridorkey_preset: Annotated[str, Form()] = "auto",
 ) -> dict[str, object]:
     if backend not in ALLOWED_BACKENDS:
         raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
+    if corridorkey_gamma_space not in {"sRGB", "Linear"}:
+        raise HTTPException(status_code=400, detail="corridorkey_gamma_space must be sRGB or Linear")
+    if corridorkey_auto_despeckle not in {"On", "Off"}:
+        raise HTTPException(status_code=400, detail="corridorkey_auto_despeckle must be On or Off")
+    if corridorkey_screen_mode not in {"auto", "green", "blue"}:
+        raise HTTPException(status_code=400, detail="corridorkey_screen_mode must be auto, green, or blue")
+    if corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
+        raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
+    if not 0.0 <= corridorkey_despill_strength <= 1.0:
+        raise HTTPException(status_code=400, detail="corridorkey_despill_strength must be between 0 and 1")
+    if not 0.0 <= corridorkey_refiner_strength <= 4.0:
+        raise HTTPException(status_code=400, detail="corridorkey_refiner_strength must be between 0 and 4")
+    if not 0 <= corridorkey_despeckle_size <= 4096:
+        raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
+    if corridorkey_protection_fg_min <= corridorkey_protection_bg_max:
+        raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
 
     image = _load_upload_image(file)
     server_started_at = time.perf_counter()
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode=WEB_SHADOW_MODE)
+        result = matte_image(
+            image,
+            backend=backend,
+            qa=False,
+            shadow_mode=WEB_SHADOW_MODE,
+            corridorkey_gamma_space=corridorkey_gamma_space,
+            corridorkey_despill_strength=corridorkey_despill_strength,
+            corridorkey_refiner_strength=corridorkey_refiner_strength,
+            corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+            corridorkey_despeckle_size=corridorkey_despeckle_size,
+            corridorkey_auto_mask=corridorkey_auto_mask,
+            corridorkey_color_protection=corridorkey_color_protection,
+            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    if backend == "comfy-ermbg":
+    if backend in REMOTE_DIRECT_BACKENDS:
         candidates = [
             MatteCandidate(
                 id="auto",
-                label="远端 ERMBG",
+                label="远端 ERMBG" if backend == "comfy-ermbg" else "远端 CorridorKey",
                 rgba=result.rgba,
                 selected=True,
                 debug={"remote": result.debug},
@@ -1803,7 +1912,7 @@ def matte_candidates_endpoint(
             backend=backend,
             soft_mask=result.debug.get("soft_mask"),
             shadow_mode=WEB_SHADOW_MODE,
-        ) if backend != "comfy-ermbg" else None
+        ) if backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception as e:
         local_candidate = None
         for candidate in candidates:
@@ -2087,7 +2196,7 @@ def _comfy_ermbg_summary_path(root: Path) -> Path | None:
     if root.name.startswith(COMFY_ERMBG_EVAL_PREFIX):
         return path
     for item in runs:
-        if isinstance(item, dict) and item.get("backend") == "comfy-ermbg":
+        if isinstance(item, dict) and str(item.get("backend", "")).startswith("comfy-"):
             return path
     return None
 
@@ -2447,6 +2556,27 @@ def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, objec
     return _image_url(matches[0]) if matches else None
 
 
+def _case_alpha_url(out_dir: Path, sample_variant: str, summary: dict[str, object]) -> str | None:
+    for value in (summary.get("alpha"), summary.get("mask")):
+        if isinstance(value, str):
+            url = _image_url(value)
+            if url:
+                return url
+    for name in (f"{sample_variant}_alpha.png", "alpha.png", "mask.png"):
+        url = _image_url(out_dir / name)
+        if url:
+            return url
+    matches = sorted(out_dir.glob("*_alpha.png"))
+    return _image_url(matches[0]) if matches else None
+
+
+def _sibling_image_url(path_value: object, filename: str) -> str | None:
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    path = _resolve_project_path(path_value)
+    return _image_url(path.with_name(filename))
+
+
 def _game_region_url(root: Path, case_id: str, sample_variant: str | None = None) -> str:
     base = f"/eval/game/regions/{quote(case_id, safe='')}"
     params: list[str] = []
@@ -2479,6 +2609,7 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
         shadow_pixels = int(row.get("shadow_pixels", 0) or 0)
         strategy = str(row.get("strategy", ""))
         matte_url = _case_matte_url(out_dir, active_variant, row)
+        alpha_url = _case_alpha_url(out_dir, active_variant, row)
         candidate = {
             "id": "matte",
             "label": "matte result",
@@ -2507,6 +2638,7 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
                     "primaryAmbiguity": f"shadow mean={float(row.get('shadow_mean_alpha', 0.0) or 0.0):.3f}, p95={float(row.get('shadow_p95_alpha', 0.0) or 0.0):.3f}" if is_active_run else "",
                     "originalUrl": _image_url(sample_path),
                     "regionsUrl": None,
+                    "alphaUrl": alpha_url if is_active_run else None,
                     "matteUrl": matte_url if is_active_run else None,
                     "candidates": [candidate] if is_active_run and matte_url else [],
                 }
@@ -2560,6 +2692,7 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
             if isinstance(role, str)
         )
         preview_path = row.get("protected_rgba") or row.get("rgba")
+        alpha_url = _sibling_image_url(preview_path, "alpha.png")
         candidates = []
         if is_ok and preview_path:
             candidates.append(
@@ -2595,6 +2728,7 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
                 "primaryAmbiguity": row.get("expected_role", row.get("error", "")),
                 "originalUrl": _image_url(sample_path),
                 "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_ok else None,
+                "alphaUrl": alpha_url if is_ok else None,
                 "matteUrl": _image_url(preview_path) if is_ok else None,
                 "candidates": candidates,
             }
@@ -2717,6 +2851,7 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
 
         candidates: list[dict[str, object]] = []
         new_url = _solid_graphic_artifact_url(new_branch, "rgba")
+        new_alpha_url = _solid_graphic_artifact_url(new_branch, "alpha")
         if new_url:
             candidates.append(
                 {
@@ -2784,6 +2919,7 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
                 "primaryAmbiguity": primary,
                 "originalUrl": _image_url(item.get("input")),
                 "regionsUrl": None,
+                "alphaUrl": new_alpha_url,
                 "matteUrl": new_url,
                 "candidates": candidates if is_ok else [],
             }
@@ -2854,7 +2990,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
         remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
         timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}
-        strategy = "comfy-ermbg"
+        strategy = str(item.get("backend") or "comfy-ermbg")
         elapsed = item.get("elapsed_sec_client")
         alpha_mean = metrics.get("alpha_mean")
         alpha_pixels = metrics.get("alpha_nonzero_pixels")
@@ -2868,31 +3004,19 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         if isinstance(alpha_pixels, int):
             reason_parts.append(f"alpha_px={alpha_pixels}")
         candidate_url = _image_url(outputs.get("rgba"))
+        alpha_url = _image_url(outputs.get("alpha")) or _sibling_image_url(outputs.get("rgba"), "alpha.png")
         candidates = []
         if is_ok and candidate_url:
             candidates.append(
                 {
-                    "id": "comfy_ermbg",
-                    "label": "comfy-ermbg",
+                    "id": strategy.replace("-", "_"),
+                    "label": strategy,
                     "selected": True,
                     "tools": [strategy],
                     "reason": ", ".join(reason_parts),
                     "url": candidate_url,
                 }
             )
-        contact_url = _image_url(outputs.get("contact_sheet"))
-        if is_ok and contact_url:
-            candidates.append(
-                {
-                    "id": "contact_sheet",
-                    "label": "contact sheet",
-                    "selected": False,
-                    "tools": ["qa"],
-                    "reason": "input / foreground / alpha / composites",
-                    "url": contact_url,
-                }
-            )
-
         sample_paths = _game_sample_paths(case_id)
         sample_path = sample_paths.get(variant) or str(item.get("input", ""))
         cases.append(
@@ -2902,7 +3026,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
                 "sampleCode": f"{sample_id}-{variant[:1].upper()}",
                 "sampleVariant": variant,
                 "runStatus": "ran" if is_ok else "error",
-                "category": metadata.get("category", "comfy-ermbg"),
+                "category": metadata.get("category", strategy),
                 "verdict": strategy if is_ok else status,
                 "expectedHit": is_ok,
                 "expectedAnyHit": is_ok,
@@ -2917,6 +3041,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
                 "primaryAmbiguity": metadata.get("primary_ambiguity", ""),
                 "originalUrl": _image_url(sample_path),
                 "regionsUrl": None,
+                "alphaUrl": alpha_url if is_ok else None,
                 "matteUrl": candidate_url if is_ok else None,
                 "candidates": candidates,
             }
@@ -2925,7 +3050,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
     progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
     return {
         "runId": root.name,
-        "model": "comfy-ermbg remote",
+        "model": f"{str(payload.get('backend') or (runs[0].get('backend') if runs and isinstance(runs[0], dict) else 'comfy-ermbg'))} remote",
         "success": f"{ok_count}/{len(runs)}",
         "expectedHit": f"{ok_count}/{len(runs)}",
         "expectedAnyHit": f"{ok_count}/{len(runs)}",
@@ -3064,6 +3189,7 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "primaryAmbiguity": row.get("primary_ambiguity", row.get("expected_role", "")),
                     "originalUrl": _image_url(sample_path),
                     "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_active_run else None,
+                    "alphaUrl": _case_alpha_url(out_dir, active_variant, summary) if is_active_run else None,
                     "matteUrl": _image_url(summary.get("rgba") or row.get("protected_rgba") or row.get("rgba") or root / "matte" / case_id / "rgba.png")
                     if is_active_run
                     else None,
@@ -3302,7 +3428,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       font: inherit;
       font-weight: 700;
     }}
-    main {{ width: min(1760px, 100%); margin: 0 auto; padding: 18px 20px 28px; }}
+    main {{ width: min(1600px, 100%); margin: 0 auto; padding: 18px 20px 28px; }}
     .summary {{
       display: flex;
       flex-wrap: wrap;
@@ -3332,7 +3458,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       background: #ffffff;
     }}
     table {{
-      width: max(100%, 1220px);
+      width: max(100%, 1180px);
       border-collapse: separate;
       border-spacing: 0;
       table-layout: fixed;
@@ -3352,18 +3478,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }}
     td {{ padding: 10px; }}
     tr:last-child td {{ border-bottom: 0; }}
-    .case-col {{ width: 260px; }}
-    .original-col {{ width: 145px; }}
-    .regions-col {{ width: 155px; }}
-    .preview-col {{ width: 132px; }}
-    th.case-col, td:first-child {{
-      position: sticky;
-      left: 0;
-      z-index: 4;
-      background: #ffffff;
-      box-shadow: 1px 0 0 #e2e8df;
-    }}
-    th.case-col {{ z-index: 6; background: #fbfcfa; }}
+    .preview-col {{ width: 148px; }}
     .case-name {{ font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }}
     .sample-code {{
       display: inline-flex;
@@ -3399,6 +3514,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .pending {{ color: #6b6258; font-weight: 800; }}
     .tools {{ overflow-wrap: anywhere; }}
     .thumb-button {{
+      position: relative;
       width: 100%;
       min-height: 92px;
       max-height: 220px;
@@ -3410,6 +3526,23 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       border-radius: 6px;
       cursor: zoom-in;
       overflow: hidden;
+    }}
+    .thumb-tag {{
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      max-width: calc(100% - 12px);
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(12, 17, 15, 0.78);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
     }}
     .thumb-button img {{
       display: block;
@@ -3433,6 +3566,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .bg-white {{ background: #ffffff; }}
     .bg-black {{ background: #101413; }}
     .bg-purple {{ background: #7c3aed; }}
+    .bg-blue {{ background: #2563eb; }}
     /* Known green-screen reference for judging whether transparent shadows
        match the original source, without white/checker contrast bias. */
     .bg-green {{ background: #00c800; }}
@@ -3633,14 +3767,14 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <table aria-label="game eval result table">
         <thead>
           <tr>
-            <th class="case-col">case</th>
-            <th class="original-col">original</th>
-            <th class="regions-col">regions</th>
-            <th class="preview-col">checker</th>
-            <th class="preview-col">white</th>
-            <th class="preview-col">black</th>
-            <th class="preview-col">purple</th>
-            <th class="preview-col">green ref</th>
+            <th class="preview-col">原图</th>
+            <th class="preview-col">alpha mask</th>
+            <th class="preview-col">白底</th>
+            <th class="preview-col">黑底</th>
+            <th class="preview-col">透明底</th>
+            <th class="preview-col">绿底</th>
+            <th class="preview-col">紫底</th>
+            <th class="preview-col">蓝底</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -3668,11 +3802,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     <div class="modal-bar">
       <div class="modal-title" id="modal-title"></div>
       <div class="modal-actions" aria-label="preview controls">
-        <button class="swatch bg-checker" type="button" data-bg="checker" title="棋盘背景" aria-label="棋盘背景"></button>
+        <button class="swatch bg-checker" type="button" data-bg="checker" title="透明底" aria-label="透明底"></button>
         <button class="swatch bg-white" type="button" data-bg="white" title="白底" aria-label="白底"></button>
         <button class="swatch bg-black" type="button" data-bg="black" title="黑底" aria-label="黑底"></button>
-        <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
         <button class="swatch bg-green" type="button" data-bg="green" title="绿幕参照" aria-label="绿幕参照"></button>
+        <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
+        <button class="swatch bg-blue" type="button" data-bg="blue" title="蓝底" aria-label="蓝底"></button>
         <button class="icon-button" type="button" id="reset-preview" title="重置视图" aria-label="重置视图">↺</button>
         <button class="icon-button" type="button" id="close-modal" title="关闭" aria-label="关闭">×</button>
       </div>
@@ -3683,7 +3818,17 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
   </div>
   <script>
     const data = {data_json};
-    const backgrounds = ["checker", "white", "black", "purple", "green"];
+    const backgrounds = ["checker", "white", "black", "green", "purple", "blue"];
+    const previewColumns = [
+      {{ label: "原图", urlKey: "originalUrl", bg: "checker" }},
+      {{ label: "alpha mask", urlKey: "alphaUrl", bg: "white" }},
+      {{ label: "白底", urlKey: "matteUrl", bg: "white" }},
+      {{ label: "黑底", urlKey: "matteUrl", bg: "black" }},
+      {{ label: "透明底", urlKey: "matteUrl", bg: "checker" }},
+      {{ label: "绿底", urlKey: "matteUrl", bg: "green" }},
+      {{ label: "紫底", urlKey: "matteUrl", bg: "purple" }},
+      {{ label: "蓝底", urlKey: "matteUrl", bg: "blue" }},
+    ];
     const rowsEl = document.getElementById("rows");
     const summaryEl = document.getElementById("summary");
     const runIdEl = document.getElementById("run-id");
@@ -3726,7 +3871,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return Object.entries(counts).map(([key, value]) => `${{key}}=${{value}}`).join(", ");
     }}
 
-    function makePreview(src, label, bg) {{
+    function makePreview(src, label, bg, tag = "") {{
       const button = document.createElement("button");
       button.type = "button";
       button.className = "thumb-button";
@@ -3741,6 +3886,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         }}
       }};
       button.appendChild(img);
+      if (tag) {{
+        const badge = document.createElement("span");
+        badge.className = "thumb-tag";
+        badge.textContent = tag;
+        button.appendChild(badge);
+      }}
       button.addEventListener("click", () => openModal(src, label, bg));
       return button;
     }}
@@ -3786,91 +3937,28 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
       rowsEl.innerHTML = "";
       data.cases.forEach((caseItem) => {{
-        const candidates = caseItem.candidates && caseItem.candidates.length ? caseItem.candidates : [null];
-
-        candidates.forEach((candidate, candidateIndex) => {{
-          const row = document.createElement("tr");
-          const caseCell = document.createElement("td");
-          const sampleCode = document.createElement("div");
-          sampleCode.className = "sample-code";
-          sampleCode.textContent = caseItem.sampleCode || "G??";
-          const title = document.createElement("div");
-          title.className = "case-name";
-          title.textContent = caseItem.caseId;
-          const sampleBadge = document.createElement("div");
-          sampleBadge.className = "sample-badge";
-          sampleBadge.textContent = `${{caseItem.sampleVariant || "sample"}} · ${{caseItem.runStatus || "unknown"}}`;
-          const candidateLabel = document.createElement("div");
-          candidateLabel.className = "candidate-label";
-          candidateLabel.textContent = candidate
-            ? candidate.label || candidate.id || `candidate ${{candidateIndex + 1}}`
-            : "not run";
-          if (candidate && candidate.selected) {{
-            const selected = document.createElement("span");
-            selected.className = "selected-mark";
-            selected.textContent = "selected";
-            candidateLabel.appendChild(selected);
-          }}
-          const meta = document.createElement("div");
-          meta.className = "case-meta";
-          const hitClass = caseItem.runStatus === "not-run" ? "pending" : (caseItem.expectedHit ? "hit" : "miss");
-          const hitText = caseItem.runStatus === "not-run" ? "not run" : `expected ${{caseItem.expectedHit ? "hit" : "miss"}}`;
-          const harmfulText = caseItem.harmfulToolSelected ? ` · harmful: ${{(caseItem.harmfulTools || []).join(", ")}}` : "";
-          const shadowText = caseItem.shadowPolicyRequired
-            ? ` · shadow: ${{caseItem.shadowPolicyHit ? "hit" : "miss"}} (${{text(caseItem.shadowCandidateCount)}})`
-            : "";
-          meta.innerHTML = `
-            <span>verdict: ${{text(caseItem.verdict)}} · <span class="${{hitClass}}">${{hitText}}</span></span>
-            <span>regions: ${{text(caseItem.regionCount)}}</span>
-            <span>${{text(caseItem.primaryAmbiguity)}}</span>
-            <span>${{countsText(caseItem.counts)}}</span>
-            <span class="tools">tools: ${{candidate ? (candidate.tools || []).join(", ") || "—" : "—"}}${{harmfulText}}${{shadowText}}</span>
-          `;
-          caseCell.appendChild(sampleCode);
-          caseCell.appendChild(title);
-          caseCell.appendChild(sampleBadge);
-          caseCell.appendChild(candidateLabel);
-          caseCell.appendChild(meta);
-          row.appendChild(caseCell);
-
-          const originalCell = document.createElement("td");
-          if (caseItem.originalUrl) {{
-            originalCell.appendChild(makePreview(caseItem.originalUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} original`, "checker"));
-          }}
-          row.appendChild(originalCell);
-
-          const regionsCell = document.createElement("td");
-          if (caseItem.regionsUrl) {{
-            regionsCell.appendChild(makePreview(caseItem.regionsUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} regions`, "checker"));
+        const row = document.createElement("tr");
+        previewColumns.forEach((column) => {{
+          const cell = document.createElement("td");
+          const previewUrl = caseItem[column.urlKey] || "";
+          if (previewUrl) {{
+            cell.appendChild(
+              makePreview(
+                previewUrl,
+                `${{caseItem.sampleCode || ""}} · ${{caseItem.caseId || ""}} · ${{column.label}}`,
+                column.bg,
+                column.urlKey === "originalUrl" ? `${{caseItem.sampleCode || ""}}` : "",
+              ),
+            );
           }} else {{
             const empty = document.createElement("div");
             empty.className = "empty-cell";
-            empty.textContent = "not run";
-            regionsCell.appendChild(empty);
+            empty.textContent = "—";
+            cell.appendChild(empty);
           }}
-          row.appendChild(regionsCell);
-
-          backgrounds.forEach((bg) => {{
-            const cell = document.createElement("td");
-            const previewUrl = candidate && candidate.url ? candidate.url : (caseItem.runStatus === "ran" ? caseItem.matteUrl : "");
-            if (previewUrl) {{
-              cell.appendChild(
-                makePreview(
-                  previewUrl,
-                  `${{caseItem.sampleCode}} · ${{caseItem.caseId}} · ${{caseItem.sampleVariant}} · ${{candidate ? (candidate.label || candidate.id) : "matte"}} · ${{bg}}`,
-                  bg,
-                ),
-              );
-            }} else {{
-              const empty = document.createElement("div");
-              empty.className = "empty-cell";
-              empty.textContent = "not run";
-              cell.appendChild(empty);
-            }}
-            row.appendChild(cell);
-          }});
-          rowsEl.appendChild(row);
+          row.appendChild(cell);
         }});
+        rowsEl.appendChild(row);
       }});
     }}
 

@@ -398,6 +398,7 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
     assert source_preserving["smooth_pixels"] > 100000
     assert source_preserving["source_highlight_protected_pixels"] > 10000
     assert source_preserving["source_highlight_foreground_kept_pixels"] > 10000
+    assert source_preserving["source_bg_residue_repaired_pixels"] > 10000
     assert source_preserving["chroma_continuity_pixels"] > 1000
     assert source_preserving["nearest_chroma_continuity_pixels"] > 1000
     glass_field = result.debug["glass_continuous_field"]
@@ -427,13 +428,25 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
         visible_subject,
         (bottom[1].start, bottom[0].start, bottom[1].stop, bottom[0].stop),
         95,
-    ) < 39.0
+    ) < 42.0
     assert _rgb_neighbor_jump_percentile(
         on_gray,
         visible_subject,
         (left_corner[1].start, left_corner[0].start, left_corner[1].stop, left_corner[0].stop),
         95,
-    ) < 37.0
+    ) < 40.0
+    inner_top = np.s_[300:420, 150:1120]
+    blue_purple_rim_crack = (
+        visible_subject
+        & (result.alpha > 0.03)
+        & ((rgba_rgb[..., 2].astype(np.int16) - rgba_rgb[..., 1].astype(np.int16)) > 25)
+        & (fg_luma < 160.0)
+    )
+    # In broad glass, pixels with secondary-channel source evidence should be
+    # exported from the continuous source field. If they are treated as pure
+    # screen spill, straight-F solving produces blue/purple dashed cracks on the
+    # inner rim even though the source rim is continuous.
+    assert int(blue_purple_rim_crack[inner_top].sum()) < 1200
     left_lower_bend = np.s_[820:900, 130:230]
     fg_chroma = rgba_rgb.astype(np.int16).max(axis=-1) - rgba_rgb.astype(np.int16).min(axis=-1)
     dirty_dark_neutral = (

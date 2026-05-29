@@ -171,6 +171,17 @@ def matte_image(
     vlm_prior_mode: str = "shadow",
     comfy_url: str = DEFAULT_COMFY_URL,
     solid_graphic_prepass: bool = True,
+    corridorkey_gamma_space: str = "sRGB",
+    corridorkey_despill_strength: float = 1.0,
+    corridorkey_refiner_strength: float = 1.0,
+    corridorkey_auto_despeckle: str = "On",
+    corridorkey_despeckle_size: int = 400,
+    corridorkey_auto_mask: bool = False,
+    corridorkey_color_protection: bool = True,
+    corridorkey_protection_bg_max: float = 8.0,
+    corridorkey_protection_fg_min: float = 16.0,
+    corridorkey_screen_mode: str = "auto",
+    corridorkey_preset: str = "auto",
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -182,8 +193,9 @@ def matte_image(
             full halo/recomp/binarization metric block to the report.
         matting_model: HF id of BiRefNet variant.
         backend: ``auto`` | ``birefnet`` | ``grabcut`` | ``comfy-rmbg`` |
-            ``comfy-ermbg``. ``comfy-ermbg`` runs the full ERMBG Comfy custom
-            node remotely and only downloads the resulting images.
+            ``comfy-ermbg`` | ``comfy-corridorkey``. ``comfy-ermbg`` runs the
+            full ERMBG Comfy custom node remotely. ``comfy-corridorkey`` runs
+            CorridorKey remotely with a known-green chroma-key alpha hint.
         input_size: square matting-net input size for BiRefNet backends.
         bg_color: composite color used when an RGBA source is dirty enough
             that the router falls through to re-matte (since the matting net
@@ -204,6 +216,12 @@ def matte_image(
         solid_graphic_prepass: when true, high-confidence solid-background
             graphics use the analytic ownership-first path before constructing
             a local matting segmenter.
+        corridorkey_screen_mode: ``auto``, ``green``, or ``blue`` for the
+            CorridorKey path. ``auto`` estimates the key screen from border
+            evidence before submitting the remote workflow.
+        corridorkey_preset: ``auto``, ``detail_safe``, ``spill_safe``, or
+            ``manual``. Non-manual presets may override the individual
+            CorridorKey knobs with analysis-driven recommendations.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
     subject_support = _to_mask(subject_mask, rgb.shape[:2], "subject_mask")
@@ -211,18 +229,42 @@ def matte_image(
     # If source has α but the router decides to re-matte, the matting net
     # needs RGB on a known bg, not the raw (possibly premul or leaky) RGB.
     strat_preview = classify_strategy(rgb, source_alpha=alpha)
-    if alpha is not None and (backend == "comfy-ermbg" or not strat_preview.passthrough):
+    remote_full_backends = {"comfy-ermbg", "comfy-corridorkey"}
+    if alpha is not None and (backend in remote_full_backends or not strat_preview.passthrough):
         bg_arr = np.broadcast_to(np.asarray(bg_color, dtype=np.uint8), rgb.shape[:2] + (3,))
         a4 = alpha[..., None]
         rgb_lin = ermbg_io.srgb_to_linear(rgb)
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
-    if backend == "comfy-ermbg":
+    if backend in remote_full_backends:
         if vlm_prior:
-            raise ValueError("backend='comfy-ermbg' does not support local vlm_prior")
+            raise ValueError(f"backend={backend!r} does not support local vlm_prior")
         if subject_support is not None:
-            raise ValueError("backend='comfy-ermbg' does not support local subject_mask")
+            raise ValueError(f"backend={backend!r} does not support local subject_mask")
+    if backend == "comfy-corridorkey":
+        return _matte_image_comfy_corridorkey(
+            rgb,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            bg_color=bg_color,
+            shadow_mode=shadow_mode,
+            comfy_url=comfy_url,
+            gamma_space=corridorkey_gamma_space,
+            despill_strength=corridorkey_despill_strength,
+            refiner_strength=corridorkey_refiner_strength,
+            auto_despeckle=corridorkey_auto_despeckle,
+            despeckle_size=corridorkey_despeckle_size,
+            auto_mask=corridorkey_auto_mask,
+            apply_color_protection=corridorkey_color_protection,
+            color_protection_bg_max=corridorkey_protection_bg_max,
+            color_protection_fg_min=corridorkey_protection_fg_min,
+            screen_mode=corridorkey_screen_mode,
+            preset=corridorkey_preset,
+        )
+
+    if backend == "comfy-ermbg":
         return _matte_image_comfy_ermbg(
             rgb,
             src_path=src_path,
@@ -481,6 +523,153 @@ def _matte_image_comfy_ermbg(
         foreground_srgb=remote.foreground_srgb,
         strategy_name="comfy_ermbg",
         background_color=bg_color,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
+
+
+def _matte_image_comfy_corridorkey(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    bg_color: tuple[int, int, int],
+    shadow_mode: str,
+    comfy_url: str,
+    gamma_space: str = "sRGB",
+    despill_strength: float = 1.0,
+    refiner_strength: float = 1.0,
+    auto_despeckle: str = "On",
+    despeckle_size: int = 400,
+    auto_mask: bool = False,
+    apply_color_protection: bool = True,
+    color_protection_bg_max: float = 8.0,
+    color_protection_fg_min: float = 16.0,
+    screen_mode: str = "auto",
+    preset: str = "auto",
+) -> MatteResponse:
+    from .corridorkey import corridorkey_analyze_asset
+    from .probe.comfyui_corridorkey import ComfyUICorridorKeyClient
+
+    analysis = corridorkey_analyze_asset(
+        rgb,
+        screen_mode=screen_mode,  # type: ignore[arg-type]
+        preset=preset,  # type: ignore[arg-type]
+        fallback_background_color=bg_color,
+    )
+    selected_bg_color = analysis.background_color
+    if preset != "manual":
+        settings = analysis.recommended_settings
+        gamma_space = settings.gamma_space
+        despill_strength = settings.despill_strength
+        refiner_strength = settings.refiner_strength
+        auto_despeckle = settings.auto_despeckle
+        despeckle_size = settings.despeckle_size
+        apply_color_protection = settings.color_protection
+        color_protection_bg_max = settings.protection_bg_max
+        color_protection_fg_min = settings.protection_fg_min
+
+    client = ComfyUICorridorKeyClient(url=comfy_url)
+    hint_alpha = None
+    hint_source = None
+    if not auto_mask:
+        # All-white hint is an intentional diagnostic/control mode for
+        # CorridorKey: it removes our known-B mask generation from the equation
+        # while keeping the remote model and post-processing path identical.
+        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+        hint_source = "all_white_alpha_hint"
+    remote = client.matte(
+        rgb,
+        background_color=selected_bg_color,
+        hint_alpha=hint_alpha,
+        hint_source=hint_source,
+        gamma_space=gamma_space,
+        despill_strength=despill_strength,
+        refiner_strength=refiner_strength,
+        auto_despeckle=auto_despeckle,
+        despeckle_size=despeckle_size,
+        apply_color_protection=apply_color_protection,
+        color_protection_bg_max=color_protection_bg_max,
+        color_protection_fg_min=color_protection_fg_min,
+    )
+    bg_type = f"saturated_{analysis.screen_mode}" if analysis.screen_mode in {"green", "blue"} else "unknown_screen"
+    image_type = f"ai_{analysis.screen_mode}_asset" if analysis.screen_mode in {"green", "blue"} else "ai_screen_asset"
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(selected_bg_color),
+        "despill_method": "remote_corridorkey",
+        "matting_model": "CorridorKey",
+        "corridorkey_analysis": analysis.to_dict(),
+        "keyer": {
+            "used": True,
+            "source": "known_bg_chromatic_key_alpha_hint" if auto_mask else "all_white_alpha_hint",
+            "hint": remote.debug.get("hint", {}),
+        },
+        "shadow": {"mode": shadow_mode, "source": "not_applied_corridorkey"},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "comfy_corridorkey",
+            "bg_type": bg_type,
+            "image_type": image_type,
+            "keyer_mode": "corridorkey",
+            "despill": "remote_corridorkey",
+            "passthrough": False,
+            "notes": "CorridorKey executed by remote ComfyUI using ERMBG screen/color analysis.",
+            "extras": remote.debug,
+        },
+    }
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", remote.rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", remote.alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", remote.foreground_srgb)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_hint.png", remote.hint_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_raw_alpha.png", remote.raw_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_key_color_protection.png", remote.color_protection_alpha)
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=remote.rgba,
+                soft_mask=remote.alpha,
+                background_color=selected_bg_color,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=remote.rgba,
+            soft_mask=remote.alpha,
+            background_color=selected_bg_color,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        **remote.debug,
+        "strategy": report["strategy"],
+        "corridorkey_analysis": analysis.to_dict(),
+        "soft_mask": remote.alpha,
+        "corridorkey_hint": remote.hint_alpha,
+        "corridorkey_raw_alpha": remote.raw_alpha,
+        "key_color_protection": remote.color_protection_alpha,
+        "shadow_alpha": np.zeros(remote.alpha.shape, dtype=np.float32),
+    }
+    return MatteResponse(
+        rgba=remote.rgba,
+        alpha=remote.alpha,
+        foreground_srgb=remote.foreground_srgb,
+        strategy_name="comfy_corridorkey",
+        background_color=selected_bg_color,
         report=report,
         output_dir=out_dir,
         debug=debug,

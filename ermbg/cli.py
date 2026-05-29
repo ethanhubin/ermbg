@@ -212,7 +212,7 @@ def matte(
         "shadow",
         help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
     ),
-    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg or --vlm-provider comfy-qwen"),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg/comfy-ermbg/comfy-corridorkey or --vlm-provider comfy-qwen"),
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
@@ -225,7 +225,7 @@ def matte(
     if shadow_mode not in {"on", "off", "auto"}:
         raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
-    if backend == "comfy-ermbg":
+    if backend in {"comfy-ermbg", "comfy-corridorkey"}:
         response = matte_image(
             input_path,
             output_dir=out_dir,
@@ -239,7 +239,7 @@ def matte(
             shadow_mode=shadow_mode,
             comfy_url=comfy_url,
         )
-        logger.info(f"Saved remote Comfy ERMBG matte to {response.output_dir}")
+        logger.info(f"Saved remote {backend} matte to {response.output_dir}")
         return
 
     image, source_alpha = io.load_image_with_alpha(input_path)

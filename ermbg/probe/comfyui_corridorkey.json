@@ -1,0 +1,68 @@
+{
+  "_comment": "CorridorKey via remote ComfyUI: Load RGB + generated coarse mask hint -> CorridorKey -> save fg and alpha.",
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${mask_image}"
+    }
+  },
+  "12": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": ["11", 0],
+      "channel": "red"
+    }
+  },
+  "20": {
+    "class_type": "CorridorKey",
+    "inputs": {
+      "image": ["10", 0],
+      "mask": ["12", 0],
+      "gamma_space": "${gamma_space}",
+      "despill_strength": "${despill_strength}",
+      "refiner_strength": "${refiner_strength}",
+      "auto_despeckle": "${auto_despeckle}",
+      "despeckle_size": "${despeckle_size}"
+    }
+  },
+  "30": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 0],
+      "filename_prefix": "${filename_prefix}_fg"
+    }
+  },
+  "40": {
+    "class_type": "Convert Masks to Images",
+    "inputs": {
+      "masks": ["20", 1]
+    }
+  },
+  "50": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["40", 0],
+      "filename_prefix": "${filename_prefix}_alpha"
+    }
+  },
+  "60": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 2],
+      "filename_prefix": "${filename_prefix}_processed"
+    }
+  },
+  "70": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 3],
+      "filename_prefix": "${filename_prefix}_qc"
+    }
+  }
+}

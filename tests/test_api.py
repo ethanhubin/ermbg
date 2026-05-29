@@ -175,6 +175,135 @@ def test_matte_image_comfy_ermbg_uses_remote_full_pipeline(monkeypatch):
     assert r.debug["prompt_id"] == "prompt-1"
 
 
+def test_matte_image_comfy_corridorkey_uses_remote_pipeline(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    def fail_build_segmenter(**kwargs):
+        raise AssertionError("comfy-corridorkey should not build a local segmenter")
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha):
+            self.rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+            self.rgba[..., :3] = (30, 20, 10)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones((128, 128), dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = np.ones((128, 128), dtype=np.float32)
+            self.color_protection_alpha = np.zeros((128, 128), dtype=np.float32)
+            self.debug = {"prompt_id": "prompt-corridor", "hint": {"source": "all_white_alpha_hint"}}
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            assert image_srgb.shape == (128, 128, 3)
+            assert kwargs["background_color"] == (0, 200, 0)
+            assert kwargs["gamma_space"] == "sRGB"
+            assert kwargs["despill_strength"] == 1.0
+            assert kwargs["refiner_strength"] == 1.0
+            assert kwargs["auto_despeckle"] == "On"
+            assert kwargs["despeckle_size"] == 400
+            assert kwargs["hint_source"] == "all_white_alpha_hint"
+            assert kwargs["hint_alpha"].shape == (128, 128)
+            assert np.all(kwargs["hint_alpha"] == 1.0)
+            assert kwargs["apply_color_protection"] is True
+            return _FakeRemoteResult(kwargs["hint_alpha"])
+
+    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(img, backend="comfy-corridorkey", shadow_mode="on")
+
+    assert r.strategy_name == "comfy_corridorkey"
+    assert r.rgba[0, 0].tolist() == [30, 20, 10, 255]
+    assert r.report["strategy"]["name"] == "comfy_corridorkey"
+    assert r.debug["prompt_id"] == "prompt-corridor"
+    assert "corridorkey_hint" in r.debug
+    assert r.debug["corridorkey_hint"].mean() == 1.0
+    assert r.debug["corridorkey_analysis"]["screen_mode"] == "green"
+    assert r.report["strategy"]["bg_type"] == "saturated_green"
+
+
+def test_matte_image_comfy_corridorkey_can_use_all_white_hint(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha):
+            self.rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones((128, 128), dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = np.ones((128, 128), dtype=np.float32)
+            self.color_protection_alpha = np.zeros((128, 128), dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": "all_white_alpha_hint", "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            assert image_srgb.shape == (128, 128, 3)
+            assert kwargs["hint_source"] == "all_white_alpha_hint"
+            assert kwargs["hint_alpha"].shape == (128, 128)
+            assert np.all(kwargs["hint_alpha"] == 1.0)
+            return _FakeRemoteResult(kwargs["hint_alpha"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(img, backend="comfy-corridorkey", corridorkey_auto_mask=False)
+
+    assert r.debug["corridorkey_hint"].mean() == 1.0
+    assert r.debug["hint"]["source"] == "all_white_alpha_hint"
+
+
+def test_matte_image_comfy_corridorkey_blue_analysis_metadata(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha):
+            self.rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones((64, 64), dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = np.ones((64, 64), dtype=np.float32)
+            self.color_protection_alpha = np.zeros((64, 64), dtype=np.float32)
+            self.debug = {"prompt_id": "prompt-blue", "hint": {"source": "all_white_alpha_hint"}}
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            assert image_srgb.shape == (64, 64, 3)
+            assert kwargs["background_color"] == (0, 80, 255)
+            return _FakeRemoteResult(kwargs["hint_alpha"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    img = np.full((64, 64, 3), (0, 80, 255), dtype=np.uint8)
+    img[18:46, 18:46] = (220, 30, 30)
+    r = matte_image(img, backend="comfy-corridorkey")
+
+    assert r.background_color == (0, 80, 255)
+    assert r.report["strategy"]["bg_type"] == "saturated_blue"
+    assert r.report["strategy"]["image_type"] == "ai_blue_asset"
+    assert r.debug["corridorkey_analysis"]["screen_mode"] == "blue"
+
+
 def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path):
     img = _solid_green_with_red_subject()
     p = tmp_path / "in.png"
