@@ -247,7 +247,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", help="Regression input image, usually samples/regression/<case>/input.png")
+    parser.add_argument("input", help="Input image path for the production-path Comfy run")
     parser.add_argument("--batch", default="out/comfy_ermbg_regression", help="Batch root under out/")
     parser.add_argument("--case-id", default="", help="Override case id; defaults to case.json id or parent folder")
     parser.add_argument("--phase", default="remote", help="Run label appended to the case directory")

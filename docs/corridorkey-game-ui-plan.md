@@ -116,21 +116,30 @@ remain a measured known-background post-process with explicit debug metrics in
 
 ## Blue-Screen Support
 
-Do not treat blue support as merely changing `bg_color`.
+Do not treat blue support as merely changing `bg_color`. The current
+`comfy-corridorkey` wrapper now passes explicit `screen_mode` through the Comfy
+workflow and blue samples are part of the active full eval, but blue-screen
+semantics should stay scoped to problems green screen cannot cover.
 
-Current remote inspection shows the installed `CorridorKey` node exposes a
-GreenFormer-style path and green despill controls, without an explicit key-color
-input. Blue support therefore needs a separate verification step:
+The B016-B030 blue button block was changed on 2026-05-31 from yellow buttons to
+green buttons on blue screen. Rationale: yellow/orange UI can be evaluated and
+fixed on green screen; blue screen should add coverage for green subject
+material, which is exactly the family green screen cannot separate cleanly.
 
-1. Check whether the remote CorridorKey install has, or can install, a blue-key
-   model/node.
-2. If a blue model/node exists, wrap it inside the `comfy-corridorkey` adapter
-   and select it from `screen_mode`.
-3. If no blue model/node exists, run A/B evaluation between direct blue-screen
-   input and a local blue-to-green adapter that maps the input into the green
-   model's expected domain and maps foreground color back afterward.
-4. Promote a blue path to default only after game UI batches show stable alpha,
-   foreground color, and despill behavior.
+The yellow-on-blue investigation is still useful as a diagnosis of CorridorKey's
+limits: on unoutlined yellow buttons over blue, CorridorKey can decompose blue
+background darkening into dirty yellow foreground plus partial alpha. That is a
+model decomposition weakness, not a core ShadowPatch failure, and those samples
+are no longer active B016-B030 targets.
+
+Latest full baseline:
+
+```text
+out/corridorkey_full_blue_green_baseline_20260531/summary.json
+```
+
+Result: 83/83 completed successfully. B016-B030 all ran successfully as
+blue-screen green-button samples.
 
 Background detection should live in the ERMBG/Mac layer because the Web UI,
 batch scripts, reports, and Comfy workflow selection all need the same decision.
@@ -168,10 +177,10 @@ Offline tests:
 Batch tests:
 
 - existing game UI green samples;
-- new blue-screen variants for the same sample families;
+- approved green/blue screen samples from the current manifest;
 - subject materials near green/blue;
 - glass, glow, transparent gradients, thin outlines, and small ornaments.
-- ShadowPatch hit scan across all game-eval variants; inspect
+- ShadowPatch hit scan across all game-eval samples; inspect
   `shadowpatch_hits.json` and final Web results for every applied case.
 
 Remote/Web verification:

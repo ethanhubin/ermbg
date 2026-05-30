@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_d09_soft_alpha_smooth_white_glow_green",
+  "sample_id": "I019",
+  "category": "icon",
+  "family": "d_soft_alpha_effect",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "white",
+  "primary_ambiguity": "smooth continuous white glow on green screen, no particles or hard core",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-D09",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

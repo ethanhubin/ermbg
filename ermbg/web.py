@@ -43,9 +43,11 @@ REMOTE_DIRECT_BACKENDS = {"comfy-ermbg", "comfy-corridorkey"}
 WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
+GAME_SAMPLE_REL = Path("samples") / "corridorkey_semantic"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
 SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
 COMFY_ERMBG_EVAL_PREFIX = "comfy_"
+AUTO_EVAL_PREFIX = "auto_"
 CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
 ERMBG_EVAL_PREFIX = "ermbg_"
 RMBG_EVAL_PREFIX = "rmbg_"
@@ -53,14 +55,20 @@ GAME_EVAL_RUN_PREFIXES = (
     LOCAL_OWNERSHIP_EVAL_PREFIX,
     SOLID_GRAPHIC_EVAL_PREFIX,
     COMFY_ERMBG_EVAL_PREFIX,
+    AUTO_EVAL_PREFIX,
     CORRIDORKEY_EVAL_PREFIX,
     ERMBG_EVAL_PREFIX,
     RMBG_EVAL_PREFIX,
 )
-FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
-GAME_EVAL_VARIANTS = ("green", "white", "blue")
-DEFAULT_GAME_EVAL_TEST_PATH = "corridorkey"
+FAST_GAME_EVAL_SAMPLE_IDS = ("B001", "B016", "B031", "B046", "I011", "I019", "C004", "C009")
+GAME_EVAL_VARIANTS = ("green", "blue")
+DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
+    "auto": {
+        "label": "Auto",
+        "backend": "auto",
+        "prefix": AUTO_EVAL_PREFIX,
+    },
     "corridorkey": {
         "label": "CorridorKey",
         "backend": "comfy-corridorkey",
@@ -96,6 +104,14 @@ _SLICE_CACHE_MAX = 4
 _SLICE_WEB_MAX_PIXELS = 4_000_000
 _SLICE_CACHE: OrderedDict[tuple[str, int, int], SliceResult] = OrderedDict()
 _SLICE_CACHE_LOCK = Lock()
+
+
+def _game_sample_root() -> Path:
+    return PROJECT_ROOT / GAME_SAMPLE_REL
+
+
+def _game_sample_manifest() -> Path:
+    return _game_sample_root() / "manifest.json"
 
 
 def _encode_png(rgba: np.ndarray) -> bytes:
@@ -279,12 +295,12 @@ def _matte_page_html() -> str:
           <label class="check-label"><span>自动 Mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
           <label class="check-label"><span>颜色保护</span><input id="ck-color-protection" name="corridorkey_color_protection" type="checkbox" checked></label>
           <div class="color-range">
-            <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">8 / 16</output></div>
+            <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">12 / 28</output></div>
             <div class="dual-range" id="ck-protect-range">
               <span class="range-rail"></span>
               <span class="range-fill"></span>
-              <input id="ck-protect-bg" name="corridorkey_protection_bg_max" type="range" min="0" max="64" step="0.5" value="8" aria-label="背景端点">
-              <input id="ck-protect-fg" name="corridorkey_protection_fg_min" type="range" min="0.5" max="64" step="0.5" value="16" aria-label="保护端点">
+              <input id="ck-protect-bg" name="corridorkey_protection_bg_max" type="range" min="0" max="64" step="0.5" value="12" aria-label="背景端点">
+              <input id="ck-protect-fg" name="corridorkey_protection_fg_min" type="range" min="0.5" max="64" step="0.5" value="28" aria-label="保护端点">
             </div>
             <div class="range-labels"><span>背景</span><span>过渡</span><span>保护</span></div>
           </div>
@@ -2019,8 +2035,8 @@ def matte_candidates_endpoint(
     corridorkey_despeckle_size: Annotated[int, Form()] = 400,
     corridorkey_auto_mask: Annotated[bool, Form()] = False,
     corridorkey_color_protection: Annotated[bool, Form()] = True,
-    corridorkey_protection_bg_max: Annotated[float, Form()] = 8.0,
-    corridorkey_protection_fg_min: Annotated[float, Form()] = 16.0,
+    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
+    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
     corridorkey_screen_mode: Annotated[str, Form()] = "auto",
     corridorkey_preset: Annotated[str, Form()] = "auto",
 ) -> dict[str, object]:
@@ -2250,22 +2266,25 @@ def _candidate_regions(candidate_results: list[dict[str, object]]) -> list[dict[
 
 
 def _game_sample_paths(case_id: str) -> dict[str, str]:
-    case_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / case_id / "case.json"
+    sample_root = _game_sample_root()
+    case_path = sample_root / case_id / "case.json"
+    if not case_path.exists():
+        for category in ("button", "icon", "character"):
+            candidate = sample_root / category / case_id / "case.json"
+            if candidate.exists():
+                case_path = candidate
+                break
     if case_path.exists():
         payload = _load_json(case_path)
         if isinstance(payload, dict):
             paths = {
                 variant: path
-                for variant in ("white", "green", "blue")
+                for variant in GAME_EVAL_VARIANTS
                 if isinstance(path := payload.get(variant), str)
             }
             if paths:
                 return paths
-    return {
-        "white": f"samples/vlm_eval_game/{case_id}/white.png",
-        "green": f"samples/vlm_eval_game/{case_id}/green.png",
-        "blue": f"samples/vlm_eval_game/{case_id}/blue.png",
-    }
+    return {variant: f"{GAME_SAMPLE_REL.as_posix()}/{case_id}/{variant}.png" for variant in GAME_EVAL_VARIANTS}
 
 
 def _sample_variant_from_path(path_value: object) -> str | None:
@@ -2278,8 +2297,7 @@ def _sample_variant_from_path(path_value: object) -> str | None:
 
 
 def _game_sample_ids() -> dict[str, str]:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    manifest = _load_json(manifest_path)
+    manifest = _load_json(_game_sample_manifest())
     if not isinstance(manifest, dict):
         return {}
     cases = manifest.get("cases")
@@ -2296,10 +2314,9 @@ def _game_sample_ids() -> dict[str, str]:
 
 
 def _game_eval_samples() -> list[dict[str, object]]:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    if not manifest_path.exists():
+    if not _game_sample_manifest().exists():
         return []
-    manifest = _load_json(manifest_path)
+    manifest = _load_json(_game_sample_manifest())
     cases = manifest.get("cases") if isinstance(manifest, dict) else None
     if not isinstance(cases, list):
         return []
@@ -2320,12 +2337,40 @@ def _game_eval_samples() -> list[dict[str, object]]:
                 "sampleId": sample_id,
                 "caseId": item["id"],
                 "category": item.get("category", ""),
+                "family": item.get("family", ""),
+                "screen": item.get("screen", ""),
                 "primaryAmbiguity": item.get("primary_ambiguity", ""),
                 "thumbnailUrl": thumb_url,
                 "defaultSelected": sample_id in FAST_GAME_EVAL_SAMPLE_IDS,
             }
         )
     return samples
+
+
+def _game_eval_manifest_cases() -> list[dict[str, object]]:
+    if not _game_sample_manifest().exists():
+        return []
+    manifest = _load_json(_game_sample_manifest())
+    cases = manifest.get("cases") if isinstance(manifest, dict) else None
+    return [case for case in cases if isinstance(case, dict)] if isinstance(cases, list) else []
+
+
+def _case_eval_variants(case: dict[str, object], variants: tuple[str, ...] | list[str]) -> list[str]:
+    return [variant for variant in variants if isinstance(case.get(variant), str)]
+
+
+def _game_eval_case_variant_count(
+    cases: list[dict[str, object]] | None = None,
+    variants: tuple[str, ...] | list[str] = GAME_EVAL_VARIANTS,
+    sample_ids: list[str] | None = None,
+) -> int:
+    selected = cases if cases is not None else _game_eval_manifest_cases()
+    if not selected and sample_ids:
+        return len(sample_ids)
+    if sample_ids:
+        wanted = set(sample_ids)
+        selected = [case for case in selected if str(case.get("sample_id", "")) in wanted]
+    return sum(len(_case_eval_variants(case, variants)) for case in selected)
 
 
 def _game_report_path(root: Path) -> Path | None:
@@ -2501,14 +2546,8 @@ def _next_game_eval_run_id(prefix: str = LOCAL_OWNERSHIP_EVAL_PREFIX) -> str:
 
 
 def _game_eval_expected_case_count(variants: tuple[str, ...] = GAME_EVAL_VARIANTS) -> int:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    if not manifest_path.exists():
-        return 9 * len(variants)
-    manifest = _load_json(manifest_path)
-    cases = manifest.get("cases") if isinstance(manifest, dict) else None
-    if isinstance(cases, list) and cases:
-        return len(cases) * len(variants)
-    return 9 * len(variants)
+    total = _game_eval_case_variant_count(variants=variants)
+    return total if total > 0 else 78
 
 
 def _game_eval_batch_progress(
@@ -2625,35 +2664,14 @@ def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
         invalid = sorted(set(sample_ids) - known)
         if invalid:
             raise HTTPException(status_code=400, detail=f"Unknown sample_id: {', '.join(invalid)}")
-    elif any(not re.fullmatch(r"G\d{2}", sample_id) for sample_id in sample_ids):
-        raise HTTPException(status_code=400, detail="sample_ids must look like G01.")
+    elif any(not re.fullmatch(r"[A-Z]\d{3}|G\d{2}", sample_id) for sample_id in sample_ids):
+        raise HTTPException(status_code=400, detail="sample_ids must look like B001.")
     deduped: list[str] = []
     for sample_id in sample_ids:
         if sample_id not in deduped:
             deduped.append(sample_id)
     if raw and not deduped:
         raise HTTPException(status_code=400, detail="Select at least one sample.")
-    return deduped
-
-
-def _selected_game_eval_variants(payload: dict[str, Any] | None) -> list[str]:
-    if not payload:
-        return list(GAME_EVAL_VARIANTS)
-    raw = payload.get("variants")
-    if raw is None:
-        return list(GAME_EVAL_VARIANTS)
-    if not isinstance(raw, list):
-        raise HTTPException(status_code=400, detail="variants must be a list.")
-    variants = [str(item).strip().lower() for item in raw if str(item).strip()]
-    invalid = sorted(set(variants) - set(GAME_EVAL_VARIANTS))
-    if invalid:
-        raise HTTPException(status_code=400, detail=f"Unknown variant: {', '.join(invalid)}")
-    deduped: list[str] = []
-    for variant in variants:
-        if variant not in deduped:
-            deduped.append(variant)
-    if raw and not deduped:
-        raise HTTPException(status_code=400, detail="Select at least one variant.")
     return deduped
 
 
@@ -2676,11 +2694,9 @@ def _selected_game_eval_test_path(payload: dict[str, Any] | None) -> str:
 
 def _start_game_eval_batch(
     sample_ids: list[str] | None = None,
-    variants: list[str] | None = None,
     test_path: str = DEFAULT_GAME_EVAL_TEST_PATH,
 ) -> dict[str, object]:
     selected_sample_ids = list(sample_ids or [])
-    selected_variants = list(variants or GAME_EVAL_VARIANTS)
     path_config = GAME_EVAL_TEST_PATHS.get(test_path, GAME_EVAL_TEST_PATHS[DEFAULT_GAME_EVAL_TEST_PATH])
     backend = str(path_config["backend"])
     run_id = _next_game_eval_run_id(str(path_config["prefix"]))
@@ -2698,7 +2714,6 @@ def _start_game_eval_batch(
     ]
     if selected_sample_ids:
         command.extend(["--sample-id", ",".join(selected_sample_ids)])
-    command.extend(["--variants", ",".join(selected_variants)])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT)
     with log_path.open("ab") as log:
@@ -2720,7 +2735,6 @@ def _start_game_eval_batch(
         "test_path": test_path,
         "test_path_label": path_config["label"],
         "sample_ids": selected_sample_ids,
-        "variants": selected_variants,
     }
     (out_dir / "web_launch.json").write_text(json.dumps(launch, indent=2, ensure_ascii=False), encoding="utf-8")
     with _GAME_EVAL_JOBS_LOCK:
@@ -2730,11 +2744,10 @@ def _start_game_eval_batch(
             "backend": backend,
             "test_path": test_path,
             "sample_ids": selected_sample_ids,
-            "variants": selected_variants,
             "expected_total": (
-                len(selected_sample_ids) * len(selected_variants)
+                _game_eval_case_variant_count(sample_ids=selected_sample_ids)
                 if selected_sample_ids
-                else _game_eval_expected_case_count(tuple(selected_variants))
+                else _game_eval_expected_case_count()
             ),
         }
     return _game_eval_batch_status(run_id)
@@ -3193,7 +3206,7 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
         "sampleRows": len(cases),
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str(root.relative_to(PROJECT_ROOT)),
-        "vlmRoot": str((PROJECT_ROOT / "samples" / "vlm_eval_game").relative_to(PROJECT_ROOT)),
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
         "runs": _game_eval_runs(root),
         "selectedRun": root.name,
         "progress": progress,
@@ -3212,7 +3225,7 @@ def _case_id_from_comfy_run(item: dict[str, object], index: int) -> tuple[str, s
     case_label = str(item.get("case") or "")
     if not sample_id and case_label:
         parts = case_label.split("_")
-        if parts and re.fullmatch(r"G\d{2}", parts[0]):
+        if parts and re.fullmatch(r"[A-Z]\d{3}|G\d{2}", parts[0]):
             sample_id = parts[0]
     if not case_id and isinstance(input_path, str):
         try:
@@ -3220,7 +3233,7 @@ def _case_id_from_comfy_run(item: dict[str, object], index: int) -> tuple[str, s
         except Exception:
             case_id = ""
     if not sample_id:
-        sample_id = f"G{index:02d}"
+        sample_id = f"S{index:03d}"
     if not case_id:
         case_id = case_label or f"case_{index:02d}"
     return sample_id, case_id, variant
@@ -3315,7 +3328,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         "sampleRows": len(cases),
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str(root.relative_to(PROJECT_ROOT)),
-        "vlmRoot": str((PROJECT_ROOT / "samples" / "vlm_eval_game").relative_to(PROJECT_ROOT)),
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
         "runs": _game_eval_runs(root),
         "selectedRun": root.name,
         "progress": progress,
@@ -3476,9 +3489,8 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
 @app.post("/eval/game/run")
 def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
     return _start_game_eval_batch(
-        _selected_game_eval_sample_ids(payload),
-        _selected_game_eval_variants(payload),
-        _selected_game_eval_test_path(payload),
+        sample_ids=_selected_game_eval_sample_ids(payload),
+        test_path=_selected_game_eval_test_path(payload),
     )
 
 
@@ -3993,24 +4005,48 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       color: #17201c;
     }}
     .variant-option input {{ width: 15px; height: 15px; min-height: 0; margin: 0; }}
-    .sample-list {{ min-height: 0; overflow: auto; padding: 8px 16px; }}
+    .sample-list {{
+      min-height: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+      align-content: start;
+      gap: 10px;
+      overflow: auto;
+      padding: 12px 16px;
+      background: #f7faf6;
+    }}
+    .sample-group {{
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+      margin-top: 4px;
+      color: #53615a;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }}
+    .sample-group:first-child {{ margin-top: 0; }}
     .sample-option {{
       display: grid;
-      grid-template-columns: 22px 58px 72px;
+      grid-template-columns: 22px 54px minmax(0, 1fr);
       gap: 10px;
       align-items: center;
-      min-height: 64px;
-      padding: 8px 0;
-      border-bottom: 1px solid #edf1ea;
+      min-height: 74px;
+      padding: 8px;
+      border: 1px solid #dde6da;
+      border-radius: 7px;
+      background: #ffffff;
       color: #17201c;
       font-size: 13px;
       font-weight: 700;
     }}
-    .sample-option:last-child {{ border-bottom: 0; }}
+    .sample-option:hover {{ border-color: #b8c8b4; background: #fbfdfb; }}
     .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 0; }}
     .sample-thumb {{
-      width: 58px;
-      height: 58px;
+      width: 54px;
+      height: 54px;
       display: grid;
       place-items: center;
       overflow: hidden;
@@ -4024,9 +4060,16 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       height: 100%;
       object-fit: contain;
     }}
-    .sample-code {{
-      margin: 0;
-      justify-content: center;
+    .sample-meta {{ min-width: 0; display: grid; gap: 2px; }}
+    .sample-code {{ margin: 0; font-weight: 900; line-height: 1.1; }}
+    .sample-case, .sample-family {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #617068;
+      font-size: 11px;
+      line-height: 1.15;
     }}
     .eval-actions {{
       display: flex;
@@ -4113,17 +4156,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <div class="path-tools" aria-label="选择测试路径">
         <label for="eval-test-path">测试路径
           <select id="eval-test-path" name="eval-test-path">
-            <option value="corridorkey" selected>CorridorKey</option>
+            <option value="auto" selected>Auto</option>
+            <option value="corridorkey">CorridorKey</option>
             <option value="ermbg">ERMBG</option>
             <option value="rmbg">RMBG</option>
           </select>
         </label>
-      </div>
-      <div class="variant-tools" aria-label="选择测试变体">
-        <span>变体</span>
-        <label class="variant-option"><input type="checkbox" name="eval-variant" value="white" checked>白底</label>
-        <label class="variant-option"><input type="checkbox" name="eval-variant" value="green" checked>绿底</label>
-        <label class="variant-option"><input type="checkbox" name="eval-variant" value="blue" checked>蓝底</label>
       </div>
       <div class="sample-list" id="sample-list"></div>
       <div class="eval-actions">
@@ -4174,7 +4212,6 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const evalPanel = document.getElementById("eval-panel");
     const sampleList = document.getElementById("sample-list");
     const testPathSelect = document.getElementById("eval-test-path");
-    const variantInputs = Array.from(document.querySelectorAll('input[name="eval-variant"]'));
     const selectAllSamplesButton = document.getElementById("select-all-samples");
     const clearAllSamplesButton = document.getElementById("clear-all-samples");
     const cancelEvalPanelButton = document.getElementById("cancel-eval-panel");
@@ -4262,7 +4299,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         `shadow policy: ${{text(data.shadowPolicyHit)}}`,
         `sample rows: ${{text(data.sampleRows)}}`,
         `report: ${{text(data.reportPath)}}`,
-        `vlm: ${{text(data.vlmRoot)}}`,
+        `samples: ${{text(data.vlmRoot)}}`,
         `matte: ${{text(data.matteRoot)}}`,
       ].forEach((item) => {{
         const pill = document.createElement("span");
@@ -4352,10 +4389,6 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return sampleCheckboxes().filter((input) => input.checked).map((input) => input.value);
     }}
 
-    function selectedVariants() {{
-      return variantInputs.filter((input) => input.checked).map((input) => input.value);
-    }}
-
     function selectedTestPath() {{
       return testPathSelect ? testPathSelect.value : "corridorkey";
     }}
@@ -4363,15 +4396,26 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     function updateSelectionCount() {{
       const selected = selectedSampleIds().length;
       const total = sampleCheckboxes().length;
-      const variants = selectedVariants().length;
-      selectionCountEl.textContent = `${{selected}}/${{total}} · ${{variants}} variants`;
-      confirmStartEvalButton.disabled = selected === 0 || variants === 0;
+      selectionCountEl.textContent = `${{selected}}/${{total}} samples`;
+      confirmStartEvalButton.disabled = selected === 0;
     }}
 
     function renderSampleList() {{
       const samples = Array.isArray(data.samples) ? data.samples : [];
       sampleList.innerHTML = "";
-      samples.forEach((sample) => {{
+      const labels = {{ button: "Button", icon: "Icon / Effect", character: "Character" }};
+      const grouped = samples.reduce((acc, sample) => {{
+        const key = sample.category || "other";
+        if (!acc.has(key)) acc.set(key, []);
+        acc.get(key).push(sample);
+        return acc;
+      }}, new Map());
+      grouped.forEach((groupSamples, category) => {{
+        const group = document.createElement("div");
+        group.className = "sample-group";
+        group.textContent = `${{labels[category] || category}} · ${{groupSamples.length}}`;
+        sampleList.appendChild(group);
+        groupSamples.forEach((sample) => {{
         const label = document.createElement("label");
         label.className = "sample-option";
         const checkbox = document.createElement("input");
@@ -4388,13 +4432,25 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
           thumb.appendChild(image);
         }}
         const code = document.createElement("span");
-        code.className = "sample-code";
-        code.textContent = sample.sampleId;
+        code.className = "sample-meta";
+        const codeText = document.createElement("span");
+        codeText.className = "sample-code";
+        codeText.textContent = `${{sample.sampleId || ""}} · ${{sample.screen || ""}}`;
+        const caseText = document.createElement("span");
+        caseText.className = "sample-case";
+        caseText.textContent = sample.caseId || "";
+        const familyText = document.createElement("span");
+        familyText.className = "sample-family";
+        familyText.textContent = sample.family || sample.primaryAmbiguity || "";
+        code.appendChild(codeText);
+        code.appendChild(caseText);
+        code.appendChild(familyText);
         label.title = `${{sample.sampleId || ""}} · ${{sample.caseId || ""}}`;
         label.appendChild(checkbox);
         label.appendChild(thumb);
         label.appendChild(code);
         sampleList.appendChild(label);
+      }});
       }});
       updateSelectionCount();
     }}
@@ -4419,9 +4475,8 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
     async function startSelectedEval() {{
       const sampleIds = selectedSampleIds();
-      const variants = selectedVariants();
       const testPath = selectedTestPath();
-      if (!sampleIds.length || !variants.length) return;
+      if (!sampleIds.length) return;
       setBatchStatus("启动中", true);
       setBatchProgress({{ percent: 0 }});
       try {{
@@ -4429,7 +4484,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         const response = await fetch("/eval/game/run", {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ sample_ids: sampleIds, variants, test_path: testPath }}),
+          body: JSON.stringify({{ sample_ids: sampleIds, test_path: testPath }}),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
@@ -4525,7 +4580,6 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     selectAllSamplesButton.addEventListener("click", () => setAllSamples(true));
     clearAllSamplesButton.addEventListener("click", () => setAllSamples(false));
     if (testPathSelect) testPathSelect.addEventListener("change", updateSelectionCount);
-    variantInputs.forEach((input) => input.addEventListener("change", updateSelectionCount));
     cancelEvalPanelButton.addEventListener("click", closeEvalPanel);
     confirmStartEvalButton.addEventListener("click", startSelectedEval);
     evalPanel.addEventListener("click", (event) => {{

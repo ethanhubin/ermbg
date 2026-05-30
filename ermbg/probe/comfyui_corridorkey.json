@@ -25,6 +25,7 @@
       "image": ["10", 0],
       "mask": ["12", 0],
       "gamma_space": "${gamma_space}",
+      "screen_color": "${screen_color}",
       "despill_strength": "${despill_strength}",
       "refiner_strength": "${refiner_strength}",
       "auto_despeckle": "${auto_despeckle}",

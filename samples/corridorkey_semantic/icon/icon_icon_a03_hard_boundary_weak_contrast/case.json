@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_a03_hard_boundary_weak_contrast",
+  "sample_id": "I003",
+  "category": "icon",
+  "family": "a_hard_boundary",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "green",
+  "primary_ambiguity": "same-family weak-contrast hard opaque edge",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-A03",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

@@ -271,6 +271,8 @@ def test_matte_image_comfy_corridorkey_uses_remote_pipeline(monkeypatch):
             assert kwargs["hint_alpha"].shape == (128, 128)
             assert np.all(kwargs["hint_alpha"] == 1.0)
             assert kwargs["apply_color_protection"] is True
+            assert kwargs["color_protection_bg_max"] == 12.0
+            assert kwargs["color_protection_fg_min"] == 28.0
             return _FakeRemoteResult(kwargs["hint_alpha"])
 
     monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
@@ -411,6 +413,189 @@ def test_corridorkey_shadow_patch_gate_filters_preserved_subject_components():
     rejected = [item for item in gate["component_details"] if not item["apply"]]
     assert rejected
     assert rejected[0]["missing_in_corridorkey"] is False
+
+
+def test_corridorkey_shadow_patch_gate_replaces_under_reconstructed_hard_shadow():
+    import ermbg.api as api
+
+    subject = np.zeros((128, 128), dtype=np.float32)
+    shadow_display = np.zeros((128, 128), dtype=np.float32)
+    shadow_display[78:96, 32:104] = 0.30
+    subject[78:96, 32:104] = 0.12
+
+    filtered, gate = api._corridorkey_shadow_patch_gate(
+        subject,
+        shadow_display,
+        {"detected": True, "accepted_components": 1},
+    )
+
+    assert gate["apply"] is True
+    assert gate["missing_in_corridorkey"] is True
+    assert gate["component_details"][0]["under_reconstructed_shadow"] is True
+    assert filtered[82:92, 40:96].mean() > 0.25
+
+    preserved_subject = np.zeros((128, 128), dtype=np.float32)
+    preserved_subject[78:96, 32:104] = 0.19
+    preserved_filtered, preserved_gate = api._corridorkey_shadow_patch_gate(
+        preserved_subject,
+        shadow_display,
+        {"detected": True, "accepted_components": 1},
+    )
+
+    assert preserved_gate["apply"] is False
+    assert preserved_gate["missing_in_corridorkey"] is False
+    assert preserved_filtered.max() == 0.0
+
+
+def test_corridorkey_shadow_patch_removes_weak_ck_residue_in_patched_shadow():
+    import ermbg.api as api
+    from ermbg import io as ermbg_io
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    subject = np.zeros((128, 128), dtype=np.float32)
+    subject[34:76, 44:92] = 1.0
+    shadow = np.zeros((128, 128), dtype=np.float32)
+    shadow[80:96, 32:112] = 0.42
+    image = ermbg_io.linear_to_srgb_u8(
+        (1.0 - shadow[..., None]) * ermbg_io.srgb_to_linear(np.broadcast_to(bg, (128, 128, 3)))
+    )
+    image[subject > 0] = (230, 40, 40)
+    ck_alpha = np.maximum(subject, shadow * 0.20).astype(np.float32)
+    protected_edge = np.zeros((128, 128), dtype=bool)
+    protected_edge[80:96, 32:40] = True
+    ck_alpha[protected_edge] = 0.62
+    foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    foreground[..., :] = (230, 40, 40)
+
+    alpha, _, shadow_alpha, _, info = api._corridorkey_shadow_patch(
+        image,
+        subject_alpha=ck_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    patch_region = shadow > 0
+    low_shadow_region = patch_region & ~protected_edge
+    assert info["applied"] is True
+    assert info["patch_gate"]["component_details"][0]["under_reconstructed_shadow"] is True
+    assert info["patch_gate"]["corridorkey_shadow_residue_pixels_removed"] > 0
+    assert shadow_alpha[protected_edge].max() == 0.0
+    assert np.allclose(alpha[protected_edge], ck_alpha[protected_edge])
+    assert shadow_alpha[low_shadow_region].mean() > ck_alpha[low_shadow_region].mean()
+    assert np.allclose(alpha[low_shadow_region].mean(), shadow_alpha[low_shadow_region].mean(), atol=0.03)
+
+
+def test_corridorkey_shadow_patch_uses_source_pixels_as_reprojection_target():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    subject = np.zeros((128, 128), dtype=np.float32)
+    subject[34:74, 44:92] = 1.0
+    target_display_shadow = np.zeros((128, 128), dtype=np.float32)
+    horizontal = np.linspace(0.22, 0.32, 80, dtype=np.float32)
+    target_display_shadow[80:96, 32:112] = horizontal[None, :]
+
+    image = (
+        (1.0 - target_display_shadow[..., None]) * bg.astype(np.float32).reshape(1, 1, 3)
+        + 0.5
+    ).astype(np.uint8)
+    image[subject > 0] = (230, 40, 40)
+    ck_alpha = np.maximum(subject, target_display_shadow * 0.28).astype(np.float32)
+    foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    foreground[..., :] = (230, 40, 40)
+
+    _, _, shadow_alpha, _, info = api._corridorkey_shadow_patch(
+        image,
+        subject_alpha=ck_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    shadow_region = target_display_shadow > 0.0
+    reprojection = info["patch_gate"]["source_reprojection"]
+    assert info["applied"] is True
+    assert reprojection["enabled"] is True
+    assert reprojection["mean_abs_error_after_u8"] < reprojection["mean_abs_error_before_u8"]
+    assert np.mean(np.abs(shadow_alpha[shadow_region] - target_display_shadow[shadow_region])) < 0.012
+
+
+def test_corridorkey_shadow_patch_preserves_subject_antialiasing_at_contact_edge():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    subject = np.zeros((128, 128), dtype=np.float32)
+    subject[34:78, 44:92] = 1.0
+    subject[78, 44:92] = 0.20
+    shadow = np.zeros((128, 128), dtype=np.float32)
+    shadow[78:96, 32:112] = 0.30
+    image = (
+        (1.0 - shadow[..., None]) * bg.astype(np.float32).reshape(1, 1, 3)
+        + 0.5
+    ).astype(np.uint8)
+    image[subject >= 1.0] = (230, 40, 40)
+    image[subject == 0.20] = (184, 168, 0)
+    ck_alpha = np.maximum(subject, shadow * 0.28).astype(np.float32)
+    foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    foreground[..., :] = (230, 40, 40)
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._corridorkey_shadow_patch(
+        image,
+        subject_alpha=ck_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    contact_edge = np.zeros((128, 128), dtype=bool)
+    contact_edge[78, 44:92] = True
+    exterior_shadow = np.zeros((128, 128), dtype=bool)
+    exterior_shadow[88:94, 44:92] = True
+    assert info["applied"] is True
+    assert info["patch_gate"]["corridorkey_subject_edge_pixels_preserved"] >= int(contact_edge.sum())
+    assert np.all(alpha[contact_edge] > shadow_alpha[contact_edge])
+    assert rgba_rgb[contact_edge, 0].mean() > 40.0
+    assert np.allclose(alpha[exterior_shadow].mean(), shadow_alpha[exterior_shadow].mean(), atol=0.03)
+
+
+def test_corridorkey_shadow_patch_reprojects_near_subject_region():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    subject = np.zeros((64, 96), dtype=np.float32)
+    subject[18:34, 24:72] = 1.0
+    subject[34, 24:72] = 0.18
+    shadow = np.zeros((64, 96), dtype=np.float32)
+    shadow[36:44, 20:76] = 0.32
+    source_shadow = np.zeros((64, 96), dtype=np.float32)
+    source_shadow[34:44, 20:76] = 0.32
+    foreground = np.zeros((64, 96, 3), dtype=np.uint8)
+    foreground[..., :] = (230, 40, 40)
+    image = (
+        subject[..., None] * foreground.astype(np.float32)
+        + (1.0 - subject[..., None]) * (1.0 - source_shadow[..., None]) * bg.astype(np.float32).reshape(1, 1, 3)
+        + 0.5
+    ).astype(np.uint8)
+
+    repaired, info = api._refine_near_subject_shadow_from_source_pixels(
+        shadow,
+        subject,
+        image,
+        tuple(int(c) for c in bg),
+        foreground,
+    )
+
+    gap = np.zeros_like(subject, dtype=bool)
+    gap[35, 24:72] = True
+    subject_edge = np.zeros_like(subject, dtype=bool)
+    subject_edge[34, 24:72] = True
+    assert info["repair_pixels"] > 0
+    assert info["source_added_pixels"] >= int(gap.sum())
+    assert info["source_reproject_pixels"] > 0
+    assert info["mean_abs_error_after_u8"] < info["mean_abs_error_before_u8"]
+    assert repaired[gap].mean() > 0.20
+    assert repaired[subject_edge].mean() > 0.20
 
 
 def test_corridorkey_shadow_patch_gate_rejects_broad_vertical_background_wash():

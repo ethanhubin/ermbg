@@ -166,7 +166,6 @@ def test_game_eval_page_serves_result_table():
     response = client.get("/eval/game")
     assert response.status_code == 200
     assert "ERMBG Game Eval" in response.text
-    assert "local_ownership_full_20260527" in response.text
     assert 'id="run-select"' in response.text
     assert 'id="start-full-eval"' in response.text
     assert 'id="eval-panel"' in response.text
@@ -174,44 +173,41 @@ def test_game_eval_page_serves_result_table():
     assert "选择测试样本" in response.text
     assert "选择测试路径" in response.text
     assert 'id="eval-test-path"' in response.text
-    assert '<option value="corridorkey" selected>CorridorKey</option>' in response.text
+    assert '<option value="auto" selected>Auto</option>' in response.text
+    assert '<option value="corridorkey">CorridorKey</option>' in response.text
     assert '<option value="ermbg">ERMBG</option>' in response.text
     assert '<option value="rmbg">RMBG</option>' in response.text
-    assert "选择测试变体" in response.text
     assert "全选" in response.text
     assert "取消全选" in response.text
-    assert 'name="eval-variant" value="blue" checked' in response.text
-    assert "selectedVariants()" in response.text
+    assert "选择测试变体" not in response.text
+    assert 'name="eval-variant"' not in response.text
+    assert "selectedVariants()" not in response.text
+    assert "variantInputs" not in response.text
     assert "selectedTestPath()" in response.text
     assert 'role="progressbar"' in response.text
     assert 'id="batch-progress"' in response.text
-    assert "ui_glass_button_soft_shadow" in response.text
-    assert '"sampleRows": 18' in response.text
-    assert '"sampleId": "G01"' in response.text
-    assert '"sampleId": "G02"' in response.text
-    assert '"thumbnailUrl": "/eval/game/file/samples/vlm_eval_game/' in response.text
+    assert '"sampleRows":' in response.text
+    assert '"sampleId": "B001"' in response.text
+    assert '"sampleId": "I001"' in response.text
+    assert '"thumbnailUrl": "/eval/game/file/samples/corridorkey_semantic/' in response.text
     assert '"defaultSelected": true' in response.text
     assert '"defaultSelected": false' in response.text
-    assert '"sampleCode": "G01-W"' in response.text
-    assert '"sampleCode": "G01-G"' in response.text
-    assert '"sampleVariant": "white"' in response.text
     assert '"sampleVariant": "green"' in response.text
     assert '"runStatus": "ran"' in response.text
     assert '"progress": {' in response.text
-    assert '"/eval/game/regions/ui_hard_button_no_shadow?variant=green' in response.text
-    assert "local_ownership" in response.text
     assert "<th class=\"regions-col\">regions</th>" not in response.text
     for heading in ("原图", "alpha mask", "白底", "黑底", "透明底", "绿底", "紫底", "蓝底"):
         assert f"<th class=\"preview-col\">{heading}</th>" in response.text
     assert "<th class=\"preview-col\">gray</th>" not in response.text
     assert 'data-bg="green"' in response.text
     assert 'data-bg="blue"' in response.text
+    assert 'className = "sample-group"' in response.text
+    assert 'className = "sample-meta"' in response.text
     assert 'className = "sample-thumb"' in response.text
     assert 'label.title = `${sample.sampleId || ""} · ${sample.caseId || ""}`' in response.text
     assert 'detail.textContent = `${sample.caseId || ""}' not in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
-    assert "/eval/game/file/out/local_ownership_" in response.text
 
 
 def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
@@ -235,12 +231,12 @@ def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["runId"].startswith("corridorkey_")
+    assert payload["runId"].startswith("auto_")
     assert "_web_" not in payload["runId"]
     assert payload["runId"].endswith("_v001")
     assert payload["status"] == "running"
     assert payload["progress"]["completed"] == 0
-    assert payload["progress"]["total"] == 27
+    assert payload["progress"]["total"] == 78
     assert (tmp_path / "out" / payload["runId"] / "web_launch.json").exists()
 
     status_response = client.get(payload["statusUrl"])
@@ -267,25 +263,24 @@ def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
     web._GAME_EVAL_JOBS.clear()
 
     client = TestClient(app)
-    response = client.post("/eval/game/run", json={"sample_ids": ["G03", "G05"], "variants": ["green", "blue"]})
+    response = client.post("/eval/game/run", json={"sample_ids": ["B003", "B005"], "variants": ["white"]})
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["progress"]["total"] == 4
+    assert payload["progress"]["total"] == 2
     process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
     assert "run_corridorkey_game_eval.py" in process.command[1]
     assert "--backend" in process.command
-    assert "comfy-corridorkey" in process.command
+    assert "auto" in process.command
     assert "--sample-id" in process.command
-    assert "G03,G05" in process.command
-    assert "--variants" in process.command
-    assert "green,blue" in process.command
+    assert "B003,B005" in process.command
+    assert "--variants" not in process.command
     launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
     launch_payload = json.loads(launch.read_text(encoding="utf-8"))
-    assert launch_payload["backend"] == "comfy-corridorkey"
-    assert launch_payload["test_path"] == "corridorkey"
-    assert launch_payload["sample_ids"] == ["G03", "G05"]
-    assert launch_payload["variants"] == ["green", "blue"]
+    assert launch_payload["backend"] == "auto"
+    assert launch_payload["test_path"] == "auto"
+    assert launch_payload["sample_ids"] == ["B003", "B005"]
+    assert "variants" not in launch_payload
 
 
 def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
@@ -305,12 +300,12 @@ def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
     web._GAME_EVAL_JOBS.clear()
 
     client = TestClient(app)
-    response = client.post("/eval/game/run", json={"sample_ids": ["G02"], "variants": ["green", "blue"], "test_path": "ermbg"})
+    response = client.post("/eval/game/run", json={"sample_ids": ["B002"], "test_path": "ermbg"})
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["runId"].startswith("ermbg_")
-    assert payload["progress"]["total"] == 2
+    assert payload["progress"]["total"] == 1
     process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
     assert "--backend" in process.command
     assert "comfy-ermbg" in process.command
@@ -414,40 +409,41 @@ def test_game_eval_running_progress_counts_partial_summaries(monkeypatch, tmp_pa
 def test_game_eval_page_renders_running_partial_summary(monkeypatch, tmp_path):
     import ermbg.web as web
 
-    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_hard_button_soft_shadow"
+    sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "button_soft_shadow"
     sample_root.mkdir(parents=True)
     Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
     manifest = {
         "cases": [
             {
-                "id": "ui_hard_button_soft_shadow",
-                "sample_id": "G02",
-                "green": "samples/vlm_eval_game/ui_hard_button_soft_shadow/green.png",
+                "id": "button_soft_shadow",
+                "sample_id": "B002",
+                "category": "button",
+                "green": "samples/corridorkey_semantic/button/button_soft_shadow/green.png",
             }
         ]
     }
-    (tmp_path / "samples" / "vlm_eval_game" / "manifest.json").write_text(
+    (tmp_path / "samples" / "corridorkey_semantic" / "manifest.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
     )
 
     run_root = tmp_path / "out" / "local_ownership_v001_web_20260527"
-    summary_dir = run_root / "local_ownership" / "ui_hard_button_soft_shadow" / "green"
+    summary_dir = run_root / "local_ownership" / "button_soft_shadow" / "green"
     summary_dir.mkdir(parents=True)
-    matte_dir = run_root / "matte" / "ui_hard_button_soft_shadow" / "green"
+    matte_dir = run_root / "matte" / "button_soft_shadow" / "green"
     matte_dir.mkdir(parents=True)
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(matte_dir / "rgba.png")
     (summary_dir / "summary.json").write_text(
         json.dumps(
             {
                 "status": "ok",
-                "sample_id": "G02",
-                "sample_code": "G02-G",
-                "case_id": "ui_hard_button_soft_shadow",
+                "sample_id": "B002",
+                "sample_code": "B002-G",
+                "case_id": "button_soft_shadow",
                 "sample_variant": "green",
                 "expected_role_hit": True,
                 "expected_role": "shadow_like_layer",
-                "rgba": "out/local_ownership_v001_web_20260527/matte/ui_hard_button_soft_shadow/green/rgba.png",
+                "rgba": "out/local_ownership_v001_web_20260527/matte/button_soft_shadow/green/rgba.png",
                 "top_roles": ["shadow_like_layer"],
                 "role_counts": {"shadow_like_layer": 1},
             }
@@ -464,19 +460,19 @@ def test_game_eval_page_renders_running_partial_summary(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert "local ownership (running)" in response.text
-    assert '"sampleCode": "G02-G"' in response.text
-    assert '"percent": 33.3' in response.text
+    assert '"sampleCode": "B002-G"' in response.text
+    assert '"percent": 100.0' in response.text
 
 
 def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_path):
     import ermbg.web as web
 
-    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_panel"
+    sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "ui_panel"
     sample_root.mkdir(parents=True)
     Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
 
     run_root = tmp_path / "out" / "solid_graphic_game9_compare_20260527"
-    case_root = run_root / "G05_ui_panel_green"
+    case_root = run_root / "B005_ui_panel_green"
     new_root = case_root / "new_solid_graphic"
     old_root = case_root / "old_fallback"
     new_root.mkdir(parents=True)
@@ -491,10 +487,10 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
                 "case_count": 1,
                 "rows": [
                     {
-                        "sample_id": "G05",
+                        "sample_id": "B005",
                         "case_id": "ui_panel",
                         "variant": "green",
-                        "input": "samples/vlm_eval_game/ui_panel/green.png",
+                        "input": "samples/corridorkey_semantic/button/ui_panel/green.png",
                         "primary_ambiguity": "same_bg_enclosed_region",
                         "status": "ok",
                         "new": {
@@ -502,7 +498,7 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
                             "solid_confidence": 0.94,
                             "alpha_mean": 0.4,
                             "alpha_soft_fraction": 0.02,
-                            "dir": "out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/new_solid_graphic",
+                            "dir": "out/solid_graphic_game9_compare_20260527/B005_ui_panel_green/new_solid_graphic",
                             "rgba": "green_rgba.png",
                             "ownership_counts": {"opaque_subject": 64},
                         },
@@ -510,7 +506,7 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
                             "strategy": "saturated_bg",
                             "alpha_mean": 0.3,
                             "alpha_soft_fraction": 0.08,
-                            "dir": "out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/old_fallback",
+                            "dir": "out/solid_graphic_game9_compare_20260527/B005_ui_panel_green/old_fallback",
                             "rgba": "green_rgba.png",
                         },
                         "alpha_diff": {"mean_abs": 0.24, "p95_abs": 0.8, "max_abs": 1.0},
@@ -533,27 +529,26 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
     assert "new solid_bg_graphic" in response.text
     assert "old fallback" in response.text
     assert "alpha diff" in response.text
-    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/new_solid_graphic/green_rgba.png" in response.text
-    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/G05_ui_panel_green/alpha_abs_diff.png" in response.text
+    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/B005_ui_panel_green/new_solid_graphic/green_rgba.png" in response.text
+    assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/B005_ui_panel_green/alpha_abs_diff.png" in response.text
 
 
 def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     import ermbg.web as web
 
-    sample_root = tmp_path / "samples" / "vlm_eval_game" / "ui_panel"
+    sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "ui_panel"
     sample_root.mkdir(parents=True)
     Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
     Image.new("RGB", (8, 8), (255, 255, 255)).save(sample_root / "white.png")
-    (tmp_path / "samples" / "vlm_eval_game" / "manifest.json").write_text(
+    (tmp_path / "samples" / "corridorkey_semantic" / "manifest.json").write_text(
         json.dumps(
             {
                 "cases": [
                     {
-                        "sample_id": "G05",
+                        "sample_id": "B005",
                         "id": "ui_panel",
-                        "category": "ui",
-                        "green": "samples/vlm_eval_game/ui_panel/green.png",
-                        "white": "samples/vlm_eval_game/ui_panel/white.png",
+                        "category": "button",
+                        "green": "samples/corridorkey_semantic/button/ui_panel/green.png",
                     }
                 ]
             }
@@ -562,7 +557,7 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     )
 
     run_root = tmp_path / "out" / "comfy_full_test_20260529"
-    case_root = run_root / "G05_green_remote"
+    case_root = run_root / "B005_green_remote"
     case_root.mkdir(parents=True)
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(case_root / "rgba.png")
     Image.new("L", (8, 8), 255).save(case_root / "alpha.png")
@@ -572,22 +567,22 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
             {
                 "runs": [
                     {
-                        "case": "G05_green",
+                        "case": "B005_green",
                         "phase": "remote",
                         "backend": "comfy-ermbg",
                         "input": str(sample_root / "green.png"),
                         "elapsed_sec_client": 6.2,
                         "outputs": {
-                            "rgba": "out/comfy_full_test_20260529/G05_green_remote/rgba.png",
-                            "alpha": "out/comfy_full_test_20260529/G05_green_remote/alpha.png",
-                            "contact_sheet": "out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png",
+                            "rgba": "out/comfy_full_test_20260529/B005_green_remote/rgba.png",
+                            "alpha": "out/comfy_full_test_20260529/B005_green_remote/alpha.png",
+                            "contact_sheet": "out/comfy_full_test_20260529/B005_green_remote/contact_sheet.png",
                         },
                         "remote_debug": {"timings": {"total_sec": 5.1}},
                         "quality_metrics": {"alpha_mean": 0.42, "alpha_nonzero_pixels": 64},
                         "case_metadata": {
-                            "sample_id": "G05",
+                            "sample_id": "B005",
                             "id": "ui_panel",
-                            "category": "ui",
+                            "category": "button",
                             "primary_ambiguity": "remote production smoke",
                         },
                     }
@@ -611,24 +606,69 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     assert "comfy-ermbg remote" in response.text
     assert "comfy-ermbg" in response.text
     assert "contact sheet" not in response.text
-    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/rgba.png" in response.text
-    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/alpha.png" in response.text
-    assert "/eval/game/file/out/comfy_full_test_20260529/G05_green_remote/contact_sheet.png" not in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/rgba.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/alpha.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/contact_sheet.png" not in response.text
 
 
 def test_game_eval_file_serves_eval_image():
     client = TestClient(app)
     response = client.get(
-        "/eval/game/file/out/local_ownership_full_20260527/local_ownership/role_sheet.png"
+        "/eval/game/file/samples/corridorkey_semantic/sheets/full_samples_v1_sheet.jpg"
     )
     assert response.status_code == 200
-    assert response.headers["content-type"] == "image/png"
+    assert response.headers["content-type"] == "image/jpeg"
     assert Image.open(BytesIO(response.content)).mode == "RGB"
 
 
-def test_game_eval_regions_serves_bbox_overlay():
+def test_game_eval_regions_serves_bbox_overlay(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "ui_panel"
+    sample_root.mkdir(parents=True)
+    Image.new("RGB", (16, 16), (0, 200, 0)).save(sample_root / "green.png")
+    run_root = tmp_path / "out" / "local_ownership_test_regions"
+    local_dir = run_root / "local_ownership" / "ui_panel" / "green"
+    local_dir.mkdir(parents=True)
+    (local_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "input": "samples/corridorkey_semantic/button/ui_panel/green.png",
+                "ownership": [
+                    {
+                        "region": {
+                            "kind": "hard_edge_candidate",
+                            "bbox_xyxy": [3, 3, 12, 12],
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "local_ownership" / "eval_report.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_root.name,
+                "case_count": 1,
+                "ok_count": 1,
+                "rows": [
+                    {
+                        "status": "ok",
+                        "case_id": "ui_panel",
+                        "sample_id": "B005",
+                        "sample_variant": "green",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", run_root)
+
     client = TestClient(app)
-    response = client.get("/eval/game/regions/ui_glass_button_soft_shadow?variant=green")
+    response = client.get("/eval/game/regions/ui_panel?variant=green&run=local_ownership_test_regions")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     image = Image.open(BytesIO(response.content))

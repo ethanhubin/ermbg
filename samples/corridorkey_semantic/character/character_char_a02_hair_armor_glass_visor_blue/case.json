@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a02_hair_armor_glass_visor_blue",
+  "sample_id": "C002",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/character/character_char_a02_hair_armor_glass_visor_blue/blue.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a02_hair_armor_glass_visor_blue/blue.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "wispy hair, crisp armor edges, semi-transparent visor on blue screen",
+  "composite_type": "hair + hard armor + translucent visor",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A02",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}

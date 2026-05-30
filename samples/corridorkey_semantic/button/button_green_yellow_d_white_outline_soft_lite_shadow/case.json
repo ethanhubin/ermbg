@@ -1,0 +1,25 @@
+{
+  "id": "button_green_yellow_d_white_outline_soft_lite_shadow",
+  "sample_id": "B053",
+  "category": "button",
+  "family": "white_outline_button_shadow_matrix",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_lite_shadow/green.png",
+  "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_lite_shadow/green.png",
+  "image_size": [
+    256,
+    128
+  ],
+  "subject_color_family": "yellow_orange",
+  "primary_ambiguity": "D White Outline / Soft-Lite-Shadow / green_yellow",
+  "target_route": "owned_contact_shadow",
+  "source_review_id": "B053",
+  "source_batch": "manual_pil_codex_20260530_white_outline_button"
+}

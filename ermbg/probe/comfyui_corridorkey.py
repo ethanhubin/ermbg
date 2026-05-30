@@ -19,6 +19,7 @@ from PIL import Image
 from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.colorspace import oklab_distance, srgb_to_oklab
 from ermbg.keyer import KeyerThresholds, chromatic_key_alpha
+from ermbg.shadow import ShadowThresholds, exterior_scalar_darkening_mask
 
 _DEFAULT_WORKFLOW = Path(__file__).parent / "comfyui_corridorkey.json"
 _FOREGROUND_NODE = "30"
@@ -121,6 +122,68 @@ def build_key_color_protection_floor(
     return np.clip(floor, 0.0, 1.0).astype(np.float32)
 
 
+def _shadow_safe_color_protection_floor(
+    *,
+    image_srgb: np.ndarray,
+    raw_alpha: np.ndarray,
+    background_color: tuple[int, int, int],
+    floor: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Suppress color protection where pixels are measured screen darkening.
+
+    Broad invariant: color distance alone is not ownership. A cast shadow on a
+    saturated known background can move far enough from the key color to look
+    like protected subject, while the pixel still satisfies the physical model
+    ``C ~= scale * B``. The empirical gates below are intentionally loose and
+    evidence-based: they only disable protection for scalar darkening connected
+    to exterior background, and only where CorridorKey has not already assigned
+    strong subject ownership.
+    """
+    known_bg = (floor <= 0.05) & (raw_alpha <= 0.20)
+    shadow_like, shadow_info = exterior_scalar_darkening_mask(
+        image_srgb,
+        background_color,
+        known_bg,
+        ShadowThresholds(
+            # Color protection runs before the dedicated shadow pass, so this
+            # guard must also catch very light hard-shadow antialiasing. The
+            # scalar reconstruction error and exterior flood are the stronger
+            # counter-signals against suppressing real subject material.
+            min_strength=0.01,
+            max_reconstruction_error=0.07,
+            reject_border_components=False,
+        ),
+    )
+    subject_owned = raw_alpha >= 0.80
+    blocked = shadow_like & (~subject_owned) & (floor > 0.0)
+    applied_floor = floor.copy()
+    applied_floor[blocked] = 0.0
+    exterior_domain = known_bg | shadow_like
+    distance_to_exterior = cv2.distanceTransform((~exterior_domain).astype(np.uint8), cv2.DIST_L2, 3)
+    edge_antialias = (
+        (raw_alpha >= 0.20)
+        & (raw_alpha <= 0.88)
+        & (floor > raw_alpha + 0.05)
+        & (distance_to_exterior <= 2.0)
+    )
+    # Color protection is allowed to fill interior holes, but not to convert
+    # CorridorKey's measured outer-edge antialiasing into full opacity. B023's
+    # blue-screen hard UI edge exposed this: mixed yellow+screen pixels were
+    # lifted to alpha 1.0 and became discrete dark edge dots on recomposite.
+    applied_floor[edge_antialias] = 0.0
+    stats = {
+        "shadow_safe_enabled": True,
+        "shadow_like_pixels": int(shadow_like.sum()),
+        "shadow_known_background_pixels": int(known_bg.sum()),
+        "shadow_candidate_pixels": int(shadow_info.get("candidate_pixels", 0)),
+        "floor_shadow_blocked_pixels": int(blocked.sum()),
+        "floor_shadow_blocked_mean": float(floor[blocked].mean()) if blocked.any() else 0.0,
+        "floor_edge_antialias_blocked_pixels": int(edge_antialias.sum()),
+        "floor_applied_mean": float(applied_floor.mean()),
+    }
+    return applied_floor.astype(np.float32), stats
+
+
 def apply_key_color_protection(
     *,
     image_srgb: np.ndarray,
@@ -137,9 +200,15 @@ def apply_key_color_protection(
     boundary.
     """
     t = thresholds or KeyerThresholds(bg_max=8.0, fg_min=16.0)
-    floor = build_key_color_protection_floor(image_srgb, background_color, thresholds=t)
     raw_alpha = np.clip(alpha.astype(np.float32), 0.0, 1.0)
-    protected_alpha = np.maximum(raw_alpha, floor).astype(np.float32)
+    floor = build_key_color_protection_floor(image_srgb, background_color, thresholds=t)
+    applied_floor, shadow_safe_stats = _shadow_safe_color_protection_floor(
+        image_srgb=image_srgb,
+        raw_alpha=raw_alpha,
+        background_color=background_color,
+        floor=floor,
+    )
+    protected_alpha = np.maximum(raw_alpha, applied_floor).astype(np.float32)
     lift = np.clip(protected_alpha - raw_alpha, 0.0, 1.0)
     blend = lift / np.maximum(protected_alpha, 1e-6)
     protected_fg = (
@@ -156,14 +225,18 @@ def apply_key_color_protection(
         "floor_min": float(floor.min()),
         "floor_max": float(floor.max()),
         "floor_mean": float(floor.mean()),
+        "floor_applied_min": float(applied_floor.min()),
+        "floor_applied_max": float(applied_floor.max()),
+        "floor_applied_mean": float(applied_floor.mean()),
         "lifted_pixels_gt_01": int((lift > 0.01).sum()),
         "alpha_mean_before": float(raw_alpha.mean()),
         "alpha_mean_after": float(protected_alpha.mean()),
+        **shadow_safe_stats,
     }
     return (
         np.clip(protected_fg + 0.5, 0, 255).astype(np.uint8),
         np.clip(protected_alpha, 0.0, 1.0).astype(np.float32),
-        floor,
+        applied_floor,
         stats,
     )
 
@@ -248,6 +321,7 @@ class ComfyUICorridorKeyClient:
         input_image: str,
         mask_image: str,
         gamma_space: str,
+        screen_color: str,
         despill_strength: float,
         refiner_strength: float,
         auto_despeckle: str,
@@ -258,6 +332,7 @@ class ComfyUICorridorKeyClient:
             input_image=input_image,
             mask_image=mask_image,
             gamma_space=gamma_space,
+            screen_color=screen_color,
             despill_strength=float(despill_strength),
             refiner_strength=float(refiner_strength),
             auto_despeckle=auto_despeckle,
@@ -267,6 +342,7 @@ class ComfyUICorridorKeyClient:
         workflow = json.loads(rendered)
         workflow.pop("_comment", None)
         inputs = workflow["20"]["inputs"]
+        inputs["screen_color"] = str(inputs["screen_color"])
         inputs["despill_strength"] = float(inputs["despill_strength"])
         inputs["refiner_strength"] = float(inputs["refiner_strength"])
         inputs["despeckle_size"] = int(inputs["despeckle_size"])
@@ -279,19 +355,22 @@ class ComfyUICorridorKeyClient:
         background_color: tuple[int, int, int] = (0, 200, 0),
         hint_alpha: np.ndarray | None = None,
         gamma_space: str = "sRGB",
+        screen_color: str = "green",
         despill_strength: float = 1.0,
         refiner_strength: float = 1.0,
         auto_despeckle: str = "On",
         despeckle_size: int = 400,
         hint_source: str | None = None,
         apply_color_protection: bool = True,
-        color_protection_bg_max: float = 8.0,
-        color_protection_fg_min: float = 16.0,
+        color_protection_bg_max: float = 12.0,
+        color_protection_fg_min: float = 28.0,
     ) -> ComfyCorridorKeyResult:
         if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
             raise ValueError("matte() expects HxWx3 sRGB uint8")
         if gamma_space not in {"sRGB", "Linear"}:
             raise ValueError("gamma_space must be 'sRGB' or 'Linear'")
+        if screen_color not in {"green", "blue", "auto"}:
+            raise ValueError("screen_color must be 'green', 'blue', or 'auto'")
         if auto_despeckle not in {"On", "Off"}:
             raise ValueError("auto_despeckle must be 'On' or 'Off'")
         if color_protection_fg_min <= color_protection_bg_max:
@@ -319,6 +398,7 @@ class ComfyUICorridorKeyClient:
             input_image=server_image,
             mask_image=server_mask,
             gamma_space=gamma_space,
+            screen_color=screen_color,
             despill_strength=despill_strength,
             refiner_strength=refiner_strength,
             auto_despeckle=auto_despeckle,
@@ -382,6 +462,7 @@ class ComfyUICorridorKeyClient:
                 "background_color": list(background_color),
                 "settings": {
                     "gamma_space": gamma_space,
+                    "screen_color": screen_color,
                     "despill_strength": float(despill_strength),
                     "refiner_strength": float(refiner_strength),
                     "auto_despeckle": auto_despeckle,

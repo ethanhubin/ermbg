@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a03_hair_fur_hard_blade_translucent_scarf_green",
+  "sample_id": "C003",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/character/character_char_a03_hair_fur_hard_blade_translucent_scarf_green/green.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a03_hair_fur_hard_blade_translucent_scarf_green/green.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "full-body character with hair/fur edge detail, hard weapon edges, gauze scarf on green screen",
+  "composite_type": "hair/fur + hard blades + translucent scarf",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A03",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}

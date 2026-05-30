@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_a04_hard_boundary_complex_interior",
+  "sample_id": "I004",
+  "category": "icon",
+  "family": "a_hard_boundary",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_a04_hard_boundary_complex_interior/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_a04_hard_boundary_complex_interior/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "multicolor",
+  "primary_ambiguity": "hard opaque edge plus complex interior colors",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-A04",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

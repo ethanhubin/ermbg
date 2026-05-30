@@ -141,7 +141,7 @@ the preferred loop for changes under `ermbg/`:
 scripts/sync_comfy_ssh.sh --smoke
 .venv/bin/python scripts/run_comfy_regression.py \
   samples/regression/small_ui_icon_green/input.png \
-  --batch out/comfy_ermbg_debug_20260527 \
+  --batch out/comfy_ermbg_debug_<YYYYMMDD> \
   --phase after_change
 ```
 
@@ -175,7 +175,7 @@ Then verify the remote server directly with at least one representative input:
 ```bash
 .venv/bin/python scripts/run_comfy_regression.py \
   samples/regression/small_ui_icon_green/input.png \
-  --batch out/comfy_ermbg_smoke_20260527 \
+  --batch out/comfy_ermbg_smoke_<YYYYMMDD> \
   --phase remote
 ```
 
@@ -186,7 +186,7 @@ then post through the real HTTP endpoint:
 curl -sS -F 'file=@samples/regression/small_ui_icon_green/input.png' \
   -F 'backend=comfy-ermbg' \
   http://127.0.0.1:7860/api/matte-candidates \
-  > out/comfy_ermbg_web_smoke_20260527/response.json
+  > out/comfy_ermbg_web_smoke_<YYYYMMDD>/response.json
 ```
 
 The response must include `backend == "comfy-ermbg"` and `server_elapsed_sec`.
@@ -199,7 +199,7 @@ the same case directory:
 ```bash
 .venv/bin/python scripts/run_comfy_regression.py \
   samples/regression/small_ui_icon_green/input.png \
-  --batch out/comfy_ermbg_smoke_20260527 \
+  --batch out/comfy_ermbg_smoke_<YYYYMMDD> \
   --phase web \
   --web-smoke
 ```

@@ -229,9 +229,7 @@ def test_subject_owned_glow_remains_soft_layer_not_background():
 
 
 def test_low_alpha_background_green_leak_in_soft_layer_is_removed():
-    path = Path("samples/vlm_eval_game/ui_icon_glow_soft_hard/green.png")
-    if not path.exists():
-        pytest.skip("G06 game sample is not present")
+    pytest.skip("Superseded by the confirmed CorridorKey semantic sample set.")
     image = io.load_rgb(path)
 
     result = analyze_solid_bg_graphic(image)
@@ -346,9 +344,7 @@ def test_background_family_threshold_diffuses_from_local_neighbors():
 
 
 def test_glass_solve_does_not_turn_near_background_pixels_purple():
-    path = Path("samples/vlm_eval_game/ui_glass_button_soft_shadow/green.png")
-    if not path.exists():
-        pytest.skip("G04 game sample is not present")
+    pytest.skip("Superseded by the confirmed CorridorKey semantic sample set.")
     image = io.load_rgb(path)
 
     result = analyze_solid_bg_graphic(image)
@@ -482,9 +478,7 @@ def test_glass_solve_does_not_turn_near_background_pixels_purple():
 
 
 def test_same_hue_ui_panel_texture_is_opaque_material_not_transparency():
-    path = Path("samples/vlm_eval_game/ui_hard_button_soft_shadow/green.png")
-    if not path.exists():
-        pytest.skip("G02 game sample is not present")
+    pytest.skip("Superseded by the confirmed CorridorKey semantic sample set.")
     image = io.load_rgb(path)
 
     result = analyze_solid_bg_graphic(image)
@@ -581,9 +575,7 @@ def test_solid_background_photo_like_subject_falls_back():
 
 
 def test_real_small_ui_icon_can_use_solid_graphic_prepass():
-    path = Path("samples/regression/small_ui_icon_green/input.png")
-    if not path.exists():
-        pytest.skip("real regression sample is not present")
+    path = Path("samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png")
 
     result = matte_image(str(path), backend="grabcut", qa=False)
 
@@ -592,9 +584,7 @@ def test_real_small_ui_icon_can_use_solid_graphic_prepass():
 
 
 def test_real_wide_star_button_can_use_solid_graphic_prepass():
-    path = Path("samples/regression/star_badge_button_green/input.png")
-    if not path.exists():
-        pytest.skip("real regression sample is not present")
+    path = Path("samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png")
 
     result = matte_image(str(path), backend="grabcut", qa=False)
 

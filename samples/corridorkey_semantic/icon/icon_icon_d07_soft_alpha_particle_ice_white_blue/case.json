@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_d07_soft_alpha_particle_ice_white_blue",
+  "sample_id": "I017",
+  "category": "icon",
+  "family": "d_soft_alpha_effect",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_d07_soft_alpha_particle_ice_white_blue/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_d07_soft_alpha_particle_ice_white_blue/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "blue_cyan",
+  "primary_ambiguity": "white-blue frost particles and mist, no hard core",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-D07",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

@@ -70,10 +70,7 @@ ermbg/
     openai_image.py   gpt-image-1 via OpenAI API
     comfyui_*.json    workflow templates
     prompts.py        GREEN_SCREEN_RGB / GREEN_SCREEN_PROMPT
-samples/vlm_eval/            AI-generated VLM planner eval cases
-samples/regression/          real failure regressions with case.json metadata
-samples/legacy/inputs/       3.png 4.png ... 8.png + optional *.json prompts
-samples/legacy/outputs/      archived matte_* and green_* output trees
+samples/corridorkey_semantic/  current B/I/C Web/Game Eval sample set
 tests/                pytest suite; keep `.venv/bin/pytest -q` passing
 ```
 
@@ -107,7 +104,7 @@ tests/                pytest suite; keep `.venv/bin/pytest -q` passing
 - Do not write new eval artifacts directly into loose ad-hoc paths. Use a stable batch id such as `out/local_ownership_<purpose>_<YYYYMMDD>/` or an explicit user-provided batch name.
 - Each batch should be self-contained and browsable: keep per-case outputs under the batch root and write a machine-readable summary (`summary.json`, `summary_*.json`, or `eval_report.json`) at a predictable location.
 - Web/debug tooling should discover and browse batches rather than hard-code a single result directory. New test flows should automatically register their outputs through the batch summary.
-- When re-running a specific sample such as `G02-G`, still run it through the same batch flow and record the selected sample id / variant in the summary; do not create orphan outputs.
+- When re-running a specific sample such as `B001`, still run it through the same batch flow and record the selected sample id in the summary; do not create orphan outputs.
 
 ### Web server update / verification contract
 
@@ -243,5 +240,5 @@ slow for normal interactive use.
   5. `ermbg.matting.matte()` uses `subject_material_mask` only as a protective constraint, restoring soft-layer alpha after destructive keyer/repair changes;
   6. shadow opacity is still measured locally from `C_linear ~= scale * B_linear`.
 - Do not route ownership ambiguity to model planning by default. First inspect local signals, role scores, execution masks, and whether foreground/color recovery is the real failure.
-- G02/G04/G06 green+white are the fast regression target set. Keep G03 out of the fast loop unless the task explicitly expands coverage.
+- Use focused B/I/C subsets from `samples/corridorkey_semantic/manifest.json` for fast loops; full route/eval work should run through the manifest-backed batch flow.
 - Documents under `docs/archive/` are historical reference only; do not treat archived plans as active instructions.

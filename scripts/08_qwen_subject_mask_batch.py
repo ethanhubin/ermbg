@@ -1,6 +1,6 @@
 """Batch Qwen subject recognition -> CLIPSeg subject mask generation.
 
-Runs over the current VLM eval sample manifests, asks remote Comfy Qwen3_VQA
+Runs over the current CorridorKey sample manifest, asks remote Comfy Qwen3_VQA
 for a concise foreground-subject prompt, then feeds that prompt into the
 existing CLIPSeg -> ERMBG Comfy workflow to produce subject masks.
 """
@@ -33,7 +33,7 @@ from ermbg.vlm_semantic import (
 )
 
 
-DEFAULT_SAMPLE_ROOTS = (Path("samples/vlm_eval"), Path("samples/vlm_eval_game"))
+DEFAULT_SAMPLE_ROOTS = (Path("samples/corridorkey_semantic"),)
 
 
 def _safe_id(value: str) -> str:
@@ -49,9 +49,10 @@ def _load_manifest_samples(sample_roots: list[Path]) -> list[dict[str, Any]]:
         data = json.loads(manifest.read_text())
         for case in data.get("cases", []):
             case_id = str(case["id"])
-            if "green" in case:
-                image_path = Path(case["green"])
-                background = case.get("backgrounds", {}).get("green", [0, 200, 0])
+            screen = str(case.get("screen") or ("green" if "green" in case else "blue" if "blue" in case else "green"))
+            if screen in case:
+                image_path = Path(case[screen])
+                background = case.get("backgrounds", {}).get(screen, [0, 200, 0] if screen == "green" else [0, 0, 200])
             else:
                 image_path = Path(case.get("green_input") or case["input"])
                 background = case.get("green_background") or case.get("background", [0, 200, 0])

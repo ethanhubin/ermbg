@@ -18,8 +18,8 @@ from ermbg import matte_image
 from ermbg.comfy import DEFAULT_COMFY_URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-EVAL_BACKENDS = ("comfy-corridorkey", "comfy-ermbg", "comfy-rmbg")
+DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
+EVAL_BACKENDS = ("auto", "comfy-corridorkey", "comfy-ermbg", "comfy-rmbg")
 
 
 def _json_safe(value: Any) -> Any:
@@ -64,6 +64,10 @@ def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
     return [case for case in cases if isinstance(case, dict)]
 
 
+def _case_variants(case: dict[str, Any], variants: list[str]) -> list[str]:
+    return [variant for variant in variants if isinstance(case.get(variant), str)]
+
+
 def _next_versioned_out_dir(prefix: str) -> Path:
     out_root = PROJECT_ROOT / "out"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -82,6 +86,16 @@ def _variant_slug(variants: str) -> str:
 
 def _backend_slug(backend: str) -> str:
     return backend.removeprefix("comfy-").replace("-", "_")
+
+
+def _effective_backend(requested_backend: str, result: Any) -> str:
+    if requested_backend == "auto":
+        auto_route = getattr(result, "debug", {}).get("auto_route")
+        if isinstance(auto_route, dict):
+            selected = auto_route.get("selected_backend")
+            if isinstance(selected, str) and selected:
+                return selected
+    return requested_backend
 
 
 def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
@@ -219,16 +233,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     out_root = args.out_dir
     out_root.mkdir(parents=True, exist_ok=True)
     runs: list[dict[str, Any]] = []
-    total = len(cases) * len(variants)
+    total = sum(len(_case_variants(case, variants)) for case in cases)
     run_index = 0
     for case_index, case in enumerate(cases, start=1):
         case_id = str(case["id"])
         sample_id = str(case.get("sample_id") or f"G{case_index:02d}")
-        for variant in variants:
+        for variant in _case_variants(case, variants):
             run_index += 1
-            if variant not in case:
-                print(f"[{run_index}/{total}] {sample_id}-{variant[:1].upper()} {case_id}: SKIP missing variant", flush=True)
-                continue
             input_path = PROJECT_ROOT / str(case[variant])
             case_dir = out_root / f"{sample_id}_{case_id}_{variant}"
             case_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +255,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     comfy_url=args.comfy_url,
                 )
                 elapsed = time.perf_counter() - start
+                effective_backend = _effective_backend(args.backend, result)
                 stem = input_path.stem
                 _copy_backend_outputs(case_dir, stem)
                 _write_contact_sheet(case_dir)
@@ -254,7 +266,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 summary = {
                     "status": "ok",
                     "case": f"{sample_id}_{case_id}_{variant}",
-                    "backend": args.backend,
+                    "backend": effective_backend,
+                    "requested_backend": args.backend,
                     "input": _rel(input_path),
                     "sample_variant": variant,
                     "elapsed_sec_client": elapsed,
@@ -274,6 +287,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "status": "error",
                     "case": f"{sample_id}_{case_id}_{variant}",
                     "backend": args.backend,
+                    "requested_backend": args.backend,
                     "input": _rel(input_path),
                     "sample_variant": variant,
                     "error": str(exc),
@@ -286,7 +300,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "backend": args.backend,
                 "batch": _rel(out_root),
                 "case_count": len(cases),
-                "run_count": len(cases) * len(variants),
+                "run_count": total,
                 "ok_count": sum(1 for row in runs if row.get("status") == "ok"),
                 "variants": variants,
                 "runs": runs,
@@ -305,9 +319,9 @@ def main() -> None:
         default=None,
         help="Output batch directory. Default: out/<backend>_game_<variants>_<YYYYMMDD>_vNNN.",
     )
-    parser.add_argument("--backend", default="comfy-corridorkey", choices=EVAL_BACKENDS)
-    parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. G02,G04,G06")
-    parser.add_argument("--variants", default="green", help="Comma-separated variants from manifest, e.g. green,blue")
+    parser.add_argument("--backend", default="auto", choices=EVAL_BACKENDS)
+    parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. B001,I011,C004")
+    parser.add_argument("--variants", default="green,blue", help="Comma-separated variants from manifest, e.g. green,blue")
     parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     parser.add_argument("--subject-threshold", type=float, default=35.0)
     args = parser.parse_args()

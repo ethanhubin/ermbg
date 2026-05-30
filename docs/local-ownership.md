@@ -93,49 +93,24 @@ and failure mode they protect against.
 
 ## Current Eval Target
 
-For fast iteration, skip G03 for now and keep the current target set focused.
-
-Current target set:
+The active sample target is the full confirmed CorridorKey semantic set:
 
 ```text
-G02 green/white: soft/contact shadow survives.
-G04 green/white: glass button is subject-owned soft layer.
-G06 green/white: glow/smoke is subject-owned soft layer.
+samples/corridorkey_semantic/manifest.json
 ```
 
-Latest local batch:
+The previous G02/G04/G06 loop has been superseded by the B/I/C sample IDs in the
+new manifest. Use targeted subsets for fast local ownership checks only when a
+mechanism needs focused debugging:
 
 ```text
-out/local_ownership_resolved2_g02_g04_g06_20260527/
+B004/B005/B019/B020: shadow-like button layers.
+B011/B026/B041/B046: translucent/glass button layers.
+I010/I019/C004/C009: soft-alpha icon/effect and composite character layers.
 ```
 
-Summary:
-
-```text
-ok = 6/6
-expected_role_hit = 6/6
-```
-
-Observed behavior:
-
-- G02-G and G02-W use the base matte output; no material-protected rerender.
-- G04-G and G04-W use protected output with `subject_soft_layer`.
-- G06-G and G06-W use protected output with `subject_soft_layer`.
-- G02-G's tiny soft-material false positive is removed by execution-mask
-  arbitration.
-- G04/G06 shadow-like fragments are removed by soft-dominant arbitration.
-
-Web view:
-
-```text
-http://127.0.0.1:7860/eval/game?run=local_ownership_resolved2_g02_g04_g06_20260527
-```
-
-Contact sheet:
-
-```text
-out/local_ownership_resolved2_g02_g04_g06_20260527/local_ownership/contact_sheet.jpg
-```
+The next full step is not more sample generation; it is Phase 2 recognition and
+route audit over the approved 83 samples.
 
 ## How To Reproduce
 
@@ -143,9 +118,8 @@ out/local_ownership_resolved2_g02_g04_g06_20260527/local_ownership/contact_sheet
 .venv/bin/pytest -q tests/test_ownership.py tests/test_shadow.py tests/test_risk.py
 
 .venv/bin/python scripts/10_local_ownership_batch.py \
-  --out-dir out/local_ownership_resolved2_g02_g04_g06_20260527 \
-  --sample-id G02,G04,G06 \
-  --variants green,white
+  --out-dir out/local_ownership_corridorkey_semantic_probe \
+  --sample-id B004,B011,I019,C004
 ```
 
 Run the web UI:
@@ -179,7 +153,8 @@ Open work:
   should be optional, browsable in eval/UI, and testable without network calls.
 - turn the debug batch flow into a cleaner first-class eval command if this
   route becomes the default workflow;
-- expand beyond G02/G04/G06 once the foreground recovery path is stable.
+- run and inspect the full confirmed sample set once Phase 2 route recognition
+  instrumentation is in place.
 
 Archived docs remain useful for historical reasoning, but they are no longer
 the active plan.

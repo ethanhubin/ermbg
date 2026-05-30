@@ -182,7 +182,14 @@ def test_classify_extremely_noisy_bg():
 
 def test_small_ui_icon_with_clean_green_corners_is_not_noisy():
     """Tiny UI sprites can have subject rims on the edge but clean bg corners."""
-    path = Path(__file__).resolve().parents[1] / "samples" / "regression" / "small_ui_icon_green" / "input.png"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "corridorkey_semantic"
+        / "icon"
+        / "icon_icon_a01_hard_boundary_strong_outline"
+        / "green.png"
+    )
     img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
     s = classify_strategy(img)
     assert s.bg_type == "saturated"
@@ -192,7 +199,14 @@ def test_small_ui_icon_with_clean_green_corners_is_not_noisy():
 
 def test_wide_star_button_with_clean_green_corners_is_not_noisy():
     """Wide UI buttons can dominate the border while still having stable bg corners."""
-    path = Path(__file__).resolve().parents[1] / "samples" / "regression" / "star_badge_button_green" / "input.png"
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "corridorkey_semantic"
+        / "button"
+        / "button_green_yellow_a_outlined_no_shadow"
+        / "green.png"
+    )
     img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
     s = classify_strategy(img)
     assert s.bg_type == "saturated"

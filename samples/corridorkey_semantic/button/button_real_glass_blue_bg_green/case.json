@@ -1,0 +1,25 @@
+{
+  "id": "button_real_glass_blue_bg_green",
+  "sample_id": "B049",
+  "category": "button",
+  "family": "real_glass_button",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_green/blue.png",
+  "input": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_green/blue.png",
+  "image_size": [
+    256,
+    128
+  ],
+  "subject_color_family": "green",
+  "primary_ambiguity": "real glass button with translucent material",
+  "target_route": "local_color_diffusion_translucency",
+  "source_review_id": "MRG04",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+}

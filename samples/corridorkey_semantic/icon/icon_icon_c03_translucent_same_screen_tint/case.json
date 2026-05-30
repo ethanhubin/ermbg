@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_c03_translucent_same_screen_tint",
+  "sample_id": "I010",
+  "category": "icon",
+  "family": "c_translucent",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_c03_translucent_same_screen_tint/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_c03_translucent_same_screen_tint/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "green",
+  "primary_ambiguity": "translucent same-screen-family material",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-C03",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

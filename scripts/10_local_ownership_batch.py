@@ -28,7 +28,7 @@ import importlib.util
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
+DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
 
 
 def _load_debug_region_module():
@@ -57,6 +57,10 @@ def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
     if not isinstance(cases, list):
         raise ValueError("manifest.json must contain a cases list")
     return [case for case in cases if isinstance(case, dict)]
+
+
+def _case_variants(case: dict[str, Any], variants: tuple[str, ...]) -> list[str]:
+    return [variant for variant in variants if isinstance(case.get(variant), str)]
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -136,9 +140,9 @@ def _selected_role_masks(
 
 def _expected_role(case: dict[str, Any]) -> str | None:
     sample_id = str(case.get("sample_id", ""))
-    if sample_id == "G02":
+    if sample_id in {"B004", "B005", "B019", "B020"}:
         return "shadow_like_layer"
-    if sample_id in {"G04", "G06"}:
+    if sample_id in {"B011", "B026", "B041", "B046", "I010", "I019", "C004", "C009"}:
         return "subject_soft_layer"
     return None
 
@@ -191,9 +195,9 @@ def run(args: argparse.Namespace) -> None:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
         cases = [case for case in cases if str(case.get("sample_id", "")) in sample_ids]
     variants = tuple(item.strip() for item in args.variants.split(",") if item.strip())
-    invalid = sorted(set(variants) - {"green", "white"})
+    invalid = sorted(set(variants) - {"green", "white", "blue"})
     if invalid:
-        raise ValueError(f"--variants only accepts green,white; got {','.join(invalid)}")
+        raise ValueError(f"--variants only accepts green,white,blue; got {','.join(invalid)}")
 
     out_root = args.out_dir
     matte_root = out_root / "matte"
@@ -203,13 +207,13 @@ def run(args: argparse.Namespace) -> None:
 
     segmenter = build_segmenter(backend="auto")
     rows: list[dict[str, Any]] = []
-    total = len(cases) * len(variants)
+    total = sum(len(_case_variants(case, variants)) for case in cases)
     index = 0
     for case in cases:
         case_id = str(case["id"])
         sample_id = str(case.get("sample_id") or case_id)
         expected_role = _expected_role(case)
-        for variant in variants:
+        for variant in _case_variants(case, variants):
             index += 1
             sample_code = f"{sample_id}-{variant[:1].upper()}"
             print(f"[{index}/{total}] {sample_code} {case_id}/{variant}", flush=True)
@@ -330,8 +334,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "out" / "local_ownership_20260527")
-    parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. G02,G04,G06")
-    parser.add_argument("--variants", default="green,white", help="Comma-separated variants: green,white")
+    parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. B001,I011,C004")
+    parser.add_argument("--variants", default="green,blue", help="Comma-separated variants: green,blue")
     run(parser.parse_args())
 
 

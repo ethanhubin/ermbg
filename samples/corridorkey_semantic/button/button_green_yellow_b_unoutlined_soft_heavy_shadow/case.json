@@ -1,0 +1,25 @@
+{
+  "id": "button_green_yellow_b_unoutlined_soft_heavy_shadow",
+  "sample_id": "B010",
+  "category": "button",
+  "family": "solid_button_shadow_matrix",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_heavy_shadow/green.png",
+  "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_heavy_shadow/green.png",
+  "image_size": [
+    256,
+    128
+  ],
+  "subject_color_family": "yellow_orange",
+  "primary_ambiguity": "B Unoutlined / Soft-Heavy-Shadow / green_yellow",
+  "target_route": "opaque_hard_ui",
+  "source_review_id": "B05",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+}

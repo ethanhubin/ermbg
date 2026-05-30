@@ -93,23 +93,22 @@ known background image
 - `shadow_like_layer`:已知背景的 scalar darkening,走 shadow matte。
 - `conservative_unknown`:证据不足,保留当前 alpha。
 
-当前 G02/G04/G06 green+white 小批次:
+当前全量样本集已经收口到 `samples/corridorkey_semantic/`:
 
 ```bash
-.venv/bin/python scripts/10_local_ownership_batch.py \
-  --out-dir out/local_ownership_resolved2_g02_g04_g06_20260527 \
-  --sample-id G02,G04,G06 \
-  --variants green,white
+.venv/bin/python scripts/run_corridorkey_game_eval.py \
+  --backend comfy-corridorkey
 ```
 
-结果:
+样本规模:
 
-- `ok=6/6`
-- `expected_role_hit=6/6`
-- G02 使用 base matte,避免 material-protected rerun 误伤软阴影。
-- G04/G06 使用 protected matte,避免半透明/辉光被 keyer/repair 泛白或变硬。
+- Button:54
+- Icon / effect:20
+- Character:9 (1024x1024)
 
-详情见 [docs/local-ownership.md](docs/local-ownership.md)。
+第一阶段样本建设已完成。第二阶段目标是基于这 83 个确认样本做识别/路由审计,
+再进入路径内参数调优。详情见
+[docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md)。
 
 ## Python API
 
@@ -226,11 +225,13 @@ checker 合成、白/黑底对比和 alpha 对比。
 - [docs/corridorkey-game-ui-plan.md](docs/corridorkey-game-ui-plan.md):
   当前开发主线:CorridorKey 游戏 UI 工作流、自动参数适配、蓝底路线和 Web mask 兜底。
 - [docs/local-ownership.md](docs/local-ownership.md):
-  当前工程接力入口:local ownership、执行层仲裁、G02/G04/G06 现状和复现命令。
+  local ownership、执行层仲裁和当前复现命令。
 - [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md):
   正式 `comfy-ermbg` 路径的开发、同步、远端 smoke 和 Web 验证流程。
+- [docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md):
+  当前全量测试样本、阶段状态和下一阶段路线。
 - [docs/archive/](docs/archive/):
-  旧模型规划、candidate-planner、G02 单样本路线归档,只作历史参考。
+  旧模型规划、candidate-planner、G-style 单样本路线归档,只作历史参考。
 - [DEPLOY.md](DEPLOY.md):ComfyUI 部署。
 - [comfy_nodes/README.md](comfy_nodes/README.md):ComfyUI 节点用法。
 

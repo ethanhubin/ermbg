@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a01_hair_hard_edge_glass_pendant_green",
+  "sample_id": "C001",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/character/character_char_a01_hair_hard_edge_glass_pendant_green/green.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a01_hair_hard_edge_glass_pendant_green/green.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "fine hair strands, crisp opaque bust, translucent pendant/visor on green screen",
+  "composite_type": "hair + hard opaque clothing + small translucent glass accessory",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A01",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}
