@@ -42,10 +42,9 @@ Changed sample block:
 | B021-B025 | blue | green unoutlined buttons | opaque hard UI without outline/no-shadow/hard/soft shadow |
 | B026-B030 | blue | translucent green buttons | translucent UI material on blue screen |
 
-The previous `button_blue_yellow_*` records were removed from the active sample
-tree and manifest. Do not use them as regression targets; they measured a
-CorridorKey decomposition weakness for yellow-on-blue rather than the intended
-green-subject blue-screen pressure.
+Only the green-subject blue-screen block is active for B016-B030. Do not add
+alternate blue-screen color studies to the manifest unless they represent a new
+current failure class.
 
 Latest full baseline:
 
@@ -138,9 +137,9 @@ foreground recovery, and shadow/soft-layer handling.
 | additive or soft-alpha effect | icon D group |
 | mixed character boundary | character composite group |
 
-## Inactive Historical Sets
+## Active Set Boundary
 
-The old `samples/vlm_eval` and `samples/vlm_eval_game` directories have been
-removed. Historical analysis in `docs/archive/` may still mention G-style sample
-IDs, but active development and Web/Game Eval should use the B/I/C sample IDs in
+Historical generated sets are not active inputs. Historical analysis in
+`docs/archive/` may still mention retired sample IDs, but active development and
+Web/Game Eval should use the B/I/C sample IDs in
 `samples/corridorkey_semantic/manifest.json`.

@@ -216,9 +216,9 @@ checker 合成、白/黑底对比和 alpha 对比。
 
 全量测试数量会随当前分支变化;接力前以本地 `.venv/bin/pytest -q` 为准。
 
-真实回归样本放在 `samples/regression/`。例如
-`samples/regression/small_ui_icon_green/` 覆盖小尺寸 UI 图标、主体贴边、
-角落绿幕稳定但整圈边缘被主体污染的场景。
+当前主回归入口是 `samples/corridorkey_semantic/manifest.json`。真实用户
+回归以后仍放入 `samples/regression/`，但不要引用已退役的旧样本目录；新增
+case 需要带 `case.json` 并说明它覆盖的失败机制。
 
 ## 文档索引
 

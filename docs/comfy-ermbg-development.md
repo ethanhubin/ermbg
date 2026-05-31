@@ -140,7 +140,7 @@ the preferred loop for changes under `ermbg/`:
 ```bash
 scripts/sync_comfy_ssh.sh --smoke
 .venv/bin/python scripts/run_comfy_regression.py \
-  samples/regression/small_ui_icon_green/input.png \
+  samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png \
   --batch out/comfy_ermbg_debug_<YYYYMMDD> \
   --phase after_change
 ```
@@ -174,7 +174,7 @@ Then verify the remote server directly with at least one representative input:
 
 ```bash
 .venv/bin/python scripts/run_comfy_regression.py \
-  samples/regression/small_ui_icon_green/input.png \
+  samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png \
   --batch out/comfy_ermbg_smoke_<YYYYMMDD> \
   --phase remote
 ```
@@ -183,7 +183,7 @@ For Web-facing work, start a fresh server exactly as specified in `AGENTS.md`,
 then post through the real HTTP endpoint:
 
 ```bash
-curl -sS -F 'file=@samples/regression/small_ui_icon_green/input.png' \
+curl -sS -F 'file=@samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png' \
   -F 'backend=comfy-ermbg' \
   http://127.0.0.1:7860/api/matte-candidates \
   > out/comfy_ermbg_web_smoke_<YYYYMMDD>/response.json
@@ -198,7 +198,7 @@ the same case directory:
 
 ```bash
 .venv/bin/python scripts/run_comfy_regression.py \
-  samples/regression/small_ui_icon_green/input.png \
+  samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png \
   --batch out/comfy_ermbg_smoke_<YYYYMMDD> \
   --phase web \
   --web-smoke
@@ -215,14 +215,20 @@ Add samples when a real user-facing failure exposes a new class of risk. Keep
 the sample small, named by failure class, and documented with a nearby
 `case.json`.
 
-Current real-world regression:
+Current canonical smoke sample:
 
-- `samples/regression/small_ui_icon_green/input.png`
-- Failure class: small UI/game icon, green corners visible, subject or rim
-  touches the border, whole-edge background sampling becomes contaminated.
+- `samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png`
+- Failure class: small UI/game icon, green corners visible, subject/rim close
+  enough to the border that whole-edge background sampling can be contaminated.
 - Required local guard: router must classify it as `saturated`, not `noisy`.
 - Required production guard: `comfy-ermbg` Web result must preserve the full icon
   silhouette, not only the most salient interior symbol.
 
-Generated game-eval samples are useful for ownership and shadow reasoning, but
-they do not replace real small-asset regressions. Keep both sets active.
+Put future real user regressions under `samples/regression/<case_id>/input.png`
+with a `case.json`. Generated semantic samples remain the default eval target,
+but real regressions should be added when a user-facing image exposes a new
+failure class.
+
+The semantic eval set is useful for ownership and shadow reasoning. Real user
+regressions should be added alongside it only when they cover a mechanism the
+semantic set does not already exercise.

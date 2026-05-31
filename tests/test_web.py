@@ -236,7 +236,7 @@ def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
     assert payload["runId"].endswith("_v001")
     assert payload["status"] == "running"
     assert payload["progress"]["completed"] == 0
-    assert payload["progress"]["total"] == 78
+    assert payload["progress"]["total"] == 83
     assert (tmp_path / "out" / payload["runId"] / "web_launch.json").exists()
 
     status_response = client.get(payload["statusUrl"])
@@ -244,6 +244,14 @@ def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
     status_payload = status_response.json()
     assert status_payload["status"] == "running"
     assert status_payload["progress"]["percent"] == 0
+
+
+def test_game_eval_expected_count_tracks_manifest():
+    import ermbg.web as web
+
+    manifest = json.loads((web.PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json").read_text())
+
+    assert web._game_eval_expected_case_count() == manifest["case_count"] == 83
 
 
 def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):

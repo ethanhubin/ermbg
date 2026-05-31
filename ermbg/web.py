@@ -62,6 +62,10 @@ GAME_EVAL_RUN_PREFIXES = (
 )
 FAST_GAME_EVAL_SAMPLE_IDS = ("B001", "B016", "B031", "B046", "I011", "I019", "C004", "C009")
 GAME_EVAL_VARIANTS = ("green", "blue")
+# Fallback only applies in tests or broken installs where the manifest is not
+# available. It mirrors the current B/I/C semantic manifest so progress does not
+# silently drift back to the retired 78-sample set.
+FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
 DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
     "auto": {
@@ -2547,7 +2551,7 @@ def _next_game_eval_run_id(prefix: str = LOCAL_OWNERSHIP_EVAL_PREFIX) -> str:
 
 def _game_eval_expected_case_count(variants: tuple[str, ...] = GAME_EVAL_VARIANTS) -> int:
     total = _game_eval_case_variant_count(variants=variants)
-    return total if total > 0 else 78
+    return total if total > 0 else FALLBACK_GAME_EVAL_EXPECTED_TOTAL
 
 
 def _game_eval_batch_progress(

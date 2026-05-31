@@ -210,7 +210,13 @@ def apply_key_color_protection(
     )
     protected_alpha = np.maximum(raw_alpha, applied_floor).astype(np.float32)
     lift = np.clip(protected_alpha - raw_alpha, 0.0, 1.0)
-    blend = lift / np.maximum(protected_alpha, 1e-6)
+    alpha_lift_recovery = lift / np.maximum(protected_alpha, 1e-6)
+    # The surviving floor is material evidence, not only an alpha lower bound.
+    # Opaque hard UI can receive a visibly banded CorridorKey foreground even
+    # when raw alpha is already nonzero; once shadow and outer-edge gates have
+    # accepted a non-key color as protected subject material, recover that RGB
+    # from the source image instead of preserving learned transparency waves.
+    blend = np.maximum(alpha_lift_recovery, applied_floor)
     protected_fg = (
         foreground_srgb.astype(np.float32) * (1.0 - blend[..., None])
         + image_srgb.astype(np.float32) * blend[..., None]

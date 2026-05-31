@@ -56,6 +56,7 @@ def test_corridorkey_semantic_coverage_catalog_is_actionable():
     assert len(sample_ids) == len(set(sample_ids))
     assert {"B001", "I001", "C001"} <= set(sample_ids)
     assert all(case["category"] in {"button", "icon", "character"} for case in catalog["cases"])
+    blue_green_ids = {f"B{index:03d}" for index in range(16, 31)}
     for case in catalog["cases"]:
         screen = case["screen"]
         assert screen in {"green", "blue"}
@@ -68,6 +69,15 @@ def test_corridorkey_semantic_coverage_catalog_is_actionable():
         case_path = input_path.with_name("case.json")
         assert input_path.exists(), input_path
         assert case_path.exists(), case_path
+        if case["sample_id"] in blue_green_ids:
+            # B016-B030 are the active blue-screen counterexamples for
+            # green-subject UI. The retired yellow-on-blue block was useful for
+            # diagnosis but no longer represents the failure class we need.
+            assert screen == "blue"
+            assert "button_blue_green_" in case["id"]
+            assert "button_blue_yellow_" not in case["id"]
+            assert "button_blue_green_" in case["blue"]
+            assert "button_blue_yellow_" not in case["blue"]
 
 
 def test_corridorkey_hint_is_soft_eroded_known_bg_support():
@@ -113,6 +123,32 @@ def test_key_color_protection_lifts_alpha_and_recovers_input_color():
     assert protected_alpha[0, 0] == 0.0
     assert protected_fg[1, 1].tolist() == [250, 188, 24]
     assert stats["lifted_pixels_gt_01"] == 4
+
+
+def test_key_color_protection_recovers_banded_partial_foreground():
+    image = np.full((24, 32, 3), (0, 200, 0), dtype=np.uint8)
+    image[6:18, 8:24] = (42, 128, 238)
+    foreground = image.copy()
+    foreground[6:18, 8:16] = (30, 98, 190)
+    foreground[6:18, 16:24] = (74, 160, 242)
+    alpha = np.zeros((24, 32), dtype=np.float32)
+    alpha[6:18, 8:24] = 0.72
+
+    protected_fg, protected_alpha, floor, _ = apply_key_color_protection(
+        image_srgb=image,
+        foreground_srgb=foreground,
+        alpha=alpha,
+        background_color=(0, 200, 0),
+    )
+
+    # Mechanism: CorridorKey can produce wavy foreground color inside an opaque
+    # UI component while alpha is already partially present. A non-key color
+    # floor that survives the shadow/edge gates is material evidence, so RGB
+    # should recover from the source image rather than preserving that banding.
+    assert floor[12, 12] > 0.95
+    assert protected_alpha[12, 12] > 0.95
+    assert protected_fg[12, 12].tolist() == [42, 128, 238]
+    assert protected_fg[12, 20].tolist() == [42, 128, 238]
 
 
 def test_key_color_protection_blocks_scalar_shadow_without_losing_highlight():

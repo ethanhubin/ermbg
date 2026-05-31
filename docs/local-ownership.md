@@ -82,10 +82,11 @@ masks need stricter global arbitration:
   material rerender;
 - protected rerender is used only when `subject_soft_layer` exists.
 
-This prevents the two important cross-failures:
+This prevents the two important cross-failures now covered by the B/I/C
+manifest:
 
-- G02-style soft shadow being misread as translucent material;
-- G04/G06-style glass/glow being reopened as shadow.
+- shadow-like button layers being misread as translucent material;
+- glass/glow/soft-alpha layers being reopened as shadow.
 
 The current empirical gates live near `resolve_execution_masks()` in
 [ermbg/ownership.py](../ermbg/ownership.py), with comments describing the signal
@@ -99,7 +100,7 @@ The active sample target is the full confirmed CorridorKey semantic set:
 samples/corridorkey_semantic/manifest.json
 ```
 
-The previous G02/G04/G06 loop has been superseded by the B/I/C sample IDs in the
+The previous focused loop has been superseded by the B/I/C sample IDs in the
 new manifest. Use targeted subsets for fast local ownership checks only when a
 mechanism needs focused debugging:
 
@@ -138,12 +139,12 @@ Open work:
 - improve W-group foreground/color recovery so protected soft layers do not
   become pale or over-white;
 - add ambiguity candidates for large/high-impact soft subject regions where
-  local evidence supports more than one plausible execution policy. G06-G shows
-  the current failure mode: the center purple subject content is protected as a
-  `subject_soft_layer`, but its alpha remains too low, so color is lost on
-  recomposition. When local signals cannot safely distinguish "preserve
-  translucent layer" from "repair underestimated subject material", generate
-  both deterministic candidates:
+  local evidence supports more than one plausible execution policy. Current
+  examples are the C/I soft-alpha and translucent-ribbon samples, where
+  subject content can be correctly protected as a `subject_soft_layer` but still
+  lose color if alpha is underestimated. When local signals cannot safely
+  distinguish "preserve translucent layer" from "repair underestimated subject
+  material", generate both deterministic candidates:
   - `preserve_translucent_layer`: keep the current soft alpha and protect it
     from destructive keyer/repair changes;
   - `repair_underestimated_subject_material`: raise alpha only in coherent

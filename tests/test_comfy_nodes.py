@@ -68,7 +68,11 @@ def test_automatte_returns_image_mask_summary(_force_grabcut):
     assert rgba_rgb.dtype == torch.float32
     # MASK convention: [B, H, W] float
     assert alpha.shape == (1, 128, 128)
-    assert "saturated_bg" in summary
+    # Production AutoMatte routes known green/blue screen graphics through the
+    # remote CorridorKey path; this node smoke should track that public Comfy
+    # behavior rather than the older local saturated_bg fallback.
+    assert "comfy_corridorkey" in summary
+    assert "remote_corridorkey" in summary
 
 
 def test_dev_reload_is_opt_in(monkeypatch):
