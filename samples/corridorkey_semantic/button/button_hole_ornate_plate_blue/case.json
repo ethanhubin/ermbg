@@ -1,0 +1,25 @@
+{
+  "id": "button_hole_ornate_plate_blue",
+  "sample_id": "B056",
+  "category": "button",
+  "family": "known_b_hole_button",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+  "input": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+  "image_size": [
+    512,
+    512
+  ],
+  "subject_color_family": "mixed_green_gold_silver",
+  "primary_ambiguity": "ornate plate button on blue screen with small enclosed same-background holes and green subject material",
+  "target_route": "known_b_hole_antialias_shadow",
+  "source_review_id": "B056",
+  "source_batch": "manual_user_regression_20260531_pymatting_holes"
+}

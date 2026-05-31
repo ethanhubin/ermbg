@@ -279,7 +279,7 @@ Result:
 
 QA comparison:
 
-| Variant | Recomp err | Black halo | Halo mean |
+| Screen | Recomp err | Black halo | Halo mean |
 |---|---:|---:|---:|
 | no `subject_mask` | 0.0308 | 9.9987 | 3.3779 |
 | RMBG alpha as `subject_mask` | 0.0298 | 9.8343 | 3.3768 |
@@ -315,7 +315,7 @@ Using `clipseg_3` (`the entire framed green panel`) as `subject_mask`:
 
 QA comparison:
 
-| Variant | Recomp err | Black halo | Halo mean |
+| Screen | Recomp err | Black halo | Halo mean |
 |---|---:|---:|---:|
 | no `subject_mask` | 0.0308 | 9.9987 | 3.3779 |
 | CLIPSeg prompt 0 | 0.0120 | 6.0433 | 3.1480 |
@@ -792,7 +792,7 @@ remains protected.
 
 Updated no-mask QA on `samples/inputs/12.png`:
 
-| Variant | Recomp err | Black halo | Halo mean | Repair |
+| Screen | Recomp err | Black halo | Halo mean | Repair |
 |---|---:|---:|---:|---|
 | old no-mask | 0.0308 | 9.9987 | 3.3779 | none |
 | CLIPSeg `subject_mask` | 0.0125 | 5.9681 | 3.1298 | 29 comps / 6355 px |

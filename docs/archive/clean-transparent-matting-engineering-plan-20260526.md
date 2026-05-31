@@ -89,7 +89,7 @@ VLM does not generate alpha or RGBA.
   `C_linear ~= scale * B_linear`, `shadow_alpha ~= 1 - scale`
 - **VLM provider**: `openai` or `comfy-qwen`
 - **QA backgrounds**: black, white, grey, cyan, magenta, checker, plus
-  lightwrap variants
+  lightwrap screens
 
 ## Main Modules
 

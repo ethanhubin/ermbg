@@ -51,19 +51,5 @@
       "images": ["40", 0],
       "filename_prefix": "${filename_prefix}_alpha"
     }
-  },
-  "60": {
-    "class_type": "SaveImage",
-    "inputs": {
-      "images": ["20", 2],
-      "filename_prefix": "${filename_prefix}_processed"
-    }
-  },
-  "70": {
-    "class_type": "SaveImage",
-    "inputs": {
-      "images": ["20", 3],
-      "filename_prefix": "${filename_prefix}_qc"
-    }
   }
 }

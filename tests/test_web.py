@@ -75,12 +75,16 @@ def test_index_serves_upload_ui():
     assert ".preview-actions { height: 56px; min-height: 56px; max-height: 56px;" in response.text
     assert ".preview-statuses { min-width: 0; flex: 1 1 auto; overflow: hidden; }" in response.text
     assert ".preview-statuses .status { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }" in response.text
+    assert ".preview-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; display: grid; place-items: center; overflow: hidden; }" in response.text
     assert ".preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }" in response.text
     assert ".preview.is-mask-mode .candidate-panel { display: none;" in response.text
-    assert ".canvas { min-height: 0; height: 100%;" in response.text
+    assert ".mask-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%;" in response.text
+    assert ".canvas { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; align-self: stretch; justify-self: stretch;" in response.text
+    assert "contain: layout paint;" in response.text
     assert ".canvas.is-mask-mode { padding: 0; }" in response.text
     assert ".canvas.is-mask-mode .source-frame { border: 0; border-radius: 0; }" in response.text
     assert ".canvas img { max-width: 100%; max-height: 100%; }" in response.text
+    assert ".result-image { width: 100%; height: 100%; object-fit: contain;" in response.text
     assert "let maskScale = 1;" in response.text
     assert "applyMaskTransform()" in response.text
     assert 'if (activeView === "mask") { if (!sourceImage) return; event.preventDefault();' in response.text
@@ -90,16 +94,42 @@ def test_index_serves_upload_ui():
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
     assert '<option value="auto" selected>auto</option>' in response.text
+    assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' in response.text
+    assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' in response.text
     assert '<option value="comfy-ermbg">comfy-ermbg</option>' in response.text
     assert 'id="corridorkey-settings" open' in response.text
+    assert 'id="pymatting-settings" open' in response.text
+    assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
+    assert 'id="pymatting-advanced"' in response.text
+    assert 'name="pymatting_method"' in response.text
+    assert 'name="pymatting_bg_source"' in response.text
+    assert 'name="pymatting_boundary_band_px"' in response.text
+    assert 'name="pymatting_bg_threshold"' in response.text
+    assert 'name="pymatting_fg_threshold"' in response.text
+    assert 'id="pm-cg-maxiter" name="pymatting_cg_maxiter" type="number" min="100" max="10000" step="100" value="1000"' in response.text
+    assert 'id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="30"' in response.text
+    assert 'id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"' in response.text
+    assert '<span>保留阴影</span><input id="shadow-enabled" name="shadow_enabled" type="checkbox" checked>' in response.text
+    assert 'const shadowEnabled = document.getElementById("shadow-enabled");' in response.text
+    assert 'shadowEnabled.disabled = isBusy' in response.text
+    assert 'formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false")' in response.text
+    assert "pymattingSettingControls" in response.text
+    assert 'pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b")' in response.text
+    assert 'pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); })' in response.text
     assert "<summary>[设置]</summary>" in response.text
     assert '<input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">' in response.text
     assert "幕布<select" not in response.text
     assert 'name="corridorkey_preset"' in response.text
     assert 'name="corridorkey_despill_strength"' in response.text
     assert 'name="corridorkey_auto_mask"' in response.text
+    assert 'id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled' in response.text
+    assert '<option value="all_white">全白</option>' in response.text
+    assert '<option value="translucent_button">玻璃/半透明</option>' in response.text
+    assert 'function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }' in response.text
+    assert 'autoMask.addEventListener("change", () => syncAutoMaskControls());' in response.text
     assert 'id="sam-mask-button"' in response.text
+    assert '<button id="sam-mask-button" type="button">Sam3</button>' in response.text
     assert '"/api/sam-mask"' in response.text
     assert 'id="mask-brush-mode"' not in response.text
     assert 'data-mask-mode="keep">保留</button>' in response.text
@@ -108,21 +138,23 @@ def test_index_serves_upload_ui():
     assert 'id="mask-brush-size"' in response.text
     assert 'id="mask-reset-button"' not in response.text
     assert 'id="mask-clear-button"' in response.text
-    assert '<button id="sam-mask-button" type="button">Sam3</button>' in response.text
     assert '<button id="mask-clear-button" type="button">清空</button>' in response.text
     assert 'id="status">等待上传</span>' in response.text
     assert 'id="sam-mask-status"' not in response.text
-    assert 'const samMaskStatus = statusEl;' in response.text
+    assert 'const maskStatus = statusEl;' in response.text
     assert "loadMaskOverlay(payload.mask)" in response.text
-    assert 'autoMask.addEventListener("change", () => { if (autoMask.checked) generateSamMask(); });' in response.text
-    assert 'samMaskButton.addEventListener("click", () => generateSamMask())' in response.text
+    assert "maskDirty = false;" in response.text
+    assert "maskDirty = true;" in response.text
+    assert 'autoMask.addEventListener("change", () => syncAutoMaskControls());' in response.text
+    assert 'samMaskButton.addEventListener("click", () => generateSamMask());' in response.text
     assert 'setPreviewView("mask")' in response.text
     assert 'let activeView = "mask";' in response.text
     assert "maskToolbarControls" in response.text
     assert "edited_hint_mask.png" in response.text
     assert "function exportHintMaskFile()" in response.text
     assert "const value = pixels.data[i + 3] > 8 ? 255 : 0;" in response.text
-    assert 'const hintMaskFile = backend.value === "comfy-corridorkey" ? await exportHintMaskFile() : null;' in response.text
+    assert 'const shouldUseCustomMask = backend.value === "comfy-corridorkey" && !autoMask.checked && maskDirty;' in response.text
+    assert 'const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null;' in response.text
     assert 'formData.append("corridorkey_hint_mask", hintMaskFile)' in response.text
     assert 'name="corridorkey_protection_bg_max"' in response.text
     assert "syncBackendSettings()" in response.text
@@ -180,9 +212,9 @@ def test_game_eval_page_serves_result_table():
     assert "全选" in response.text
     assert "取消全选" in response.text
     assert "选择测试变体" not in response.text
-    assert 'name="eval-variant"' not in response.text
-    assert "selectedVariants()" not in response.text
-    assert "variantInputs" not in response.text
+    assert 'name="eval-screen"' not in response.text
+    assert "selectedScreens()" not in response.text
+    assert "screenInputs" not in response.text
     assert "selectedTestPath()" in response.text
     assert 'role="progressbar"' in response.text
     assert 'id="batch-progress"' in response.text
@@ -192,13 +224,35 @@ def test_game_eval_page_serves_result_table():
     assert '"thumbnailUrl": "/eval/game/file/samples/corridorkey_semantic/' in response.text
     assert '"defaultSelected": true' in response.text
     assert '"defaultSelected": false' in response.text
-    assert '"sampleVariant": "green"' in response.text
-    assert '"runStatus": "ran"' in response.text
+    assert '"sampleScreen": "green"' in response.text
+    assert '"runStatus":' in response.text
     assert '"progress": {' in response.text
     assert "<th class=\"regions-col\">regions</th>" not in response.text
+    assert "<th class=\"compare-col\">比较</th>" in response.text
     for heading in ("原图", "alpha mask", "白底", "黑底", "透明底", "绿底", "紫底", "蓝底"):
         assert f"<th class=\"preview-col\">{heading}</th>" in response.text
     assert "<th class=\"preview-col\">gray</th>" not in response.text
+    assert 'id="compare-modal"' in response.text
+    assert 'id="compare-view-one"' in response.text
+    assert 'id="compare-view-two"' in response.text
+    assert 'id="compare-alpha-one"' in response.text
+    assert 'id="compare-alpha-two"' in response.text
+    assert 'class="compare-bg-row" aria-label="比较背景色"' in response.text
+    assert 'class="compare-bg-button bg-black"' in response.text
+    assert 'class="compare-bg-button bg-checker"' in response.text
+    assert 'compareButton.textContent = "比较"' in response.text
+    assert 'Mask Hint' in response.text
+    assert 'corridorkey Raw Alpha' in response.text
+    assert 'corridorkey Forground' in response.text
+    assert '输出 Alpha' in response.text
+    assert 'populateCompareSelect(compareViewOne, caseItem, "maskHintUrl", views)' in response.text
+    assert 'populateCompareSelect(compareViewTwo, caseItem, "corridorkeyRawAlphaUrl"' in response.text
+    assert 'compareAlphaOne.addEventListener("input", updateCompareAlpha)' in response.text
+    assert 'compareImgOne.style.opacity = String(compareAlphaOneValue)' in response.text
+    assert 'compareBgButtons.forEach((button) => button.addEventListener("click", () => setCompareBackground(button.dataset.bg)))' in response.text
+    assert 'compareFrame.addEventListener("pointermove", updateCompareFromPointer)' in response.text
+    assert 'compareStage.addEventListener("pointermove", updateCompareFromPointer)' not in response.text
+    assert 'setCompareBackground("black")' in response.text
     assert 'data-bg="green"' in response.text
     assert 'data-bg="blue"' in response.text
     assert 'className = "sample-group"' in response.text
@@ -251,7 +305,7 @@ def test_game_eval_expected_count_tracks_manifest():
 
     manifest = json.loads((web.PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json").read_text())
 
-    assert web._game_eval_expected_case_count() == manifest["case_count"] == 83
+    assert web._game_eval_expected_case_count() == manifest["case_count"] == 85
 
 
 def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
@@ -271,7 +325,7 @@ def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
     web._GAME_EVAL_JOBS.clear()
 
     client = TestClient(app)
-    response = client.post("/eval/game/run", json={"sample_ids": ["B003", "B005"], "variants": ["white"]})
+    response = client.post("/eval/game/run", json={"sample_ids": ["B003", "B005"], "screens": ["white"]})
 
     assert response.status_code == 200
     payload = response.json()
@@ -282,13 +336,13 @@ def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
     assert "auto" in process.command
     assert "--sample-id" in process.command
     assert "B003,B005" in process.command
-    assert "--variants" not in process.command
+    assert "--screens" not in process.command
     launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
     launch_payload = json.loads(launch.read_text(encoding="utf-8"))
     assert launch_payload["backend"] == "auto"
     assert launch_payload["test_path"] == "auto"
     assert launch_payload["sample_ids"] == ["B003", "B005"]
-    assert "variants" not in launch_payload
+    assert "screens" not in launch_payload
 
 
 def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
@@ -448,7 +502,7 @@ def test_game_eval_page_renders_running_partial_summary(monkeypatch, tmp_path):
                 "sample_id": "B002",
                 "sample_code": "B002-G",
                 "case_id": "button_soft_shadow",
-                "sample_variant": "green",
+                "sample_screen": "green",
                 "expected_role_hit": True,
                 "expected_role": "shadow_like_layer",
                 "rgba": "out/local_ownership_v001_web_20260527/matte/button_soft_shadow/green/rgba.png",
@@ -497,7 +551,7 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
                     {
                         "sample_id": "B005",
                         "case_id": "ui_panel",
-                        "variant": "green",
+                        "screen": "green",
                         "input": "samples/corridorkey_semantic/button/ui_panel/green.png",
                         "primary_ambiguity": "same_bg_enclosed_region",
                         "status": "ok",
@@ -569,6 +623,9 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     case_root.mkdir(parents=True)
     Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(case_root / "rgba.png")
     Image.new("L", (8, 8), 255).save(case_root / "alpha.png")
+    Image.new("L", (8, 8), 128).save(case_root / "corridorkey_hint.png")
+    Image.new("L", (8, 8), 64).save(case_root / "corridorkey_raw_alpha.png")
+    Image.new("RGB", (8, 8), (30, 40, 50)).save(case_root / "foreground.png")
     Image.new("RGB", (8, 8), (200, 200, 200)).save(case_root / "contact_sheet.png")
     (run_root / "summary.json").write_text(
         json.dumps(
@@ -583,6 +640,9 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
                         "outputs": {
                             "rgba": "out/comfy_full_test_20260529/B005_green_remote/rgba.png",
                             "alpha": "out/comfy_full_test_20260529/B005_green_remote/alpha.png",
+                            "hint": "out/comfy_full_test_20260529/B005_green_remote/corridorkey_hint.png",
+                            "raw_alpha": "out/comfy_full_test_20260529/B005_green_remote/corridorkey_raw_alpha.png",
+                            "foreground": "out/comfy_full_test_20260529/B005_green_remote/foreground.png",
                             "contact_sheet": "out/comfy_full_test_20260529/B005_green_remote/contact_sheet.png",
                         },
                         "remote_debug": {"timings": {"total_sec": 5.1}},
@@ -616,6 +676,9 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
     assert "contact sheet" not in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/rgba.png" in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/alpha.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/corridorkey_hint.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/corridorkey_raw_alpha.png" in response.text
+    assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/foreground.png" in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/contact_sheet.png" not in response.text
 
 
@@ -665,7 +728,7 @@ def test_game_eval_regions_serves_bbox_overlay(monkeypatch, tmp_path):
                         "status": "ok",
                         "case_id": "ui_panel",
                         "sample_id": "B005",
-                        "sample_variant": "green",
+                        "sample_screen": "green",
                     }
                 ],
             }
@@ -676,7 +739,7 @@ def test_game_eval_regions_serves_bbox_overlay(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", run_root)
 
     client = TestClient(app)
-    response = client.get("/eval/game/regions/ui_panel?variant=green&run=local_ownership_test_regions")
+    response = client.get("/eval/game/regions/ui_panel?screen=green&run=local_ownership_test_regions")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     image = Image.open(BytesIO(response.content))
@@ -890,6 +953,125 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
     ]
 
 
+def test_matte_candidates_endpoint_accepts_pymatting_known_b_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert backend == "pymatting-known-b"
+        assert kwargs["shadow_mode"] == "on"
+        captured.update(kwargs)
+        del image, qa
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., 0] = 220
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((16, 16), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={"pymatting_known_b": {"pymatting": {"method": "cf"}}},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "pymatting-known-b",
+            "pymatting_method": "knn",
+            "pymatting_image_space": "sRGB",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": "1,2,3",
+            "pymatting_bg_threshold": "4.5",
+            "pymatting_fg_threshold": "28",
+            "pymatting_boundary_band_px": "3",
+            "pymatting_auto_adapt": "false",
+            "pymatting_cg_maxiter": "1500",
+            "pymatting_cg_rtol": "0.00001",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["pymatting_method"] == "knn"
+    assert captured["pymatting_image_space"] == "sRGB"
+    assert captured["pymatting_bg_source"] == "custom"
+    assert captured["pymatting_bg_color"] == (1, 2, 3)
+    assert captured["pymatting_bg_threshold"] == 4.5
+    assert captured["pymatting_fg_threshold"] == 28.0
+    assert captured["pymatting_boundary_band_px"] == 3
+    assert captured["pymatting_auto_adapt"] is False
+    assert captured["pymatting_cg_maxiter"] == 1500
+    assert captured["pymatting_cg_rtol"] == 0.00001
+    payload = response.json()
+    assert payload["backend"] == "pymatting-known-b"
+    assert payload["strategy"] == "pymatting_known_b"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "PyMatting Known-B", True)
+    ]
+    assert payload["debug"]["pymatting_known_b"]["pymatting"]["method"] == "cf"
+
+
+def test_matte_candidates_endpoint_accepts_comfy_pymatting_known_b_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert backend == "comfy-pymatting-known-b"
+        captured.update(kwargs)
+        del image, qa
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., 1] = 180
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((16, 16), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="comfy_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={"pymatting_known_b": {"remote": {"prompt_id": "fake-prompt"}}},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "comfy-pymatting-known-b",
+            "pymatting_method": "cf",
+            "pymatting_image_space": "linear",
+            "pymatting_bg_source": "green",
+            "pymatting_bg_threshold": "3.5",
+            "pymatting_fg_threshold": "24",
+            "pymatting_boundary_band_px": "2",
+            "pymatting_auto_adapt": "true",
+            "pymatting_cg_maxiter": "1000",
+            "pymatting_cg_rtol": "0.000001",
+            "shadow_enabled": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["pymatting_method"] == "cf"
+    assert captured["pymatting_bg_source"] == "green"
+    assert captured["pymatting_auto_adapt"] is True
+    assert captured["shadow_mode"] == "off"
+    payload = response.json()
+    assert payload["backend"] == "comfy-pymatting-known-b"
+    assert payload["strategy"] == "comfy_pymatting_known_b"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "远端 PyMatting Known-B", True)
+    ]
+    assert payload["debug"]["pymatting_known_b"]["remote"]["prompt_id"] == "fake-prompt"
+
+
 def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -932,6 +1114,7 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
             "corridorkey_protection_fg_min": "14",
             "corridorkey_screen_mode": "blue",
             "corridorkey_preset": "manual",
+            "corridorkey_hard_ui_hint_mode": "boundary_2px_shadow_safe_edge_floor",
         },
     )
 
@@ -948,6 +1131,7 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     assert captured["corridorkey_protection_fg_min"] == 14.0
     assert captured["corridorkey_screen_mode"] == "blue"
     assert captured["corridorkey_preset"] == "manual"
+    assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px_shadow_safe_edge_floor"
     payload = response.json()
     assert payload["candidates"][0]["label"] == "远端 CorridorKey"
 
@@ -986,6 +1170,43 @@ def test_matte_candidates_endpoint_accepts_corridorkey_hint_mask(monkeypatch):
 
     assert response.status_code == 200
     assert captured["corridorkey_hint_mask"] is not None
+
+
+def test_matte_candidates_endpoint_ignores_hint_mask_when_auto_mask_enabled(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del image, qa
+        captured.update(kwargs)
+        assert backend == "comfy-corridorkey"
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((16, 16), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="comfy_corridorkey",
+            background_color=(0, 200, 0),
+            debug={"prompt_id": "prompt-ck"},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={
+            "file": ("input.png", _png_bytes(), "image/png"),
+            "corridorkey_hint_mask": ("mask.png", _mask_png_bytes(), "image/png"),
+        },
+        data={"backend": "comfy-corridorkey", "corridorkey_auto_mask": "true"},
+    )
+
+    assert response.status_code == 200
+    assert captured["corridorkey_auto_mask"] is True
+    assert captured["corridorkey_hint_mask"] is None
 
 
 def test_sam_mask_endpoint_returns_mask_payload(monkeypatch):

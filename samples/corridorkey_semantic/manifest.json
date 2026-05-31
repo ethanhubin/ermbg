@@ -16,7 +16,7 @@
     ]
   },
   "image_contract": {
-    "button": "256x128 user-approved UI button inputs",
+    "button": "256x128 user-approved UI button inputs plus 512x512 known-B hole regressions",
     "icon": "256x256 icon/effect inputs",
     "character": "1024x1024 composite character inputs"
   },
@@ -25,16 +25,16 @@
     "phase2_next_goal": "Run full recognition/matting evaluation over the confirmed samples, inspect failures by sample family, then tune CorridorKey route selection and per-route parameters."
   },
   "category_counts": {
-    "button": 54,
+    "button": 56,
     "icon": 20,
     "character": 9
   },
   "screen_counts": {
-    "green": 57,
-    "blue": 26
+    "green": 58,
+    "blue": 27
   },
-  "case_count": 83,
-  "default_variants": [
+  "case_count": 85,
+  "default_screens": [
     "green",
     "blue"
   ],
@@ -1388,6 +1388,56 @@
       "target_route": "owned_contact_shadow",
       "source_review_id": "B054",
       "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_hole_yellow_ring_green",
+      "sample_id": "B055",
+      "category": "button",
+      "family": "known_b_hole_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+      "input": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+      "image_size": [
+        512,
+        512
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "yellow ring button with enclosed same-background transparent hole and green-screen shadow residue",
+      "target_route": "known_b_hole_antialias_shadow",
+      "source_review_id": "B055",
+      "source_batch": "manual_user_regression_20260531_pymatting_holes"
+    },
+    {
+      "id": "button_hole_ornate_plate_blue",
+      "sample_id": "B056",
+      "category": "button",
+      "family": "known_b_hole_button",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+      "image_size": [
+        512,
+        512
+      ],
+      "subject_color_family": "mixed_green_gold_silver",
+      "primary_ambiguity": "ornate plate button on blue screen with small enclosed same-background holes and green subject material",
+      "target_route": "known_b_hole_antialias_shadow",
+      "source_review_id": "B056",
+      "source_batch": "manual_user_regression_20260531_pymatting_holes"
     },
     {
       "id": "icon_icon_a01_hard_boundary_strong_outline",

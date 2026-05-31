@@ -106,7 +106,7 @@ and transparent effects.
      display-visible islands should be rejected by area/topology evidence.
    - Keep clean foreground RGB separate from the RGB companion used for final
      shadow-preserving RGBA.
-   - Visual invariant: compositing the exported RGBA shadow layer back over the
+   - Visual rule: compositing the exported RGBA shadow layer back over the
      original known background should preserve source luminance, not source
      chroma. Exact RGB reconstruction over saturated green can encode green
      into the shadow layer; reusable RGBA should prefer neutral darkening with

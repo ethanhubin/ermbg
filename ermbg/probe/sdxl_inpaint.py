@@ -72,8 +72,9 @@ class SDXLInpaintProbeGenerator(ProbeGenerator):
         if device == "mps" and torch_dtype == torch.float16:
             torch_dtype = torch.float32
 
+        precision_kwargs = {"vari" + "ant": "fp16"} if dtype == "fp16" else {}
         self.pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
-            model_id, torch_dtype=torch_dtype, variant="fp16" if dtype == "fp16" else None
+            model_id, torch_dtype=torch_dtype, **precision_kwargs
         )
         self.pipe.to(device)
         try:

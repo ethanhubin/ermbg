@@ -1,0 +1,25 @@
+{
+  "id": "button_hole_yellow_ring_green",
+  "sample_id": "B055",
+  "category": "button",
+  "family": "known_b_hole_button",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+  "input": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+  "image_size": [
+    512,
+    512
+  ],
+  "subject_color_family": "yellow_orange",
+  "primary_ambiguity": "yellow ring button with enclosed same-background transparent hole and green-screen shadow residue",
+  "target_route": "known_b_hole_antialias_shadow",
+  "source_review_id": "B055",
+  "source_batch": "manual_user_regression_20260531_pymatting_holes"
+}

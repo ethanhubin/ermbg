@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -78,6 +80,136 @@ def test_matte_image_solid_graphic_prepass_skips_segmenter(monkeypatch):
     assert r.strategy_name == "solid_bg_graphic"
     assert r.report["strategy"]["name"] == "solid_bg_graphic"
     assert r.alpha[44:86, 44:86].mean() > 0.99
+
+
+def test_matte_image_pymatting_known_b_backend_skips_segmenter(monkeypatch):
+    import ermbg.api as api
+
+    def fail_build_segmenter(**kwargs):
+        raise AssertionError("pymatting-known-b should not build a segmenter")
+
+    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(img, backend="pymatting-known-b")
+
+    assert r.strategy_name == "pymatting_known_b"
+    assert r.report["strategy"]["name"] == "pymatting_known_b"
+    assert r.background_color == (0, 200, 0)
+    assert r.debug["pymatting_known_b"]["pymatting"]["method"] == "cf"
+    assert r.alpha[44:86, 44:86].mean() > 0.99
+
+
+def test_matte_image_pymatting_known_b_accepts_parameters():
+    img = _solid_green_with_red_subject()
+    r = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_method="knn",
+        pymatting_image_space="sRGB",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(0, 200, 0),
+        pymatting_bg_threshold=4.5,
+        pymatting_fg_threshold=28.0,
+        pymatting_boundary_band_px=3,
+        pymatting_auto_adapt=False,
+        pymatting_cg_maxiter=1500,
+        pymatting_cg_rtol=1e-5,
+    )
+
+    params = r.debug["pymatting_known_b"]["parameters"]
+    assert r.strategy_name == "pymatting_known_b"
+    assert r.background_color == (0, 200, 0)
+    assert params["method"] == "knn"
+    assert params["image_space"] == "sRGB"
+    assert params["bg_source"] == "custom"
+    assert params["bg_threshold"] == 4.5
+    assert params["fg_threshold"] == 28.0
+    assert params["boundary_band_px"] == 3
+    assert params["auto_adapt"] is False
+    assert params["cg_maxiter"] == 1500
+    assert params["cg_rtol"] == 1e-5
+
+
+def test_matte_image_pymatting_known_b_recovers_neutral_ui_shadow():
+    img = np.full((128, 128, 3), [0, 200, 0], dtype=np.uint8)
+    img[72:98, 24:104] = [0, 120, 0]
+    img[40:82, 28:100] = [240, 30, 30]
+
+    r = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(0, 200, 0),
+        pymatting_fg_threshold=30.0,
+        shadow_mode="on",
+    )
+
+    assert r.debug["shadow"]["source"] == "pymatting_known_b_shadow_patch"
+    assert r.debug["shadow"]["applied"] is True
+    assert r.debug["subject_alpha"][90, 64] < 0.01
+    assert r.alpha[90, 64] > 0.20
+    assert tuple(r.rgba[90, 64, :3]) == (0, 0, 0)
+
+
+def test_matte_image_comfy_pymatting_known_b_uses_remote_node(monkeypatch):
+    import ermbg.probe.comfyui_pymatting_known_b as remote_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, url):
+            captured["url"] = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured["shape"] = image_srgb.shape
+            captured["kwargs"] = kwargs
+            alpha = np.zeros(image_srgb.shape[:2], dtype=np.float32)
+            alpha[40:90, 40:90] = 1.0
+            fg = image_srgb.copy()
+            rgba = np.dstack([fg, (alpha * 255 + 0.5).astype(np.uint8)])
+            return remote_module.ComfyPyMattingKnownBResult(
+                rgba=rgba,
+                alpha=alpha,
+                foreground_srgb=fg,
+                trimap_u8=(alpha * 255 + 0.5).astype(np.uint8),
+                debug={"prompt_id": "fake-prompt", "backend": "comfy-pymatting-known-b"},
+            )
+
+    monkeypatch.setattr(remote_module, "ComfyUIPyMattingKnownBClient", FakeClient)
+
+    img = _solid_green_with_red_subject()
+    r = matte_image(
+        img,
+        backend="comfy-pymatting-known-b",
+        comfy_url="http://example.invalid:8000",
+        pymatting_method="knn",
+        pymatting_image_space="sRGB",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(0, 200, 0),
+        pymatting_bg_threshold=4.5,
+        pymatting_fg_threshold=28.0,
+        pymatting_boundary_band_px=3,
+        pymatting_auto_adapt=False,
+        pymatting_cg_maxiter=1500,
+        pymatting_cg_rtol=1e-5,
+    )
+
+    assert r.strategy_name == "comfy_pymatting_known_b"
+    assert r.report["strategy"]["name"] == "comfy_pymatting_known_b"
+    assert r.background_color == (0, 200, 0)
+    assert captured["url"] == "http://example.invalid:8000"
+    assert captured["kwargs"]["method"] == "knn"
+    assert captured["kwargs"]["image_space"] == "sRGB"
+    assert captured["kwargs"]["bg_source"] == "custom"
+    assert captured["kwargs"]["bg_color"] == (0, 200, 0)
+    assert captured["kwargs"]["bg_threshold"] == 4.5
+    assert captured["kwargs"]["fg_threshold"] == 28.0
+    assert captured["kwargs"]["boundary_band_px"] == 3
+    assert captured["kwargs"]["auto_adapt"] is False
+    assert captured["kwargs"]["cg_maxiter"] == 1500
+    assert captured["kwargs"]["cg_rtol"] == 1e-5
+    assert r.debug["pymatting_known_b"]["remote"]["prompt_id"] == "fake-prompt"
 
 
 def test_matte_image_reuses_cached_segmenter(monkeypatch):
@@ -291,6 +423,51 @@ def test_matte_image_comfy_corridorkey_uses_remote_pipeline(monkeypatch):
     assert r.report["strategy"]["bg_type"] == "saturated_green"
 
 
+def test_matte_image_comfy_corridorkey_explicit_color_protection_false_overrides_auto(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, apply_color_protection):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": "known_bg_hard_ui_bbox_2px_hint"},
+                "settings": {"apply_color_protection": apply_color_protection},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["apply_color_protection"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    result = matte_image(
+        np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8),
+        backend="comfy-corridorkey",
+        corridorkey_preset="auto",
+        corridorkey_color_protection=False,
+    )
+
+    assert result.debug["corridorkey_analysis"]["recommended_settings"]["color_protection"] is True
+    assert captured["apply_color_protection"] is False
+    assert result.report["strategy"]["extras"]["settings"]["apply_color_protection"] is False
+
+
 def test_matte_image_comfy_corridorkey_patches_shadow_below_subject(monkeypatch):
     import ermbg.api as api
     import ermbg.probe.comfyui_corridorkey as remote_mod
@@ -486,6 +663,299 @@ def test_corridorkey_shadow_patch_removes_weak_ck_residue_in_patched_shadow():
     assert np.allclose(alpha[low_shadow_region].mean(), shadow_alpha[low_shadow_region].mean(), atol=0.03)
 
 
+def test_pymatting_shadow_patch_reclassifies_known_bg_colored_residue():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_alpha[34:74, 44:92] = 1.0
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    subject_foreground[..., :] = (230, 190, 20)
+    image[subject_alpha >= 1.0] = subject_foreground[subject_alpha >= 1.0]
+
+    shadow = np.zeros((128, 128), dtype=np.float32)
+    shadow[80:96, 32:112] = 0.34
+    image[shadow > 0.0] = ((1.0 - shadow[shadow > 0.0, None]) * bg.astype(np.float32) + 0.5).astype(np.uint8)
+    # Mechanism: PyMatting has absorbed scalar-darkened green-screen pixels as
+    # semi-opaque foreground, which exports as green residue unless split out.
+    subject_alpha = np.maximum(subject_alpha, shadow * 0.70).astype(np.float32)
+    subject_foreground[shadow > 0.0] = image[shadow > 0.0]
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    shadow_region = shadow > 0.0
+    assert info["applied"] is True
+    assert info["residue_split"]["kept_pixels"] >= int(shadow_region.sum() * 0.95)
+    assert shadow_alpha[shadow_region].mean() > 0.25
+    assert np.allclose(alpha[shadow_region].mean(), shadow_alpha[shadow_region].mean(), atol=0.03)
+    assert rgba_rgb[shadow_region, 1].mean() < 4.0
+
+
+def test_pymatting_shadow_patch_preserves_subject_color_above_blue_background_channels():
+    import ermbg.api as api
+
+    bg = np.array([0, 40, 250], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((96, 128), dtype=np.float32)
+    subject_alpha[28:68, 30:98] = 1.0
+    subject_foreground = np.zeros((96, 128, 3), dtype=np.uint8)
+    subject_foreground[..., :] = (20, 150, 80)
+    image[subject_alpha > 0.0] = subject_foreground[subject_alpha > 0.0]
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    subject = subject_alpha > 0.0
+    assert info["residue_split"]["kept_pixels"] == 0
+    assert shadow_alpha.max() == 0.0
+    assert np.allclose(alpha[subject], 1.0)
+    assert rgba_rgb[subject, 1].mean() > 120.0
+
+
+def test_pymatting_shadow_patch_preserves_off_channel_subject_on_green_background():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((96, 128), dtype=np.float32)
+    subject_alpha[28:68, 30:98] = 1.0
+    subject_foreground = np.zeros((96, 128, 3), dtype=np.uint8)
+    subject_foreground[..., :] = (40, 110, 250)
+    image[subject_alpha > 0.0] = subject_foreground[subject_alpha > 0.0]
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    subject = subject_alpha > 0.0
+    # Mechanism: the green channel alone can make blue UI material look like
+    # scalar-darkened green B. The blue off-channel energy proves material
+    # ownership and must block the shadow-residue split.
+    assert info["residue_split"]["off_background_channels"] == [True, False, True]
+    assert info["residue_split"]["kept_pixels"] == 0
+    assert shadow_alpha.max() == 0.0
+    assert np.allclose(alpha[subject], 1.0)
+    assert rgba_rgb[subject, 2].mean() > 220.0
+
+
+def test_pymatting_shadow_patch_keeps_antialiased_off_channel_shadow_fringe():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_alpha[32:70, 32:96] = 1.0
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    subject_foreground[subject_alpha > 0.0] = (235, 210, 20)
+    image[subject_alpha > 0.0] = subject_foreground[subject_alpha > 0.0]
+
+    pure_shadow = np.zeros((128, 128), dtype=bool)
+    pure_shadow[74:90, 38:92] = True
+    contaminated_fringe = np.zeros((128, 128), dtype=bool)
+    contaminated_fringe[70:74, 40:90] = True
+    image[pure_shadow] = (0, 138, 0)
+    image[contaminated_fringe] = (42, 138, 18)
+    subject_foreground[pure_shadow | contaminated_fringe] = (22, 18, 10)
+
+    alpha, _, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: rendered contact shadows can be scalar-darkened known B with a
+    # narrow subject-colored antialias fringe. The strict scalar core anchors the
+    # component; the fringe may follow only while subject alpha remains low.
+    assert info["residue_split"]["kept_pixels"] >= int((pure_shadow | contaminated_fringe).sum() * 0.95)
+    assert info["residue_split"]["off_channel_support_excess_u8"] > info["residue_split"]["off_channel_excess_u8"]
+    assert shadow_alpha[pure_shadow].mean() > 0.25
+    assert shadow_alpha[contaminated_fringe].mean() > 0.25
+    assert alpha[contaminated_fringe].mean() > 0.25
+
+
+def test_pymatting_shadow_patch_preserves_colored_subject_antialias_edge():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    subject_foreground[..., :] = (0, 0, 0)
+
+    core = np.zeros((128, 128), dtype=bool)
+    core[34:70, 34:94] = True
+    edge = np.zeros((128, 128), dtype=bool)
+    edge[70:74, 38:90] = True
+    shadow = np.zeros((128, 128), dtype=bool)
+    shadow[78:92, 40:94] = True
+
+    subject_alpha[core] = 1.0
+    subject_alpha[edge] = 0.58
+    subject_foreground[core | edge] = (40, 110, 245)
+    image[core] = subject_foreground[core]
+    image[edge] = (20, 135, 118)
+    image[shadow] = (0, 138, 0)
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: colored subject AA can satisfy the green-channel darkening
+    # equation, but its recovered foreground has strong blue material evidence.
+    # Preserve that edge while still extracting the separate scalar shadow.
+    assert info["residue_split"]["foreground_material_pixels"] >= int(edge.sum() * 0.95)
+    assert shadow_alpha[shadow].mean() > 0.25
+    assert shadow_alpha[edge].max() == 0.0
+    assert np.allclose(alpha[edge], subject_alpha[edge])
+    assert rgba_rgb[edge, 2].mean() > 220.0
+
+
+def test_pymatting_shadow_patch_stabilizes_colored_edge_foreground_rgb():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+
+    core = np.zeros((128, 128), dtype=bool)
+    core[34:70, 34:94] = True
+    edge = np.zeros((128, 128), dtype=bool)
+    edge[70:74, 38:90] = True
+    shadow = np.zeros((128, 128), dtype=bool)
+    shadow[80:94, 40:94] = True
+
+    subject_alpha[core] = 1.0
+    subject_alpha[edge] = 0.58
+    subject_foreground[core] = (40, 120, 245)
+    subject_foreground[edge] = (80, 20, 255)
+    subject_foreground[shadow] = (20, 18, 14)
+    image[core] = (40, 120, 245)
+    image[edge] = (20, 135, 118)
+    image[shadow] = (0, 138, 0)
+
+    _, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: the alpha ramp is already soft; the visible stair-step comes
+    # from unstable straight foreground RGB on the edge. Stabilize only the
+    # colored non-shadow subject edge from nearby high-alpha material.
+    assert info["foreground_stabilization"]["filled_pixels"] > 0
+    assert shadow_alpha[shadow].mean() > 0.25
+    assert shadow_alpha[edge].max() == 0.0
+    assert rgba_rgb[edge, 2].mean() > 220.0
+
+
+def test_pymatting_foreground_stabilization_does_not_recolor_opaqueish_ui_interior():
+    import ermbg.api as api
+
+    foreground = np.zeros((64, 96, 3), dtype=np.uint8)
+    alpha = np.zeros((64, 96), dtype=np.float32)
+    shadow = np.zeros((64, 96), dtype=bool)
+
+    seed = np.zeros((64, 96), dtype=bool)
+    seed[12:24, 20:76] = True
+    interior = np.zeros((64, 96), dtype=bool)
+    interior[28:46, 20:76] = True
+    edge = np.zeros((64, 96), dtype=bool)
+    edge[46:50, 24:72] = True
+
+    alpha[seed] = 1.0
+    alpha[interior] = 0.89
+    alpha[edge] = 0.58
+    foreground[seed] = (255, 255, 245)
+    foreground[interior] = (250, 210, 48)
+    foreground[edge] = (255, 0, 72)
+
+    stabilized, info = api._stabilize_pymatting_subject_foreground_for_export(
+        foreground,
+        subject_alpha=alpha,
+        shadow_mask=shadow,
+        background_color=(0, 200, 0),
+    )
+
+    # Mechanism: B007-like UI interiors can be solved as broad alpha~0.89
+    # unknown regions. Foreground stabilization is only for low/mid-alpha edge
+    # division artifacts; it must not flood-fill those opaque-ish interiors
+    # from nearby white highlight seeds.
+    assert info["candidate_pre_edge_pixels"] >= int((interior | edge).sum() * 0.95)
+    assert info["local_alpha_range_threshold"] > 0.0
+    interior_core = np.zeros_like(interior)
+    interior_core[32:42, 28:68] = True
+    assert np.array_equal(stabilized[interior_core], foreground[interior_core])
+    assert np.count_nonzero(np.any(stabilized[edge] != foreground[edge], axis=1)) > 0
+
+
+def test_pymatting_shadow_patch_rejects_contact_gap_without_source_fit_gain():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+
+    core = np.zeros((128, 128), dtype=bool)
+    core[34:70, 34:94] = True
+    edge = np.zeros((128, 128), dtype=bool)
+    edge[70:74, 38:90] = True
+    contact_gap = np.zeros((128, 128), dtype=bool)
+    contact_gap[74:76, 40:90] = True
+    shadow = np.zeros((128, 128), dtype=bool)
+    shadow[76:92, 40:94] = True
+
+    subject_alpha[core] = 1.0
+    subject_alpha[edge] = 0.58
+    subject_foreground[core | edge] = (40, 120, 245)
+    image[core] = (40, 120, 245)
+    image[edge] = (20, 135, 118)
+    image[shadow] = (0, 138, 0)
+
+    alpha, _, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: geometric proximity alone is not enough to bridge a contact
+    # gap. B007-style UI interiors can satisfy the same subject/shadow geometry;
+    # near-subject repair must show a meaningful source-fit improvement before
+    # it is allowed to add pixels.
+    assert info["near_subject_reprojection"]["contact_gap_bridge_pixels"] == 0
+    assert info["near_subject_reprojection"]["reason"] == "source reprojection did not significantly improve fit"
+    assert shadow_alpha[shadow].mean() > 0.25
+    assert shadow_alpha[contact_gap].mean() == 0.0
+    assert alpha[contact_gap].mean() == 0.0
+
+
 def test_corridorkey_shadow_patch_uses_source_pixels_as_reprojection_target():
     import ermbg.api as api
 
@@ -657,6 +1127,477 @@ def test_matte_image_comfy_corridorkey_can_use_all_white_hint(monkeypatch):
 
     assert r.debug["corridorkey_hint"].mean() == 1.0
     assert r.debug["hint"]["source"] == "all_white_alpha_hint"
+
+
+def test_matte_image_comfy_corridorkey_hard_hint_requires_auto_mask(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=False,
+        corridorkey_hard_ui_hint_mode="boundary_2px_shadow_safe_edge_floor",
+    )
+
+    # Mechanism: hard-UI hint is an automatic-mask strategy. If automatic
+    # hinting is off, the selected strategy is inert and CorridorKey receives
+    # the all-white control hint.
+    assert captured["hint_source"] == "all_white_alpha_hint"
+    assert np.all(captured["hint_alpha"] == 1.0)
+    assert result.debug["hard_ui_hint"]["solid_interior_pixels"] == 0
+
+
+def test_matte_image_comfy_corridorkey_all_white_is_auto_mask_strategy(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="all_white",
+    )
+
+    assert captured["hint_source"] == "all_white_alpha_hint"
+    assert np.all(captured["hint_alpha"] == 1.0)
+
+
+def test_matte_image_comfy_corridorkey_auto_glass_uses_all_white_hint(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32) * 0.5
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_real_glass_green_bg_yellow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="bbox_2px",
+    )
+
+    assert captured["hint_source"] == "glass_auto_all_white_corridorkey_hint"
+    assert np.all(captured["hint_alpha"] == 1.0)
+    assert captured["apply_color_protection"] is False
+    assert result.debug["hard_ui_hint"]["solid_interior_pixels"] == 0
+
+
+def test_matte_image_comfy_corridorkey_key_color_material_passes_hint_supported_protection(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, shape, hint_alpha, hint_source):
+            self.rgba = np.zeros((*shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(shape, dtype=np.float32) * 0.5
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = np.zeros(shape, dtype=np.float32) if hint_alpha is None else hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(self.hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(image_srgb.shape[:2], kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+    )
+
+    assert result.debug["corridorkey_analysis"]["parameter_profile"] == "key_color_material"
+    assert captured["protect_hint_supported_material"] is True
+    assert captured["apply_color_protection"] is True
+
+
+def test_matte_image_comfy_corridorkey_composite_character_uses_all_white_no_protection(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, shape, hint_alpha, hint_source):
+            self.rgba = np.zeros((*shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(shape, dtype=np.float32) * 0.5
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = np.zeros(shape, dtype=np.float32) if hint_alpha is None else hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(self.hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(image_srgb.shape[:2], kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png"
+    )
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_color_protection=True,
+    )
+
+    assert result.debug["corridorkey_analysis"]["parameter_profile"] == "composite_character_corridor_only"
+    assert captured["hint_source"] == "character_all_white_corridorkey_hint"
+    assert np.all(captured["hint_alpha"] == 1.0)
+    assert captured["apply_color_protection"] is False
+    assert captured["protect_hint_supported_material"] is False
+
+
+def test_matte_image_comfy_corridorkey_explicit_translucent_hint_forces_glass_settings(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32) * 0.5
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_real_glass_blue_bg_yellow/blue.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="translucent_button",
+    )
+
+    assert captured["hint_source"] == "glass_all_white_corridorkey_hint"
+    assert np.all(captured["hint_alpha"] == 1.0)
+    assert captured["apply_color_protection"] is False
+    assert captured["refiner_strength"] == 1.15
+    assert captured["auto_despeckle"] == "Off"
+    assert captured["despeckle_size"] == 64
+    assert result.debug["hard_ui_hint"]["forced_translucent_settings"] is True
+
+
+def test_matte_image_comfy_corridorkey_uses_hard_ui_hint_for_opaque_buttons(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.rgba[..., 3] = 255
+            self.alpha = np.ones(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = self.rgba[..., :3]
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": "known_bg_hard_ui_bbox_2px_hint", "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    r = matte_image(np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8), backend="comfy-corridorkey", corridorkey_auto_mask=True)
+
+    assert captured["hint_source"] == "known_bg_hard_ui_bbox_2px_hint"
+    assert captured["hint_alpha"].shape == (128, 256)
+    assert 0.20 < float(captured["hint_alpha"].mean()) < 0.35
+    assert r.debug["hint"]["source"] == "known_bg_hard_ui_bbox_2px_hint"
+
+
+def test_matte_image_comfy_corridorkey_boundary_hint_restores_hard_ui_interior(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+    from ermbg.probe.comfyui_corridorkey import build_hard_ui_solid_interior_mask
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = np.zeros((*hint_alpha.shape, 3), dtype=np.uint8)
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="boundary_2px",
+    )
+    interior = build_hard_ui_solid_interior_mask(image, (0, 200, 0))
+
+    assert captured["hint_source"] == "known_bg_hard_ui_boundary_2px_hint"
+    assert captured["hint_alpha"].mean() < 0.10
+    assert result.debug["hard_ui_hint"]["mode"] == "boundary_2px"
+    assert result.debug["hard_ui_hint"]["solid_interior_pixels"] == int(interior.sum())
+    assert result.debug["subject_alpha"][interior].min() == 1.0
+    assert np.all(result.foreground_srgb[interior] == image[interior])
+
+
+def test_matte_image_comfy_corridorkey_shadow_safe_boundary_hint_excludes_shadow_interior(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+    from ermbg.probe.comfyui_corridorkey import (
+        build_hard_ui_shadow_safe_solid_interior_mask,
+        build_hard_ui_solid_interior_mask,
+    )
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = np.zeros((*hint_alpha.shape, 3), dtype=np.uint8)
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_hard_heavy_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="boundary_2px_shadow_safe",
+    )
+    base_interior = build_hard_ui_solid_interior_mask(image, (0, 200, 0))
+    safe_interior, safe_info = build_hard_ui_shadow_safe_solid_interior_mask(image, (0, 200, 0))
+
+    assert captured["hint_source"] == "known_bg_hard_ui_boundary_2px_shadow_safe_hint"
+    assert result.debug["hard_ui_hint"]["mode"] == "boundary_2px_shadow_safe"
+    assert result.debug["hard_ui_hint"]["solid_interior_pixels"] == int(safe_interior.sum())
+    assert result.debug["hard_ui_hint"]["shadow_excluded_interior_pixels"] == safe_info["shadow_excluded_interior_pixels"]
+    assert int(safe_interior.sum()) < int(base_interior.sum())
+    assert result.debug["subject_alpha"][safe_interior].min() == 1.0
+
+
+def test_matte_image_comfy_corridorkey_edge_floor_lifts_unoutlined_material_band(monkeypatch):
+    import ermbg.api as api
+    import ermbg.probe.comfyui_corridorkey as remote_mod
+    from ermbg.probe.comfyui_corridorkey import (
+        build_hard_ui_shadow_safe_material_alpha_floor,
+        build_hard_ui_solid_interior_mask,
+    )
+
+    captured = {}
+
+    class _FakeRemoteResult:
+        def __init__(self, hint_alpha, hint_source):
+            self.rgba = np.zeros((*hint_alpha.shape, 4), dtype=np.uint8)
+            self.alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.foreground_srgb = np.zeros((*hint_alpha.shape, 3), dtype=np.uint8)
+            self.hint_alpha = hint_alpha
+            self.raw_alpha = self.alpha.copy()
+            self.color_protection_alpha = np.zeros(hint_alpha.shape, dtype=np.float32)
+            self.debug = {
+                "prompt_id": "prompt-corridor",
+                "hint": {"source": hint_source, "mean": float(hint_alpha.mean())},
+            }
+
+    class _FakeClient:
+        def __init__(self, url):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            return _FakeRemoteResult(kwargs["hint_alpha"], kwargs["hint_source"])
+
+    monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: None)
+    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+
+    path = Path(__file__).resolve().parents[1] / "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_no_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        image,
+        backend="comfy-corridorkey",
+        corridorkey_auto_mask=True,
+        corridorkey_hard_ui_hint_mode="boundary_2px_shadow_safe_edge_floor",
+    )
+    interior = build_hard_ui_solid_interior_mask(image, (0, 200, 0))
+    floor, floor_info = build_hard_ui_shadow_safe_material_alpha_floor(image, (0, 200, 0))
+    edge_floor = (floor > 0.0) & ~interior
+
+    assert captured["hint_source"] == "known_bg_hard_ui_boundary_2px_shadow_safe_edge_floor_hint"
+    assert result.debug["hard_ui_hint"]["mode"] == "boundary_2px_shadow_safe_edge_floor"
+    assert result.debug["hard_ui_hint"]["material_floor_pixels"] == floor_info["material_floor_pixels"]
+    assert result.debug["hard_ui_hint"]["material_floor_lift_pixels"] == int((floor > 0.0).sum())
+    assert edge_floor.sum() > 100
+    assert np.all(result.debug["subject_alpha"][edge_floor] >= floor[edge_floor])
 
 
 def test_matte_image_comfy_corridorkey_accepts_hint_mask(monkeypatch):

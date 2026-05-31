@@ -420,6 +420,7 @@ def _opaque_hard_ui_profile_candidates(
 def _decision_candidates(
     *,
     image_aspect_ratio: float,
+    image_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -433,6 +434,7 @@ def _decision_candidates(
 ) -> list[CorridorKeyDecisionCandidate]:
     semantic_candidates = _semantic_decision_candidates(
         image_aspect_ratio=image_aspect_ratio,
+        image_long_side=image_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -471,6 +473,7 @@ def _decision_candidates(
 def _semantic_decision_candidates(
     *,
     image_aspect_ratio: float,
+    image_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -510,6 +513,21 @@ def _semantic_decision_candidates(
     )
     candidates: list[CorridorKeyDecisionCandidate] = []
     candidates.extend(opaque_hard_ui_candidates)
+
+    composite_character = 0.75 <= image_aspect_ratio <= 1.35 and image_long_side >= 512
+    if composite_character:
+        candidates.append(
+            CorridorKeyDecisionCandidate(
+                profile="composite_character_corridor_only",
+                label="复合角色 · 交给 CorridorKey",
+                confidence=1.0,
+                settings=CorridorKeyRecommendedSettings(),
+                reason=(
+                    "Large square character asset can mix opaque body, hair, glow, and translucent material; "
+                    "avoid coarse color-protection ownership and let CorridorKey solve the matte."
+                ),
+            )
+        )
 
     translucent_button = (
         image_aspect_ratio >= 1.45
@@ -677,6 +695,22 @@ def _settings_for_profile(
             protection_bg_max=6.0,
             protection_fg_min=14.0,
         )
+    elif profile == "composite_character_corridor_only":
+        del confidence
+        # Composite characters can contain opaque armor/skin, hair strands,
+        # glow, fabric, and transparent accessories in the same connected
+        # subject. A color-protection floor is not smart enough to own those
+        # materials safely; use this profile as a clean CorridorKey-capability
+        # experiment with a full-frame hint and no color protection.
+        settings = CorridorKeyRecommendedSettings(
+            despill_strength=1.0,
+            refiner_strength=1.0,
+            auto_despeckle="Off",
+            despeckle_size=64,
+            color_protection=False,
+            protection_bg_max=6.0,
+            protection_fg_min=14.0,
+        )
     elif profile == "key_color_material":
         # Once same-key hue is anchored in hard/compact subject support, protect
         # it aggressively; this is the opposite of the translucent path.
@@ -701,6 +735,7 @@ def _settings_for_profile(
     if hard_screen_residue_risk >= 0.04 and profile not in {
         "screen_tinted_translucency",
         "translucent_button",
+        "composite_character_corridor_only",
         "opaque_hard_ui_hard_shadow",
     }:
         settings = CorridorKeyRecommendedSettings(
@@ -724,6 +759,7 @@ def _recommend_settings(
     *,
     preset: str,
     image_aspect_ratio: float,
+    image_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -783,6 +819,7 @@ def _recommend_settings(
 
     candidates = _decision_candidates(
         image_aspect_ratio=image_aspect_ratio,
+        image_long_side=image_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -816,6 +853,8 @@ def _recommend_settings(
         notes.append("stage2 translucent tuning disabled color protection")
     elif parameter_profile == "translucent_button":
         notes.append("stage2 translucent-button tuning disabled color protection")
+    elif parameter_profile == "composite_character_corridor_only":
+        notes.append("stage2 composite-character corridor-only tuning disabled color protection and automatic hint constraints")
     if small_component_risk:
         notes.append("small UI components disabled auto despeckle")
     if purity_sigma >= 8.0:
@@ -899,6 +938,7 @@ def corridorkey_analyze_asset(
     settings, parameter_profile, decision_candidates, setting_notes = _recommend_settings(
         preset=preset,
         image_aspect_ratio=float(image_srgb.shape[1] / max(1, image_srgb.shape[0])),
+        image_long_side=int(max(image_srgb.shape[:2])),
         screen_mode=selected_mode,
         subject_key_color_risk=subject_risk,
         key_color_solid_fraction=solid_fraction,

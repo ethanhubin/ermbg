@@ -26,6 +26,26 @@
 
 输出 `bg_type` / `image_type` / 完整 JSON。
 
+### `ERMBG PyMatting Known-B`
+实验性的已知纯色背景 PyMatting 节点,用于硬边界/抗锯齿图形的 A/B 测试。它不会跑 BiRefNet,也不会提交嵌套 Comfy prompt;只在当前 ComfyUI Python 进程里用 PyMatting 解 trimap 的未知边界带,再用已知背景色反解边缘前景色。
+
+输入:
+- `image` (IMAGE,必填) — 已经渲染在纯色背景上的图
+- `method` — `cf` / `knn` / `lbdm` / `lkm` / `rw` / `sm`,默认 `cf`
+- `image_space` — 默认 `linear`,也可切到 `sRGB` 做对比
+- `bg_source` — `auto` / `green` / `blue` / `custom`
+- `bg_color` — `custom` 时使用的 `R,G,B`
+- `bg_threshold` / `fg_threshold` — 生成 known-B trimap 的背景/前景距离阈值
+- `boundary_band_px` — trimap 未知边界带宽度
+- `cg_maxiter` / `cg_rtol` — 迭代求解器参数
+
+输出:
+- `foreground` (IMAGE) — 已按 known-B 反污染的前景 RGB
+- `alpha` (MASK) — PyMatting α
+- `summary` (STRING) — 方法、背景色、未知像素数
+- `rgba_rgb` (IMAGE) — 与 `alpha` 配套的 RGB
+- `trimap` (IMAGE) — trimap 预览
+
 ## 安装
 
 依赖要先装到 ComfyUI 的 Python 环境里:

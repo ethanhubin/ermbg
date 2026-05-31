@@ -24,8 +24,6 @@ from ermbg.shadow import ShadowThresholds, exterior_scalar_darkening_mask
 _DEFAULT_WORKFLOW = Path(__file__).parent / "comfyui_corridorkey.json"
 _FOREGROUND_NODE = "30"
 _ALPHA_NODE = "50"
-_PROCESSED_NODE = "60"
-_QC_NODE = "70"
 
 
 @dataclass(frozen=True)
@@ -82,6 +80,284 @@ def build_corridorkey_hint(
     return np.clip(hint, 0.0, 1.0).astype(np.float32)
 
 
+def build_hard_ui_corridorkey_hint(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] = (0, 200, 0),
+    *,
+    thresholds: KeyerThresholds | None = None,
+) -> np.ndarray:
+    """Build a CorridorKey bbox hint for opaque hard UI.
+
+    Failure mode this tests against: pixel-exact known-B hints can import mask
+    defects into CorridorKey, while all-white hints can leave crisp UI outlines
+    under-supported. For hard UI, use known-B evidence only to locate the
+    subject's rectangle, then give CorridorKey a simple bbox hint. The 2 px
+    expansion is deliberate for hard UI antialias/outline pixels: it avoids
+    clipping the visible border without turning the whole screen into foreground.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("build_hard_ui_corridorkey_hint() expects HxWx3 sRGB uint8")
+
+    raw = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        thresholds or KeyerThresholds(bg_max=4.0, fg_min=18.0),
+    ).astype(np.float32)
+    h, w = raw.shape
+    if not np.any(raw > 0.18):
+        return raw.astype(np.float32)
+
+    # The support threshold is only for locating a stable hard-UI component, not
+    # for transferring edge alpha. A bbox hint intentionally gives CorridorKey
+    # room to solve antialiasing, outline alpha, and possible nearby shadow.
+    support = raw >= 0.18
+    yy, xx = np.nonzero(support)
+    if yy.size == 0:
+        return raw.astype(np.float32)
+
+    pad_px = 2
+    y0 = max(0, int(yy.min()) - pad_px)
+    y1 = min(h, int(yy.max()) + pad_px + 1)
+    x0 = max(0, int(xx.min()) - pad_px)
+    x1 = min(w, int(xx.max()) + pad_px + 1)
+    hint = np.zeros((h, w), dtype=np.float32)
+    hint[y0:y1, x0:x1] = 1.0
+    return hint
+
+
+def build_hard_ui_boundary_corridorkey_hint(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] = (0, 200, 0),
+    *,
+    thresholds: KeyerThresholds | None = None,
+) -> np.ndarray:
+    """Build a boundary-only CorridorKey hint for opaque hard UI experiments.
+
+    The current hard-UI path remains bbox-based. This separate experiment sends
+    only a narrow boundary band to CorridorKey, so solid interiors can be owned
+    by local known-background evidence while the model spends its capacity on
+    antialiasing, outlines, and nearby shadow.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("build_hard_ui_boundary_corridorkey_hint() expects HxWx3 sRGB uint8")
+
+    raw = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        thresholds or KeyerThresholds(bg_max=4.0, fg_min=18.0),
+    ).astype(np.float32)
+    if not np.any(raw > 0.18):
+        return raw.astype(np.float32)
+
+    # The support threshold locates the hard UI silhouette; the ring sends only
+    # the uncertain edge to CorridorKey. The two-pixel band is empirical and
+    # keyed to crisp UI AA/outline widths observed in the button samples.
+    support = raw >= 0.18
+    if not support.any():
+        return raw.astype(np.float32)
+
+    band_px = 2
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (band_px * 2 + 1, band_px * 2 + 1))
+    outer = cv2.dilate(support.astype(np.uint8), kernel, iterations=1).astype(bool)
+    inner = cv2.erode(support.astype(np.uint8), kernel, iterations=1).astype(bool)
+    ring = outer & ~inner
+    return ring.astype(np.float32)
+
+
+def build_hard_ui_solid_interior_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] = (0, 200, 0),
+    *,
+    thresholds: KeyerThresholds | None = None,
+) -> np.ndarray:
+    """Return high-confidence hard-UI interior that should bypass CorridorKey.
+
+    Broad rule: for opaque hard UI, strong known-background evidence well away
+    from the edge is already a solid subject decision. CorridorKey is still used
+    for the boundary band, but this interior is restored to alpha 1 and source
+    RGB so learned keyer uncertainty cannot add waves inside a button.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("build_hard_ui_solid_interior_mask() expects HxWx3 sRGB uint8")
+
+    raw = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        thresholds or KeyerThresholds(bg_max=4.0, fg_min=18.0),
+    ).astype(np.float32)
+    support = raw >= 0.70
+    if not support.any():
+        return np.zeros(raw.shape, dtype=bool)
+
+    # Three pixels keeps AA/outline/shadow ownership with CorridorKey while
+    # leaving broad, high-confidence hard UI material to the local solid restore.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    interior = cv2.erode(support.astype(np.uint8), kernel, iterations=1).astype(bool)
+    return interior
+
+
+def build_hard_ui_shadow_safe_solid_interior_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] = (0, 200, 0),
+    *,
+    thresholds: KeyerThresholds | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return hard-UI interior while leaving measured shadow to shadow repair.
+
+    Failure mode this protects against: a boundary-only CorridorKey hint needs
+    local interior restoration, but screen-colored contact shadows can satisfy
+    the same high-alpha chroma evidence as opaque UI material. Excluding
+    scalar-darkening connected to exterior background keeps those pixels out of
+    subject ownership so the later known-background shadow patch can own them.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("build_hard_ui_shadow_safe_solid_interior_mask() expects HxWx3 sRGB uint8")
+
+    raw = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        thresholds or KeyerThresholds(bg_max=4.0, fg_min=18.0),
+    ).astype(np.float32)
+    support = raw >= 0.70
+    if not support.any():
+        empty = np.zeros(raw.shape, dtype=bool)
+        return empty, {
+            "shadow_safe_enabled": True,
+            "base_interior_pixels": 0,
+            "shadow_like_pixels": 0,
+            "shadow_candidate_pixels": 0,
+            "shadow_exclusion_pixels": 0,
+            "shadow_excluded_interior_pixels": 0,
+            "solid_interior_pixels": 0,
+        }
+
+    # Match the existing interior path first so this mode changes only the
+    # ownership split near measured shadow, not the broad hard-UI material rule.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    base_interior = cv2.erode(support.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+    known_bg = raw <= 0.20
+    shadow_like, shadow_info = exterior_scalar_darkening_mask(
+        image_srgb,
+        background_color,
+        known_bg,
+        ShadowThresholds(
+            # Interior restore runs before the dedicated shadow patch. These
+            # gates intentionally mirror the color-protection shadow guard:
+            # scalar reconstruction and exterior connectivity are the real
+            # ownership signals, while the low strength catches light contact
+            # shadow AA that should not become opaque subject material.
+            min_strength=0.01,
+            max_reconstruction_error=0.07,
+            reject_border_components=False,
+        ),
+    )
+    if shadow_like.any():
+        # A small cushion keeps contact-shadow antialiasing out of the forced
+        # alpha=1 restore. It is empirical but signal-bound: it only grows from
+        # measured scalar-darkening support, not from arbitrary geometry.
+        shadow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        shadow_exclusion = cv2.dilate(shadow_like.astype(np.uint8), shadow_kernel, iterations=1).astype(bool)
+    else:
+        shadow_exclusion = shadow_like
+
+    interior = base_interior & ~shadow_exclusion
+    excluded = base_interior & shadow_exclusion
+    info = {
+        "shadow_safe_enabled": True,
+        "base_interior_pixels": int(base_interior.sum()),
+        "shadow_like_pixels": int(shadow_like.sum()),
+        "shadow_candidate_pixels": int(shadow_info.get("candidate_pixels", 0)),
+        "shadow_exclusion_pixels": int(shadow_exclusion.sum()),
+        "shadow_excluded_interior_pixels": int(excluded.sum()),
+        "solid_interior_pixels": int(interior.sum()),
+    }
+    return interior.astype(bool), info
+
+
+def build_hard_ui_shadow_safe_material_alpha_floor(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] = (0, 200, 0),
+    *,
+    thresholds: KeyerThresholds | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return a local material alpha floor for unoutlined hard UI.
+
+    Failure mode this protects against: boundary-only CorridorKey can leave a
+    blank band on opaque UI that has no outline, because the model has no dark
+    edge anchor and the local solid restore intentionally erodes the interior.
+    Known-background chroma alpha is reliable for that hard material edge, but
+    scalar screen-darkening must still be excluded so shadows remain owned by
+    the dedicated shadow patch.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("build_hard_ui_shadow_safe_material_alpha_floor() expects HxWx3 sRGB uint8")
+
+    raw = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        thresholds or KeyerThresholds(bg_max=4.0, fg_min=18.0),
+    ).astype(np.float32)
+    material_support = raw >= 0.18
+    if not material_support.any():
+        empty = np.zeros(raw.shape, dtype=np.float32)
+        return empty, {
+            "material_floor_enabled": True,
+            "base_interior_pixels": 0,
+            "material_floor_pixels": 0,
+            "shadow_like_pixels": 0,
+            "shadow_candidate_pixels": 0,
+            "shadow_exclusion_pixels": 0,
+            "shadow_excluded_floor_pixels": 0,
+            "solid_interior_pixels": 0,
+        }
+
+    solid_support = raw >= 0.70
+    if solid_support.any():
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        base_interior = cv2.erode(solid_support.astype(np.uint8), kernel, iterations=1).astype(bool)
+    else:
+        base_interior = np.zeros(raw.shape, dtype=bool)
+
+    known_bg = raw <= 0.20
+    shadow_like, shadow_info = exterior_scalar_darkening_mask(
+        image_srgb,
+        background_color,
+        known_bg,
+        ShadowThresholds(
+            # Keep this matched to the shadow-safe solid interior path: the
+            # only difference is that surviving material edge pixels receive a
+            # soft alpha floor instead of being left entirely to CorridorKey.
+            min_strength=0.01,
+            max_reconstruction_error=0.07,
+            reject_border_components=False,
+        ),
+    )
+    if shadow_like.any():
+        shadow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        shadow_exclusion = cv2.dilate(shadow_like.astype(np.uint8), shadow_kernel, iterations=1).astype(bool)
+    else:
+        shadow_exclusion = shadow_like
+
+    allowed_material = material_support & ~shadow_exclusion
+    floor = np.where(allowed_material, raw, 0.0).astype(np.float32)
+    solid_interior = base_interior & ~shadow_exclusion
+    floor[solid_interior] = 1.0
+    excluded = material_support & shadow_exclusion
+    info = {
+        "material_floor_enabled": True,
+        "base_interior_pixels": int(base_interior.sum()),
+        "material_floor_pixels": int((floor > 0.0).sum()),
+        "shadow_like_pixels": int(shadow_like.sum()),
+        "shadow_candidate_pixels": int(shadow_info.get("candidate_pixels", 0)),
+        "shadow_exclusion_pixels": int(shadow_exclusion.sum()),
+        "shadow_excluded_floor_pixels": int(excluded.sum()),
+        "solid_interior_pixels": int(solid_interior.sum()),
+        "material_floor_mean": float(floor[floor > 0.0].mean()) if (floor > 0.0).any() else 0.0,
+    }
+    return np.clip(floor, 0.0, 1.0).astype(np.float32), info
+
+
 def build_key_color_protection_floor(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int] = (0, 200, 0),
@@ -92,7 +368,7 @@ def build_key_color_protection_floor(
 
     Failure mode this protects against: CorridorKey can treat saturated UI
     colors such as yellow/orange as spill-like transparency even when the hint
-    says foreground. The invariant is color based: pixels far outside the key
+    says foreground. The rule is color based: pixels far outside the key
     color family should not be driven transparent by a learned green-screen
     prior. For saturated key colors we measure OKLab a/b distance only, so
     darker same-hue screen shadows remain key-colored instead of becoming an
@@ -128,10 +404,11 @@ def _shadow_safe_color_protection_floor(
     raw_alpha: np.ndarray,
     background_color: tuple[int, int, int],
     floor: np.ndarray,
+    trusted_material_alpha: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Suppress color protection where pixels are measured screen darkening.
 
-    Broad invariant: color distance alone is not ownership. A cast shadow on a
+    Broad rule: color distance alone is not ownership. A cast shadow on a
     saturated known background can move far enough from the key color to look
     like protected subject, while the pixel still satisfies the physical model
     ``C ~= scale * B``. The empirical gates below are intentionally loose and
@@ -155,7 +432,32 @@ def _shadow_safe_color_protection_floor(
         ),
     )
     subject_owned = raw_alpha >= 0.80
-    blocked = shadow_like & (~subject_owned) & (floor > 0.0)
+    trusted_material = np.zeros_like(floor, dtype=bool)
+    if trusted_material_alpha is not None:
+        trusted = np.clip(trusted_material_alpha.astype(np.float32), 0.0, 1.0)
+        if trusted.shape != floor.shape:
+            raise ValueError("trusted_material_alpha must have shape HxW matching floor")
+        # General ownership rule for small/icon-like solid material: color
+        # distance can say "this is material", while scalar-darkening can still
+        # say "this could be a shadow" when the material shares the screen hue.
+        # Resolve that conflict by topology rather than by a sample color: only
+        # components supported by both the coarse CorridorKey hint and the
+        # color floor, with interior pixels separated from known exterior
+        # background, are trusted as material. Exterior-connected shadows and
+        # outer antialias pixels remain available to the shadow-safe suppressor.
+        material_candidate = (trusted > 0.0) & (floor > 0.0)
+        if material_candidate.any():
+            distance_to_known_bg = cv2.distanceTransform((~known_bg).astype(np.uint8), cv2.DIST_L2, 3)
+            interior_candidate = material_candidate & (distance_to_known_bg > 2.0)
+            num_labels, labels = cv2.connectedComponents(material_candidate.astype(np.uint8), connectivity=8)
+            if num_labels > 1 and interior_candidate.any():
+                component_has_interior = np.bincount(
+                    labels.ravel(),
+                    weights=interior_candidate.ravel().astype(np.float32),
+                    minlength=num_labels,
+                ) > 0
+                trusted_material = component_has_interior[labels] & material_candidate & (distance_to_known_bg > 1.0)
+    blocked = shadow_like & (~subject_owned) & (floor > 0.0) & (~trusted_material)
     applied_floor = floor.copy()
     applied_floor[blocked] = 0.0
     exterior_domain = known_bg | shadow_like
@@ -165,6 +467,7 @@ def _shadow_safe_color_protection_floor(
         & (raw_alpha <= 0.88)
         & (floor > raw_alpha + 0.05)
         & (distance_to_exterior <= 2.0)
+        & (~trusted_material)
     )
     # Color protection is allowed to fill interior holes, but not to convert
     # CorridorKey's measured outer-edge antialiasing into full opacity. B023's
@@ -179,6 +482,7 @@ def _shadow_safe_color_protection_floor(
         "floor_shadow_blocked_pixels": int(blocked.sum()),
         "floor_shadow_blocked_mean": float(floor[blocked].mean()) if blocked.any() else 0.0,
         "floor_edge_antialias_blocked_pixels": int(edge_antialias.sum()),
+        "trusted_material_pixels": int(trusted_material.sum()),
         "floor_applied_mean": float(applied_floor.mean()),
     }
     return applied_floor.astype(np.float32), stats
@@ -191,6 +495,7 @@ def apply_key_color_protection(
     alpha: np.ndarray,
     background_color: tuple[int, int, int] = (0, 200, 0),
     thresholds: KeyerThresholds | None = None,
+    trusted_material_alpha: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Lift model alpha where non-key colors prove the pixel is not screen.
 
@@ -207,6 +512,7 @@ def apply_key_color_protection(
         raw_alpha=raw_alpha,
         background_color=background_color,
         floor=floor,
+        trusted_material_alpha=trusted_material_alpha,
     )
     protected_alpha = np.maximum(raw_alpha, applied_floor).astype(np.float32)
     lift = np.clip(protected_alpha - raw_alpha, 0.0, 1.0)
@@ -370,6 +676,7 @@ class ComfyUICorridorKeyClient:
         apply_color_protection: bool = True,
         color_protection_bg_max: float = 12.0,
         color_protection_fg_min: float = 28.0,
+        protect_hint_supported_material: bool = False,
     ) -> ComfyCorridorKeyResult:
         if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
             raise ValueError("matte() expects HxWx3 sRGB uint8")
@@ -444,6 +751,7 @@ class ComfyUICorridorKeyClient:
                 alpha=raw_alpha,
                 background_color=background_color,
                 thresholds=protection_thresholds,
+                trusted_material_alpha=hint if protect_hint_supported_material else None,
             )
             protection_debug = {"enabled": True, **protection_stats}
         alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
@@ -463,8 +771,6 @@ class ComfyUICorridorKeyClient:
                 "server_mask": server_mask,
                 "foreground_node": _FOREGROUND_NODE,
                 "alpha_node": _ALPHA_NODE,
-                "processed_node": _PROCESSED_NODE,
-                "qc_node": _QC_NODE,
                 "background_color": list(background_color),
                 "settings": {
                     "gamma_space": gamma_space,
@@ -493,4 +799,9 @@ __all__ = [
     "apply_key_color_protection",
     "build_key_color_protection_floor",
     "build_corridorkey_hint",
+    "build_hard_ui_corridorkey_hint",
+    "build_hard_ui_boundary_corridorkey_hint",
+    "build_hard_ui_solid_interior_mask",
+    "build_hard_ui_shadow_safe_solid_interior_mask",
+    "build_hard_ui_shadow_safe_material_alpha_floor",
 ]

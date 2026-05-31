@@ -13,10 +13,15 @@ from ermbg.probe.comfyui_corridorkey import (
     ComfyUICorridorKeyClient,
     apply_key_color_protection,
     build_corridorkey_hint,
+    build_hard_ui_boundary_corridorkey_hint,
+    build_hard_ui_corridorkey_hint,
+    build_hard_ui_shadow_safe_material_alpha_floor,
+    build_hard_ui_shadow_safe_solid_interior_mask,
+    build_hard_ui_solid_interior_mask,
     build_key_color_protection_floor,
 )
 from ermbg.corridorkey import corridorkey_analyze_asset
-from ermbg.keyer import KeyerThresholds
+from ermbg.keyer import KeyerThresholds, chromatic_key_alpha
 
 pytestmark = pytest.mark.core
 
@@ -30,10 +35,10 @@ def _selected_candidate(analysis):
     return selected[0]
 
 
-def _game_sample_image(case_id: str, variant: str) -> np.ndarray:
+def _game_sample_image(case_id: str, screen: str) -> np.ndarray:
     manifest = json.loads((CORRIDORKEY_SEMANTIC_ROOT / "manifest.json").read_text())
     case = next(item for item in manifest["cases"] if item["id"] == case_id)
-    path = Path(__file__).resolve().parents[1] / case[variant]
+    path = Path(__file__).resolve().parents[1] / case[screen]
     assert path.exists(), path
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
@@ -48,9 +53,9 @@ def test_corridorkey_semantic_coverage_catalog_is_actionable():
     assert catalog["phase_status"]["phase2_next_goal"]
     assert catalog["backgrounds"]["green"] == [0, 200, 0]
     assert catalog["backgrounds"]["blue"] == [0, 0, 200]
-    assert catalog["case_count"] == 83
-    assert catalog["category_counts"] == {"button": 54, "icon": 20, "character": 9}
-    assert catalog["screen_counts"] == {"green": 57, "blue": 26}
+    assert catalog["case_count"] == 85
+    assert catalog["category_counts"] == {"button": 56, "icon": 20, "character": 9}
+    assert catalog["screen_counts"] == {"green": 58, "blue": 27}
 
     sample_ids = [case["sample_id"] for case in catalog["cases"]]
     assert len(sample_ids) == len(set(sample_ids))
@@ -62,7 +67,7 @@ def test_corridorkey_semantic_coverage_catalog_is_actionable():
         assert screen in {"green", "blue"}
         assert screen in case
         assert case["backgrounds"][screen] == catalog["backgrounds"][screen]
-        assert case["image_size"] in ([256, 128], [256, 256], [1024, 1024])
+        assert case["image_size"] in ([256, 128], [512, 512], [256, 256], [1024, 1024])
         assert case["primary_ambiguity"]
         assert case["target_route"]
         input_path = Path(__file__).resolve().parents[1] / case[screen]
@@ -91,6 +96,92 @@ def test_corridorkey_hint_is_soft_eroded_known_bg_support():
     assert hint[32, 32] > 0.95
     assert hint[0, 0] == 0.0
     assert hint[18, 32] < hint[32, 32]
+
+
+def test_hard_ui_corridorkey_hint_preserves_dark_outline():
+    image = _game_sample_image("button_green_yellow_a_outlined_no_shadow", "green")
+    hint = build_hard_ui_corridorkey_hint(image, (0, 200, 0))
+    eroded_hint = build_corridorkey_hint(image, (0, 200, 0))
+
+    rgb = image.astype(np.int16)
+    outline = (
+        (np.linalg.norm(rgb - np.array([0, 200, 0]), axis=2) > 35)
+        & (rgb[..., 0] > 40)
+        & (rgb[..., 0] < 150)
+        & (rgb[..., 1] < 95)
+        & (rgb[..., 2] < 60)
+    )
+
+    # Mechanism: hard UI outlines are reliable known-B foreground evidence.
+    # The generic eroded hint is intentionally conservative for soft subjects,
+    # but for B001-like outlines it removes the very pixels CorridorKey needs as
+    # boundary support. The hard-UI hint keeps those outline pixels high while
+    # still leaving pure exterior background at zero.
+    assert outline.sum() > 1000
+    assert float(np.percentile(hint[outline], 10)) > 0.95
+    assert float(np.percentile(eroded_hint[outline], 10)) < 0.50
+    assert hint[0, 0] == 0.0
+
+    raw = chromatic_key_alpha(image, (0, 200, 0), KeyerThresholds(bg_max=4.0, fg_min=18.0))
+    yy, xx = np.nonzero(raw >= 0.18)
+    expected = np.zeros_like(hint)
+    expected[max(0, yy.min() - 2) : min(hint.shape[0], yy.max() + 3), max(0, xx.min() - 2) : min(hint.shape[1], xx.max() + 3)] = 1.0
+    assert set(np.unique(hint).tolist()) <= {0.0, 1.0}
+    assert np.array_equal(hint, expected)
+
+
+def test_hard_ui_boundary_hint_is_separate_from_bbox_path():
+    image = _game_sample_image("button_green_yellow_a_outlined_no_shadow", "green")
+    bbox_hint = build_hard_ui_corridorkey_hint(image, (0, 200, 0))
+    boundary_hint = build_hard_ui_boundary_corridorkey_hint(image, (0, 200, 0))
+    interior = build_hard_ui_solid_interior_mask(image, (0, 200, 0))
+
+    assert bbox_hint.mean() > boundary_hint.mean()
+    assert boundary_hint.dtype == np.float32
+    assert set(np.unique(boundary_hint).tolist()) <= {0.0, 1.0}
+    assert interior.dtype == np.bool_
+    assert int(interior.sum()) > 1000
+    assert boundary_hint[interior].max() == 0.0
+
+
+def test_shadow_safe_hard_ui_interior_leaves_contact_shadow_unowned():
+    shadow_image = _game_sample_image("button_green_yellow_b_unoutlined_hard_heavy_shadow", "green")
+    no_shadow_image = _game_sample_image("button_green_yellow_b_unoutlined_no_shadow", "green")
+
+    base_shadow = build_hard_ui_solid_interior_mask(shadow_image, (0, 200, 0))
+    safe_shadow, shadow_info = build_hard_ui_shadow_safe_solid_interior_mask(shadow_image, (0, 200, 0))
+    base_no_shadow = build_hard_ui_solid_interior_mask(no_shadow_image, (0, 200, 0))
+    safe_no_shadow, no_shadow_info = build_hard_ui_shadow_safe_solid_interior_mask(no_shadow_image, (0, 200, 0))
+
+    # Mechanism: hard UI material can be restored locally, but scalar screen
+    # darkening connected to exterior background is shadow ownership. The
+    # shadow-safe path changes only that overlap, so no-shadow buttons keep the
+    # same solid interior while contact shadows are left for shadow patch.
+    assert int(base_shadow.sum()) > int(safe_shadow.sum())
+    assert shadow_info["shadow_like_pixels"] > 0
+    assert shadow_info["shadow_excluded_interior_pixels"] > 0
+    assert np.all(safe_shadow <= base_shadow)
+    assert np.array_equal(safe_no_shadow, base_no_shadow)
+    assert no_shadow_info["shadow_excluded_interior_pixels"] == 0
+
+
+def test_shadow_safe_material_floor_covers_unoutlined_edge_without_shadow_ownership():
+    no_shadow_image = _game_sample_image("button_green_yellow_b_unoutlined_no_shadow", "green")
+    shadow_image = _game_sample_image("button_green_yellow_b_unoutlined_hard_heavy_shadow", "green")
+
+    no_shadow_interior = build_hard_ui_solid_interior_mask(no_shadow_image, (0, 200, 0))
+    no_shadow_floor, no_shadow_info = build_hard_ui_shadow_safe_material_alpha_floor(no_shadow_image, (0, 200, 0))
+    shadow_floor, shadow_info = build_hard_ui_shadow_safe_material_alpha_floor(shadow_image, (0, 200, 0))
+
+    # Mechanism: unoutlined hard UI has no dark stroke for CorridorKey to lock
+    # onto, so the local known-B alpha must protect the material edge as a soft
+    # floor. Shadow-like screen darkening is still excluded from that floor and
+    # remains available to the shadow patch.
+    assert int((no_shadow_floor > 0.0).sum()) > int(no_shadow_interior.sum())
+    assert no_shadow_floor[no_shadow_interior].min() == 1.0
+    assert no_shadow_info["shadow_excluded_floor_pixels"] == 0
+    assert shadow_info["shadow_excluded_floor_pixels"] > 0
+    assert int((shadow_floor > 0.0).sum()) < int((no_shadow_floor > 0.0).sum()) + 3000
 
 
 def test_key_color_protection_is_color_based_not_region_based():
@@ -254,6 +345,44 @@ def test_key_color_protection_keeps_b023_exterior_antialias_soft():
     assert stats["floor_edge_antialias_blocked_pixels"] >= len(edge_points)
 
 
+def test_key_color_protection_trusts_hint_supported_solid_icon_material():
+    image = _game_sample_image("icon_icon_a03_hard_boundary_weak_contrast", "green")
+    analysis = corridorkey_analyze_asset(image)
+    foreground = np.zeros_like(image)
+    raw_alpha = np.zeros(image.shape[:2], dtype=np.float32)
+    hint = build_corridorkey_hint(image, analysis.background_color)
+    thresholds = KeyerThresholds(
+        bg_max=analysis.recommended_settings.protection_bg_max,
+        fg_min=analysis.recommended_settings.protection_fg_min,
+    )
+
+    _, untrusted_alpha, untrusted_floor, untrusted_stats = apply_key_color_protection(
+        image_srgb=image,
+        foreground_srgb=foreground,
+        alpha=raw_alpha,
+        background_color=analysis.background_color,
+        thresholds=thresholds,
+    )
+    _, trusted_alpha, trusted_floor, trusted_stats = apply_key_color_protection(
+        image_srgb=image,
+        foreground_srgb=foreground,
+        alpha=raw_alpha,
+        background_color=analysis.background_color,
+        thresholds=thresholds,
+        trusted_material_alpha=hint,
+    )
+
+    # Mechanism: same-screen-family solid icons can satisfy the physical
+    # scalar-darkening shadow model even though they are real opaque material.
+    # Trust only the interior of hint-supported foreground components; this is
+    # topology/ownership evidence, not a green-leaf-specific color threshold.
+    assert analysis.parameter_profile == "key_color_material"
+    assert untrusted_stats["floor_shadow_blocked_pixels"] > 10000
+    assert trusted_stats["trusted_material_pixels"] > 10000
+    assert trusted_floor.mean() > untrusted_floor.mean() + 0.10
+    assert trusted_alpha.mean() > untrusted_alpha.mean() + 0.10
+
+
 def test_corridorkey_analysis_detects_green_and_keeps_standard_settings():
     image = np.full((64, 64, 3), (0, 200, 0), dtype=np.uint8)
     image[18:46, 18:46] = (230, 40, 30)
@@ -393,7 +522,7 @@ def test_corridorkey_analysis_protects_dominant_blue_family_subject_material():
 
 
 @pytest.mark.parametrize(
-    ("case_id", "variant", "expected_profile"),
+    ("case_id", "screen", "expected_profile"),
     [
         ("button_green_yellow_a_outlined_no_shadow", "green", "opaque_hard_ui_no_shadow"),
         ("button_green_yellow_a_outlined_hard_lite_shadow", "green", "opaque_hard_ui_hard_shadow"),
@@ -405,11 +534,13 @@ def test_corridorkey_analysis_protects_dominant_blue_family_subject_material():
         ("button_green_yellow_c_translucent_soft_heavy_shadow", "green", "translucent_button"),
         ("icon_icon_a01_hard_boundary_strong_outline", "green", "edge_cleanup"),
         ("icon_icon_d10_soft_alpha_smooth_white_glow_blue", "blue", "key_color_material"),
-        ("character_char_a04_hair_transparent_wings_soft_glow_blue", "blue", "edge_cleanup"),
+        ("character_char_a04_hair_transparent_wings_soft_glow_blue", "blue", "composite_character_corridor_only"),
+        ("character_char_a02_hair_armor_glass_visor_blue", "blue", "composite_character_corridor_only"),
+        ("character_char_a06_pale_hair_translucent_sleeves_white_glow_blue", "blue", "composite_character_corridor_only"),
     ],
 )
-def test_corridorkey_game_sample_semantic_path_recognition(case_id, variant, expected_profile):
-    image = _game_sample_image(case_id, variant)
+def test_corridorkey_game_sample_semantic_path_recognition(case_id, screen, expected_profile):
+    image = _game_sample_image(case_id, screen)
 
     analysis = corridorkey_analyze_asset(image)
 
@@ -452,8 +583,19 @@ def test_corridorkey_translucent_button_disables_color_protection():
     assert analysis.recommended_settings.auto_despeckle == "Off"
 
 
+def test_corridorkey_composite_character_uses_corridor_only_profile():
+    image = _game_sample_image("character_char_a06_pale_hair_translucent_sleeves_white_glow_blue", "blue")
+
+    analysis = corridorkey_analyze_asset(image)
+
+    assert analysis.parameter_profile == "composite_character_corridor_only"
+    assert analysis.recommended_settings.color_protection is False
+    assert analysis.recommended_settings.auto_despeckle == "Off"
+    assert any("composite-character corridor-only" in note for note in analysis.notes)
+
+
 @pytest.mark.parametrize(
-    ("case_id", "variant", "expected_profile"),
+    ("case_id", "screen", "expected_profile"),
     [
         pytest.param(
             "button_real_glass_green_bg_yellow",
@@ -469,8 +611,8 @@ def test_corridorkey_translucent_button_disables_color_protection():
         ),
     ],
 )
-def test_corridorkey_game_sample_semantic_path_known_gaps(case_id, variant, expected_profile):
-    image = _game_sample_image(case_id, variant)
+def test_corridorkey_game_sample_semantic_path_known_gaps(case_id, screen, expected_profile):
+    image = _game_sample_image(case_id, screen)
 
     analysis = corridorkey_analyze_asset(image)
 
@@ -512,6 +654,8 @@ def test_comfy_corridorkey_workflow_renders_inputs():
     assert workflow["20"]["inputs"]["despill_strength"] == 0.75
     assert workflow["20"]["inputs"]["auto_despeckle"] == "Off"
     assert workflow["50"]["inputs"]["images"] == ["40", 0]
+    assert "60" not in workflow
+    assert "70" not in workflow
 
 
 def test_comfy_corridorkey_client_combines_fg_and_alpha(monkeypatch):

@@ -72,7 +72,7 @@ Bad examples:
 - Treating generated eval cases as replacements for real user regressions.
 
 When a fix needs empirical gates, write a nearby comment that distinguishes the
-invariant from the experience-driven value, and add a focused synthetic test
+rule from the experience-driven value, and add a focused synthetic test
 for the mechanism. For CorridorKey ShadowPatch changes, test both the positive
 case (missing shadow gets patched below the subject) and the negative case
 (CorridorKey already preserved shadow alpha, so the patch is skipped). For

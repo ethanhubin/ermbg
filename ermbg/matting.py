@@ -113,6 +113,7 @@ def matte(
     shadow_mode: str = "on",
     legacy_analytic_alpha: bool = False,
     solid_graphic_prepass: bool | None = None,
+    solid_graphic_alpha_refiner: str = "heuristic",
 ) -> MattingResult:
     """Run the matting pipeline on one sRGB uint8 image.
 
@@ -142,6 +143,8 @@ def matte(
         solid_graphic_prepass: try the analytic ownership-first path before
             building/running the matting net. ``None`` enables it only when no
             segmenter or precomputed soft mask was injected.
+        solid_graphic_alpha_refiner: ``"heuristic"`` or an experimental
+            ``"pymatting-*"`` method for the solid-background graphic prepass.
     """
     if image_srgb.dtype != np.uint8:
         raise ValueError("matte() expects sRGB uint8 input")
@@ -176,7 +179,7 @@ def matte(
         and strategy.bg_type in {"saturated", "white", "black", "grey"}
     )
     if can_try_solid_graphic:
-        solid = analyze_solid_bg_graphic(image_srgb)
+        solid = analyze_solid_bg_graphic(image_srgb, alpha_refiner=solid_graphic_alpha_refiner)
         if solid.accepted:
             logger.info(
                 f"solid_graphic: accepted confidence={solid.confidence:.3f} "
@@ -198,6 +201,11 @@ def matte(
     diag = diagnoser if diagnoser is not None else BackgroundDiagnoser()
     report = diag.diagnose(image_srgb, soft)
     B_srgb = np.array(report.background_color, dtype=np.uint8)
+    # The shadow, scalar-darkening, despill, and export stages all need linear
+    # source RGB. Keep one per-request conversion so large Web mattes do not pay
+    # the same full-image sRGB transform several times.
+    C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
+    B_lin = io.srgb_to_linear(B_srgb.reshape(1, 1, 3))[0, 0].astype(np.float32)
     semantic_subject_mask = getattr(semantic_prior, "subject_mask", None)
     if subject_support is not None and semantic_subject_mask is not None:
         shadow_subject_mask = np.maximum(subject_support, semantic_subject_mask)
@@ -242,6 +250,7 @@ def matte(
             raw_soft,
             B_srgb,
             prior=shadow_prior,
+            image_linear=C_lin,
         )
     else:
         pre_shadow_alpha, pre_shadow_info = _empty_shadow_result(
@@ -388,6 +397,7 @@ def matte(
             image_srgb,
             B_srgb,
             known_background_mask=key <= 0.02,
+            image_linear=C_lin,
         )
         scalar_exterior &= ~material_protect
         if scalar_exterior.any():
@@ -409,8 +419,6 @@ def matte(
 
     # ------------------------------------------------------------------ Despill
     despill_method = despill if despill is not None else strategy.despill
-    C_lin = io.srgb_to_linear(image_srgb).astype(np.float32)
-    B_lin = io.srgb_to_linear(B_srgb.reshape(1, 1, 3))[0, 0].astype(np.float32)
 
     if legacy_analytic_alpha:
         alpha, F_lin, trimap = _legacy_path(image_srgb, soft, C_lin, B_lin, B_srgb)
@@ -433,6 +441,7 @@ def matte(
             subject_alpha,
             B_srgb,
             prior=shadow_prior,
+            image_linear=C_lin,
         )
         if not shadow_info["detected"] and pre_shadow_info["detected"]:
             shadow_alpha_physical = pre_shadow_alpha

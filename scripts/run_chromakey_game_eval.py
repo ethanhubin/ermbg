@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run remote ComfyUI ColorToMask chroma key over game-eval variants."""
+"""Run remote ComfyUI ColorToMask chroma key over manifest-selected inputs."""
 
 from __future__ import annotations
 
@@ -56,10 +56,6 @@ def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
     return [case for case in cases if isinstance(case, dict)]
 
 
-def _case_variants(case: dict[str, Any], variants: list[str]) -> list[str]:
-    return [variant for variant in variants if isinstance(case.get(variant), str)]
-
-
 def _next_versioned_out_dir(prefix: str) -> Path:
     out_root = PROJECT_ROOT / "out"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -71,9 +67,38 @@ def _next_versioned_out_dir(prefix: str) -> Path:
     return out_root / f"{base}_v{version:03d}"
 
 
-def _variant_slug(variants: str) -> str:
-    items = [item.strip() for item in variants.split(",") if item.strip()]
-    return "_".join(items) if items else "screen"
+def _case_input_screen(case: dict[str, Any]) -> str:
+    input_value = str(case.get("input", ""))
+    for screen in ("green", "blue", "white"):
+        if isinstance(case.get(screen), str) and str(case[screen]) == input_value:
+            return screen
+    screen = case.get("screen")
+    if isinstance(screen, str) and screen:
+        return screen
+    path_screen = Path(input_value).stem
+    return path_screen if path_screen else "input"
+
+
+def _case_background(
+    manifest: dict[str, Any],
+    case: dict[str, Any],
+    screen: str,
+) -> tuple[int, int, int]:
+    backgrounds = case.get("backgrounds")
+    if isinstance(backgrounds, dict):
+        value = backgrounds.get(screen)
+        if isinstance(value, list) and len(value) == 3:
+            return tuple(int(c) for c in value)
+    manifest_backgrounds = manifest.get("backgrounds")
+    if isinstance(manifest_backgrounds, dict):
+        value = manifest_backgrounds.get(screen)
+        if isinstance(value, list) and len(value) == 3:
+            return tuple(int(c) for c in value)
+    if screen == "blue":
+        return (0, 0, 200)
+    if screen == "white":
+        return (255, 255, 255)
+    return (0, 200, 0)
 
 
 def _save_result(case_dir: Path, result) -> None:
@@ -108,96 +133,90 @@ def _coverage_metrics(input_path: Path, alpha_path: Path, background: tuple[int,
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     cases = _load_cases(args.manifest)
     if args.sample_id:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
         cases = [case for case in cases if str(case.get("sample_id", "")) in sample_ids]
-    variants = [item.strip() for item in args.variants.split(",") if item.strip()]
-    if not variants:
-        raise ValueError("--variants must include at least one variant")
+    cases = [case for case in cases if isinstance(case.get("input"), str)]
 
     out_root = args.out_dir
     out_root.mkdir(parents=True, exist_ok=True)
     client = ComfyUIChromaKeyClient(url=args.comfy_url)
     runs: list[dict[str, Any]] = []
-    total = sum(len(_case_variants(case, variants)) for case in cases)
-    run_index = 0
-    for case in cases:
+    total = len(cases)
+    for run_index, case in enumerate(cases, start=1):
         case_id = str(case["id"])
         sample_id = str(case.get("sample_id") or f"G{len(runs) + 1:02d}")
-        for variant in _case_variants(case, variants):
-            run_index += 1
-            input_path = PROJECT_ROOT / str(case[variant])
-            background = tuple(int(c) for c in case.get("backgrounds", {}).get(variant, []))
-            if len(background) != 3:
-                manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-                background = tuple(int(c) for c in manifest.get("backgrounds", {}).get(variant, [0, 200, 0]))
-            case_dir = out_root / f"{sample_id}_{case_id}_{variant}"
-            case_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(input_path, case_dir / "input.png")
+        screen = _case_input_screen(case)
+        input_path = PROJECT_ROOT / str(case["input"])
+        background = _case_background(manifest, case, screen)
+        case_dir = out_root / f"{sample_id}_{case_id}_{screen}"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(input_path, case_dir / "input.png")
+        print(
+            f"[{run_index}/{total}] {sample_id}-{screen[:1].upper()} {case_id} "
+            f"key={background} threshold={args.threshold}",
+            flush=True,
+        )
+        start = time.perf_counter()
+        try:
+            image = np.asarray(Image.open(input_path).convert("RGB"), dtype=np.uint8)
+            result = client.matte(image, key_color=background, threshold=args.threshold)
+            elapsed = time.perf_counter() - start
+            _save_result(case_dir, result)
+            metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
+            summary = {
+                "status": "ok",
+                "case": f"{sample_id}_{case_id}_{screen}",
+                "backend": "comfy-chromakey",
+                "input": _rel(input_path),
+                "sample_screen": screen,
+                "elapsed_sec_client": elapsed,
+                "outputs": {
+                    "input": _rel(case_dir / "input.png"),
+                    "rgba": _rel(case_dir / "rgba.png"),
+                    "alpha": _rel(case_dir / "alpha.png"),
+                    "foreground": _rel(case_dir / "foreground.png"),
+                },
+                "remote_debug": _json_safe(result.debug),
+                "quality_metrics": metrics,
+                "case_metadata": case,
+            }
             print(
-                f"[{run_index}/{total}] {sample_id}-{variant[:1].upper()} {case_id} "
-                f"key={background} threshold={args.threshold}",
+                f"  alpha_mean={metrics['alpha_mean']:.3f} "
+                f"coverage={metrics['expected_subject_alpha_coverage_gt_128']:.3f} "
+                f"elapsed={elapsed:.1f}s",
                 flush=True,
             )
-            start = time.perf_counter()
-            try:
-                image = np.asarray(Image.open(input_path).convert("RGB"), dtype=np.uint8)
-                result = client.matte(image, key_color=background, threshold=args.threshold)
-                elapsed = time.perf_counter() - start
-                _save_result(case_dir, result)
-                metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
-                summary = {
-                    "status": "ok",
-                    "case": f"{sample_id}_{case_id}_{variant}",
-                    "backend": "comfy-chromakey",
-                    "input": _rel(input_path),
-                    "sample_variant": variant,
-                    "elapsed_sec_client": elapsed,
-                    "outputs": {
-                        "input": _rel(case_dir / "input.png"),
-                        "rgba": _rel(case_dir / "rgba.png"),
-                        "alpha": _rel(case_dir / "alpha.png"),
-                        "foreground": _rel(case_dir / "foreground.png"),
-                    },
-                    "remote_debug": _json_safe(result.debug),
-                    "quality_metrics": metrics,
-                    "case_metadata": case,
-                }
-                print(
-                    f"  alpha_mean={metrics['alpha_mean']:.3f} "
-                    f"coverage={metrics['expected_subject_alpha_coverage_gt_128']:.3f} "
-                    f"elapsed={elapsed:.1f}s",
-                    flush=True,
-                )
-            except Exception as exc:
-                summary = {
-                    "status": "error",
-                    "case": f"{sample_id}_{case_id}_{variant}",
-                    "backend": "comfy-chromakey",
-                    "input": _rel(input_path),
-                    "sample_variant": variant,
-                    "error": str(exc),
-                    "case_metadata": case,
-                }
-                print(f"  ERROR {exc}", flush=True)
-            (case_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-            runs.append(summary)
-            aggregate = {
+        except Exception as exc:
+            summary = {
+                "status": "error",
+                "case": f"{sample_id}_{case_id}_{screen}",
                 "backend": "comfy-chromakey",
-                "batch": _rel(out_root),
-                "case_count": len(cases),
-                "run_count": total,
-                "ok_count": sum(1 for row in runs if row.get("status") == "ok"),
-                "variants": variants,
-                "keyer": {
-                    "node": "ColorToMask",
-                    "threshold": int(args.threshold),
-                    "note": "ColorToMask threshold is the ordinary chroma-key color range/tolerance.",
-                },
-                "runs": runs,
+                "input": _rel(input_path),
+                "sample_screen": screen,
+                "error": str(exc),
+                "case_metadata": case,
             }
-            (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"  ERROR {exc}", flush=True)
+        (case_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        runs.append(summary)
+        aggregate = {
+            "backend": "comfy-chromakey",
+            "batch": _rel(out_root),
+            "case_count": len(cases),
+            "run_count": total,
+            "ok_count": sum(1 for row in runs if row.get("status") == "ok"),
+            "screens": sorted({str(row.get("sample_screen", "")) for row in runs if row.get("sample_screen")}),
+            "keyer": {
+                "node": "ColorToMask",
+                "threshold": int(args.threshold),
+                "note": "ColorToMask threshold is the ordinary chroma-key color range/tolerance.",
+            },
+            "runs": runs,
+        }
+        (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return aggregate
 
@@ -209,16 +228,15 @@ def main() -> None:
         "--out-dir",
         type=Path,
         default=None,
-        help="Output batch directory. Default: out/comfy_chromakey_game_<variants>_<YYYYMMDD>_vNNN.",
+        help="Output batch directory. Default: out/comfy_chromakey_game_input_<YYYYMMDD>_vNNN.",
     )
     parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. B001,I011,C004")
-    parser.add_argument("--variants", default="green,blue", help="Comma-separated variants from manifest, e.g. green,blue")
     parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
     parser.add_argument("--threshold", type=int, default=35, help="ColorToMask threshold/range")
     parser.add_argument("--subject-threshold", type=float, default=35.0)
     args = parser.parse_args()
     if args.out_dir is None:
-        args.out_dir = _next_versioned_out_dir(f"comfy_chromakey_game_{_variant_slug(args.variants)}")
+        args.out_dir = _next_versioned_out_dir("comfy_chromakey_game_input")
     summary = run(args)
     print(
         json.dumps(

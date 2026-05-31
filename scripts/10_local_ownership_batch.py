@@ -59,8 +59,16 @@ def _load_cases(manifest_path: Path) -> list[dict[str, Any]]:
     return [case for case in cases if isinstance(case, dict)]
 
 
-def _case_variants(case: dict[str, Any], variants: tuple[str, ...]) -> list[str]:
-    return [variant for variant in variants if isinstance(case.get(variant), str)]
+def _case_input_screen(case: dict[str, Any]) -> str:
+    input_value = str(case.get("input", ""))
+    for screen in ("green", "blue", "white"):
+        if isinstance(case.get(screen), str) and str(case[screen]) == input_value:
+            return screen
+    screen = case.get("screen")
+    if isinstance(screen, str) and screen:
+        return screen
+    path_screen = Path(input_value).stem
+    return path_screen if path_screen else "input"
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -194,10 +202,7 @@ def run(args: argparse.Namespace) -> None:
     if args.sample_id:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
         cases = [case for case in cases if str(case.get("sample_id", "")) in sample_ids]
-    variants = tuple(item.strip() for item in args.variants.split(",") if item.strip())
-    invalid = sorted(set(variants) - {"green", "white", "blue"})
-    if invalid:
-        raise ValueError(f"--variants only accepts green,white,blue; got {','.join(invalid)}")
+    cases = [case for case in cases if isinstance(case.get("input"), str)]
 
     out_root = args.out_dir
     matte_root = out_root / "matte"
@@ -207,108 +212,106 @@ def run(args: argparse.Namespace) -> None:
 
     segmenter = build_segmenter(backend="auto")
     rows: list[dict[str, Any]] = []
-    total = sum(len(_case_variants(case, variants)) for case in cases)
-    index = 0
-    for case in cases:
+    total = len(cases)
+    for index, case in enumerate(cases, start=1):
         case_id = str(case["id"])
         sample_id = str(case.get("sample_id") or case_id)
         expected_role = _expected_role(case)
-        for variant in _case_variants(case, variants):
-            index += 1
-            sample_code = f"{sample_id}-{variant[:1].upper()}"
-            print(f"[{index}/{total}] {sample_code} {case_id}/{variant}", flush=True)
-            input_path = PROJECT_ROOT / str(case[variant])
-            image_srgb = _load_rgb(input_path)
-            matte_dir = matte_root / case_id / variant
-            local_dir = local_root / case_id / variant
-            local_dir.mkdir(parents=True, exist_ok=True)
+        screen = _case_input_screen(case)
+        sample_code = f"{sample_id}-{screen[:1].upper()}"
+        print(f"[{index}/{total}] {sample_code} {case_id}/{screen}", flush=True)
+        input_path = PROJECT_ROOT / str(case["input"])
+        image_srgb = _load_rgb(input_path)
+        matte_dir = matte_root / case_id / screen
+        local_dir = local_root / case_id / screen
+        local_dir.mkdir(parents=True, exist_ok=True)
 
-            try:
-                matte_report, rgba = _save_matte_outputs(
+        try:
+            matte_report, rgba = _save_matte_outputs(
+                image_srgb=image_srgb,
+                input_path=input_path,
+                segmenter=segmenter,
+                out_dir=matte_dir,
+            )
+            bg = tuple(int(c) for c in matte_report["background_color"])
+            regions, evidence_info = DEBUG_REGIONS.extract_debug_regions(
+                image_srgb,
+                rgba,
+                bg,
+                coalesce=True,
+                merge_distance_px=3,
+            )
+            ownership = rank_regions_ownership(image_srgb, rgba, bg, regions)
+            raw_role_masks = _selected_role_masks(ownership, regions, image_srgb.shape[:2])
+            role_masks = resolve_execution_masks(raw_role_masks, image_srgb.shape[:2])
+            mask_dir = local_dir / "masks"
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            for role, mask in role_masks.items():
+                io.save_mask(mask_dir / f"{role}.png", mask.astype(np.float32))
+
+            protected_report: dict[str, Any] | None = None
+            soft_mask = role_masks["subject_soft_layer"]
+            shadow_mask = role_masks["shadow_like_layer"]
+            if soft_mask.any():
+                protected_prior = MattingSemanticPrior(
+                    subject_material_mask=soft_mask.astype(np.float32),
+                    subject_mask=soft_mask.astype(np.float32),
+                    shadow_ownership_mask=shadow_mask.astype(np.float32) if shadow_mask.any() else np.zeros(image_srgb.shape[:2], dtype=np.float32),
+                    source="local_ownership",
+                )
+                protected_report, _ = _save_matte_outputs(
                     image_srgb=image_srgb,
                     input_path=input_path,
                     segmenter=segmenter,
-                    out_dir=matte_dir,
+                    out_dir=out_root / "protected_matte" / case_id / screen,
+                    semantic_prior=protected_prior,
                 )
-                bg = tuple(int(c) for c in matte_report["background_color"])
-                regions, evidence_info = DEBUG_REGIONS.extract_debug_regions(
-                    image_srgb,
-                    rgba,
-                    bg,
-                    coalesce=True,
-                    merge_distance_px=3,
-                )
-                ownership = rank_regions_ownership(image_srgb, rgba, bg, regions)
-                raw_role_masks = _selected_role_masks(ownership, regions, image_srgb.shape[:2])
-                role_masks = resolve_execution_masks(raw_role_masks, image_srgb.shape[:2])
-                mask_dir = local_dir / "masks"
-                mask_dir.mkdir(parents=True, exist_ok=True)
-                for role, mask in role_masks.items():
-                    io.save_mask(mask_dir / f"{role}.png", mask.astype(np.float32))
-
-                protected_report: dict[str, Any] | None = None
-                soft_mask = role_masks["subject_soft_layer"]
-                shadow_mask = role_masks["shadow_like_layer"]
-                if soft_mask.any():
-                    protected_prior = MattingSemanticPrior(
-                        subject_material_mask=soft_mask.astype(np.float32),
-                        subject_mask=soft_mask.astype(np.float32),
-                        shadow_ownership_mask=shadow_mask.astype(np.float32) if shadow_mask.any() else np.zeros(image_srgb.shape[:2], dtype=np.float32),
-                        source="local_ownership",
-                    )
-                    protected_report, _ = _save_matte_outputs(
-                        image_srgb=image_srgb,
-                        input_path=input_path,
-                        segmenter=segmenter,
-                        out_dir=out_root / "protected_matte" / case_id / variant,
-                        semantic_prior=protected_prior,
-                    )
-                top_roles = [
-                    str(item["selected"]["role"])
-                    for item in ownership
-                    if isinstance(item.get("selected"), dict)
-                ]
-                row = {
-                    "status": "ok",
-                    "sample_id": sample_id,
-                    "sample_code": sample_code,
-                    "case_id": case_id,
-                    "sample_variant": variant,
-                    "expected_role": expected_role,
-                    "rgba": matte_report["rgba"],
-                    "protected_rgba": protected_report["rgba"] if protected_report else None,
-                    "background_color": list(bg),
-                    "region_count": len(regions),
-                    "top_roles": top_roles,
-                    "role_counts": {role: top_roles.count(role) for role in sorted(set(top_roles))},
-                    "role_mask_pixels": {role: int(mask.sum()) for role, mask in role_masks.items()},
-                    "role_mask_paths": {
-                        role: _rel(mask_dir / f"{role}.png")
-                        for role in role_masks
-                    },
-                    "ownership": ownership,
-                    "evidence_info": evidence_info,
-                }
-                row["expected_role_hit"] = _role_hit(row, expected_role)
-                (local_dir / "summary.json").write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
-                rows.append(row)
-                print(
-                    f"  regions={len(regions)} roles={row['role_counts']} "
-                    f"expected_hit={row['expected_role_hit']}",
-                    flush=True,
-                )
-            except Exception as exc:  # pragma: no cover - diagnostic script
-                row = {
-                    "status": "error",
-                    "sample_id": sample_id,
-                    "sample_code": sample_code,
-                    "case_id": case_id,
-                    "sample_variant": variant,
-                    "expected_role": expected_role,
-                    "error": str(exc),
-                }
-                rows.append(row)
-                print(f"  ERROR {exc}", flush=True)
+            top_roles = [
+                str(item["selected"]["role"])
+                for item in ownership
+                if isinstance(item.get("selected"), dict)
+            ]
+            row = {
+                "status": "ok",
+                "sample_id": sample_id,
+                "sample_code": sample_code,
+                "case_id": case_id,
+                "sample_screen": screen,
+                "expected_role": expected_role,
+                "rgba": matte_report["rgba"],
+                "protected_rgba": protected_report["rgba"] if protected_report else None,
+                "background_color": list(bg),
+                "region_count": len(regions),
+                "top_roles": top_roles,
+                "role_counts": {role: top_roles.count(role) for role in sorted(set(top_roles))},
+                "role_mask_pixels": {role: int(mask.sum()) for role, mask in role_masks.items()},
+                "role_mask_paths": {
+                    role: _rel(mask_dir / f"{role}.png")
+                    for role in role_masks
+                },
+                "ownership": ownership,
+                "evidence_info": evidence_info,
+            }
+            row["expected_role_hit"] = _role_hit(row, expected_role)
+            (local_dir / "summary.json").write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
+            rows.append(row)
+            print(
+                f"  regions={len(regions)} roles={row['role_counts']} "
+                f"expected_hit={row['expected_role_hit']}",
+                flush=True,
+            )
+        except Exception as exc:  # pragma: no cover - diagnostic script
+            row = {
+                "status": "error",
+                "sample_id": sample_id,
+                "sample_code": sample_code,
+                "case_id": case_id,
+                "sample_screen": screen,
+                "expected_role": expected_role,
+                "error": str(exc),
+            }
+            rows.append(row)
+            print(f"  ERROR {exc}", flush=True)
 
     hit_rows = [row for row in rows if row.get("expected_role_hit") is not None]
     hit_count = sum(1 for row in hit_rows if row.get("expected_role_hit") is True)
@@ -335,7 +338,6 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "out" / "local_ownership_20260527")
     parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. B001,I011,C004")
-    parser.add_argument("--variants", default="green,blue", help="Comma-separated variants: green,blue")
     run(parser.parse_args())
 
 

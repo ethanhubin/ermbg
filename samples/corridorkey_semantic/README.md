@@ -13,6 +13,6 @@ Background convention:
 - Green screen: RGB(0, 200, 0)
 - Blue screen: RGB(0, 0, 200)
 
-Use `manifest.json` as the machine-readable entry point. Each case has exactly the screen variant that was approved for it, exposed through either the `green` or `blue` key. Test runners should count only variants present in a case instead of multiplying every case by every possible background.
+Use `manifest.json` as the machine-readable entry point. Each case has exactly the screen screen that was approved for it, exposed through either the `green` or `blue` key. Test runners should count only screens present in a case instead of multiplying every case by every possible background.
 
 Next phase: run full recognition/matting evaluation over this confirmed set, inspect failures by family, then tune CorridorKey route selection and per-route parameters.

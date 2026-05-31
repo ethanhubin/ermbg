@@ -87,6 +87,7 @@ def _dev_reload_ermbg_modules() -> str:
         "ermbg.keyer",
         "ermbg.despill",
         "ermbg.shadow",
+        "ermbg.pymatting_refine",
         "ermbg.solid_graphic",
         "ermbg.router",
         "ermbg.matting",
@@ -183,6 +184,10 @@ class ErmbgAutoMatte:
         result = matte_image(
             input_arg,
             qa=False,
+            # This node already runs inside the remote ComfyUI process. Force the
+            # ERMBG algorithm to execute locally here; otherwise api.auto routing
+            # can submit a nested comfy-* prompt back to the same server.
+            backend="birefnet",
             matting_model=matting_model,
             bg_color=_bg_tuple(bg_color),
             despill=despill_arg,
@@ -252,6 +257,113 @@ class ErmbgClassify:
         return (s.bg_type, s.image_type, json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+class ErmbgPyMattingKnownB:
+    """Known-background PyMatting solver for hard-edged generated assets.
+
+    This node is intentionally narrow: it assumes the source image was rendered
+    over a stable flat background and uses a conservative trimap around the
+    known-background boundary. It is useful for A/B testing antialias recovery
+    without running the full ERMBG or remote RMBG paths.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "method": (["cf", "knn", "lbdm", "lkm", "rw", "sm"], {"default": "cf"}),
+                "image_space": (["linear", "sRGB"], {"default": "linear"}),
+                "bg_source": (["auto", "green", "blue", "custom"], {"default": "auto"}),
+                "bg_color": (
+                    "STRING",
+                    {"default": "0,200,0", "multiline": False, "tooltip": "R,G,B used when bg_source=custom"},
+                ),
+                "bg_threshold": (
+                    "FLOAT",
+                    {"default": 3.5, "min": 0.0, "max": 80.0, "step": 0.1},
+                ),
+                "fg_threshold": (
+                    "FLOAT",
+                    {"default": 30.0, "min": 0.0, "max": 160.0, "step": 0.5},
+                ),
+                "boundary_band_px": (
+                    "INT",
+                    {"default": 2, "min": 0, "max": 64, "step": 1},
+                ),
+                "auto_adapt": (
+                    "BOOLEAN",
+                    {"default": True, "tooltip": "Auto-calibrate effective bg/fg thresholds and unknown band from the current image."},
+                ),
+                "cg_maxiter": (
+                    "INT",
+                    {"default": 1000, "min": 1, "max": 20000, "step": 50},
+                ),
+                "cg_rtol": (
+                    "FLOAT",
+                    {"default": 0.000001, "min": 0.000000001, "max": 0.01, "step": 0.000001},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("foreground", "alpha", "summary", "rgba_rgb", "trimap")
+    FUNCTION = "run"
+    CATEGORY = "ERMBG"
+
+    def run(
+        self,
+        image: torch.Tensor,
+        method: str,
+        image_space: str,
+        bg_source: str,
+        bg_color: str,
+        bg_threshold: float,
+        fg_threshold: float,
+        boundary_band_px: int,
+        auto_adapt: bool,
+        cg_maxiter: int,
+        cg_rtol: float,
+    ):
+        reload_note = _dev_reload_ermbg_modules()
+        rgb = _image_to_numpy(image)
+        custom_bg = _bg_tuple(bg_color) if bg_source == "custom" else None
+
+        result = matte_image(
+            rgb,
+            qa=False,
+            backend="pymatting-known-b",
+            shadow_mode="off",
+            pymatting_method=method,
+            pymatting_image_space=image_space,
+            pymatting_bg_source=bg_source,
+            pymatting_bg_color=custom_bg,
+            pymatting_bg_threshold=bg_threshold,
+            pymatting_fg_threshold=fg_threshold,
+            pymatting_boundary_band_px=boundary_band_px,
+            pymatting_auto_adapt=bool(auto_adapt),
+            pymatting_cg_maxiter=cg_maxiter,
+            pymatting_cg_rtol=cg_rtol,
+        )
+
+        fg_tensor = _numpy_image_to_tensor(result.foreground_srgb)
+        rgba_rgb_tensor = _numpy_image_to_tensor(result.rgba[..., :3])
+        alpha_tensor = _numpy_mask_to_tensor(result.alpha)
+        trimap_tensor = _numpy_image_to_tensor(np.repeat(result.debug["trimap_u8"][..., None], 3, axis=2))
+
+        pm = result.debug.get("pymatting_known_b", {})
+        params = pm.get("parameters", {})
+        trimap = pm.get("trimap", {})
+        summary = (
+            f"pymatting_known_b | method={params.get('method', method)} | "
+            f"auto={params.get('auto_adapt', auto_adapt)} | "
+            f"bg={tuple(result.background_color)} | unknown={trimap.get('unknown_pixels', '?')}"
+        )
+        if reload_note:
+            summary = f"{summary} | {reload_note}"
+
+        return (fg_tensor, alpha_tensor, summary, rgba_rgb_tensor, trimap_tensor)
+
+
 class ConvertMasksToImages:
     """Small compatibility node for ERMBG workflows.
 
@@ -286,11 +398,13 @@ class ConvertMasksToImages:
 NODE_CLASS_MAPPINGS = {
     "ErmbgAutoMatte": ErmbgAutoMatte,
     "ErmbgClassify": ErmbgClassify,
+    "ErmbgPyMattingKnownB": ErmbgPyMattingKnownB,
     "Convert Masks to Images": ConvertMasksToImages,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ErmbgAutoMatte": "ERMBG AutoMatte",
     "ErmbgClassify": "ERMBG Classify (preview)",
+    "ErmbgPyMattingKnownB": "ERMBG PyMatting Known-B",
     "Convert Masks to Images": "Convert Masks to Images",
 }

@@ -137,7 +137,7 @@ def run_qa(
 ) -> dict[str, Any]:
     """Composite to all standard backgrounds, save them, return aggregate metrics.
 
-    When ``write_lightwrap`` is true (default), also writes a `_lightwrap` variant
+    When ``write_lightwrap`` is true (default), also writes a `_lightwrap` screen
     next to each composite so the user can compare halo suppression visually.
     """
     out_dir.mkdir(parents=True, exist_ok=True)

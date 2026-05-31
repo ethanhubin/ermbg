@@ -19,7 +19,14 @@ torch = pytest.importorskip("torch")
 # as a package. For tests, add the repo root so the import resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from comfy_nodes.ermbg_nodes import ConvertMasksToImages, ErmbgAutoMatte, ErmbgClassify, _dev_reload_ermbg_modules, _mask_to_numpy  # noqa: E402
+from comfy_nodes.ermbg_nodes import (  # noqa: E402
+    ConvertMasksToImages,
+    ErmbgAutoMatte,
+    ErmbgClassify,
+    ErmbgPyMattingKnownB,
+    _dev_reload_ermbg_modules,
+    _mask_to_numpy,
+)
 
 
 def _green_with_red_subject(h=128, w=128):
@@ -68,11 +75,10 @@ def test_automatte_returns_image_mask_summary(_force_grabcut):
     assert rgba_rgb.dtype == torch.float32
     # MASK convention: [B, H, W] float
     assert alpha.shape == (1, 128, 128)
-    # Production AutoMatte routes known green/blue screen graphics through the
-    # remote CorridorKey path; this node smoke should track that public Comfy
-    # behavior rather than the older local saturated_bg fallback.
-    assert "comfy_corridorkey" in summary
-    assert "remote_corridorkey" in summary
+    # The AutoMatte node itself already runs inside ComfyUI, so it must execute
+    # ERMBG locally instead of submitting a nested comfy-* prompt to the server.
+    assert "saturated_bg" in summary
+    assert "comfy_corridorkey" not in summary
 
 
 def test_dev_reload_is_opt_in(monkeypatch):
@@ -109,6 +115,62 @@ def test_automatte_with_source_mask_passes_through(_force_grabcut):
         source_mask=mask,
     )
     assert "rgba_passthrough" in summary
+
+
+def test_pymatting_known_b_node_returns_outputs():
+    img = _to_comfy_image(_green_with_red_subject(64, 64))
+    node = ErmbgPyMattingKnownB()
+    fg, alpha, summary, rgba_rgb, trimap = node.run(
+        image=img,
+        method="cf",
+        image_space="linear",
+        bg_source="custom",
+        bg_color="0,200,0",
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        auto_adapt=True,
+        cg_maxiter=1000,
+        cg_rtol=1e-6,
+    )
+
+    assert fg.shape == (1, 64, 64, 3)
+    assert fg.dtype == torch.float32
+    assert alpha.shape == (1, 64, 64)
+    assert rgba_rgb.shape == (1, 64, 64, 3)
+    assert trimap.shape == (1, 64, 64, 3)
+    assert "pymatting_known_b" in summary
+    assert "method=cf" in summary
+    assert "auto=True" in summary
+    assert float(alpha.max()) == pytest.approx(1.0)
+
+
+def test_comfy_pymatting_known_b_client_renders_workflow():
+    from ermbg.probe.comfyui_pymatting_known_b import ComfyUIPyMattingKnownBClient
+
+    client = ComfyUIPyMattingKnownBClient(url="http://example.invalid")
+    workflow = client._render_workflow(
+        input_image="input.png",
+        method="cf",
+        image_space="linear",
+        bg_source="custom",
+        bg_color="0,200,0",
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        auto_adapt=True,
+        cg_maxiter=1000,
+        cg_rtol=1e-6,
+        filename_prefix="pm",
+    )
+
+    assert workflow["20"]["class_type"] == "ErmbgPyMattingKnownB"
+    assert workflow["20"]["inputs"]["image"] == ["10", 0]
+    assert workflow["20"]["inputs"]["bg_threshold"] == pytest.approx(3.5)
+    assert workflow["20"]["inputs"]["boundary_band_px"] == 2
+    assert workflow["20"]["inputs"]["auto_adapt"] is True
+    assert workflow["50"]["class_type"] == "SaveImage"
+    assert workflow["60"]["inputs"]["images"] == ["20", 4]
 
 
 def test_mask_to_numpy_accepts_batched_and_unbatched_masks():

@@ -216,6 +216,11 @@ def matte(
     legacy_analytic_alpha: bool = typer.Option(
         False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
     ),
+    solid_graphic_alpha_refiner: str = typer.Option(
+        "heuristic",
+        "--solid-graphic-alpha-refiner",
+        help="heuristic | pymatting-cf | pymatting-knn | pymatting-lbdm | pymatting-lkm | pymatting-rw | pymatting-sm",
+    ),
     qa: bool = typer.Option(True, help="Composite to multiple backgrounds and score"),
 ):
     """End-to-end analytic matting: produce RGBA + alpha + clean foreground + QA report."""
@@ -341,6 +346,7 @@ def matte(
         soft_mask=soft_preview if vlm_prior else None,
         shadow_mode=shadow_mode,
         legacy_analytic_alpha=legacy_analytic_alpha,
+        solid_graphic_alpha_refiner=solid_graphic_alpha_refiner,
     )
 
     stem = input_path.stem

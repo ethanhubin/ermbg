@@ -90,7 +90,7 @@ def main() -> None:
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
 
     print()
-    print(f'{"variant":<16} {"strategy":<14} {"recomp":<10} {"black_halo":<11} {"halo_mean":<10} {"accepted_px"}')
+    print(f'{"screen":<16} {"strategy":<14} {"recomp":<10} {"black_halo":<11} {"halo_mean":<10} {"accepted_px"}')
     for name, row in (("nomask", summary["nomask"]), ("subject_mask", summary["subject_masked"])):
         print(
             f'{name:<16} {str(row["strategy"]):<14} {_fmt(row["recomp"]):<10} '

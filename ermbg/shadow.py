@@ -103,6 +103,7 @@ def estimate_shadow_alpha(
     background_color: tuple[int, int, int] | np.ndarray,
     thresholds: ShadowThresholds | None = None,
     prior: ShadowPrior | None = None,
+    image_linear: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Estimate a conservative shadow alpha matte.
 
@@ -159,7 +160,12 @@ def estimate_shadow_alpha(
         out = np.zeros((h, w), dtype=np.float32)
         return out, _shadow_info(out, [], 0, "background too dark for scalar shadow model", prior=prior)
 
-    C = io.srgb_to_linear(image_srgb).astype(np.float32)
+    if image_linear is not None:
+        if image_linear.shape != image_srgb.shape:
+            raise ValueError("image_linear must share image HxWx3")
+        C = image_linear.astype(np.float32, copy=False)
+    else:
+        C = io.srgb_to_linear(image_srgb).astype(np.float32)
     scale = np.tensordot(C, B, axes=([-1], [0])) / denom
     recon = scale[..., None] * B
     err = np.sqrt(np.mean((C - recon) * (C - recon), axis=-1))
@@ -258,6 +264,7 @@ def exterior_scalar_darkening_mask(
     background_color: tuple[int, int, int] | np.ndarray,
     known_background_mask: np.ndarray,
     thresholds: ShadowThresholds | None = None,
+    image_linear: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Find background-colored darkening that is connected to exterior bg.
 
@@ -287,7 +294,12 @@ def exterior_scalar_darkening_mask(
             "reason": "background too dark for scalar model",
         }
 
-    C = io.srgb_to_linear(image_srgb).astype(np.float32)
+    if image_linear is not None:
+        if image_linear.shape != image_srgb.shape:
+            raise ValueError("image_linear must share image HxWx3")
+        C = image_linear.astype(np.float32, copy=False)
+    else:
+        C = io.srgb_to_linear(image_srgb).astype(np.float32)
     scale = np.tensordot(C, B, axes=([-1], [0])) / denom
     recon = scale[..., None] * B
     err = np.sqrt(np.mean((C - recon) * (C - recon), axis=-1))

@@ -1,7 +1,7 @@
 """Analytic matting for high-confidence solid-background graphics.
 
 This module implements the analytic prepass for the production ``matte()``
-router. The invariant is different from the BiRefNet repair path: first prove
+router. The rule is different from the BiRefNet repair path: first prove
 which topology owns each region, then assign alpha/RGB semantics for that role.
 """
 
@@ -33,7 +33,11 @@ class SolidGraphicResult:
     debug: dict[str, Any] = field(default_factory=dict)
 
 
-def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
+def analyze_solid_bg_graphic(
+    image_srgb: np.ndarray,
+    *,
+    alpha_refiner: str = "heuristic",
+) -> SolidGraphicResult:
     """Return an ownership-first matte for a solid-background graphic candidate.
 
     The initial implementation handles the deterministic class documented in
@@ -44,6 +48,17 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
     """
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("analyze_solid_bg_graphic() expects HxWx3 uint8 sRGB")
+    alpha_refiner = alpha_refiner.strip().lower()
+    if alpha_refiner not in {
+        "heuristic",
+        "pymatting-cf",
+        "pymatting-knn",
+        "pymatting-lbdm",
+        "pymatting-lkm",
+        "pymatting-rw",
+        "pymatting-sm",
+    }:
+        raise ValueError(f"Unknown solid-graphic alpha_refiner: {alpha_refiner!r}")
 
     h, w = image_srgb.shape[:2]
     bg, bg_info = _estimate_stable_background(image_srgb)
@@ -131,6 +146,34 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
     subject_alpha = np.zeros((h, w), dtype=np.float32)
     subject_alpha[opaque_subject] = 1.0
     soft_alpha = _estimate_soft_alpha(image_srgb, bg, soft_subject)
+    pymatting_refiner_info: dict[str, Any] = {
+        "used": False,
+        "method": alpha_refiner,
+        "soft_subject_pixels": int(soft_subject.sum()),
+    }
+    if alpha_refiner.startswith("pymatting-") and soft_subject.any():
+        from .pymatting_refine import estimate_alpha_with_pymatting
+        from .types import Trimap
+
+        # PyMatting is used only after topology has already assigned ownership:
+        # opaque interiors, exterior background, holes, and shadow layers remain
+        # fixed constraints. Only the proved soft-subject band is unknown, which
+        # tests whether propagation matting improves edge AA without changing
+        # ERMBG's local ownership decisions.
+        pm_trimap = Trimap(
+            sure_fg=opaque_subject.copy(),
+            sure_bg=(exterior | hole | shadow | unknown).copy(),
+            unknown=soft_subject.copy(),
+        )
+        pm = estimate_alpha_with_pymatting(
+            image_srgb,
+            pm_trimap,
+            method=alpha_refiner,
+            image_space="linear",
+        )
+        soft_alpha[soft_subject] = pm.alpha[soft_subject]
+        pymatting_refiner_info = pm.debug
+        pymatting_refiner_info["soft_subject_pixels"] = int(soft_subject.sum())
     subject_alpha[soft_subject] = soft_alpha[soft_subject]
     # Exterior smoke/glow can be visibly semi-transparent even when its color is
     # farther from B than a hard antialiasing pixel. Cap that background-facing
@@ -423,6 +466,7 @@ def analyze_solid_bg_graphic(image_srgb: np.ndarray) -> SolidGraphicResult:
             "thin_glass_foreground_ridge_repair": thin_glass_repair_info,
             "glass_continuous_field": glass_continuous_field_info,
             "source_preserving_glass_foreground": source_preserving_glass_info,
+            "alpha_refiner": pymatting_refiner_info,
             "internal_hole_shadow_pixels": int(internal_hole_shadow.sum()),
             "exterior_shadow_feather": shadow_feather_info,
             "soft_background_leak_pixels": int(soft_background_leak.sum()),
@@ -1233,7 +1277,7 @@ def _luminance_shadow_rgba_from_known_bg(
 
     Exact RGB reconstruction over a saturated known background is possible, but
     it encodes part of that background color into the shadow layer. That looks
-    wrong when the RGBA is placed on a new background. The visual invariant for
+    wrong when the RGBA is placed on a new background. The visual rule for
     reusable assets is therefore luminance, not chroma: solve a neutral black
     shadow alpha so ``Y((1-a)B)`` follows the observed ``Y(C)`` on the original
     background, while the RGBA shadow RGB remains green-free.
