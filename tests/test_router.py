@@ -200,6 +200,35 @@ def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundar
         ), rel
 
 
+def test_route_hard_shadow_buttons_do_not_use_corridorkey_semialpha_shadow_gate():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    for rel in [
+        "button/button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+        "button/button_blue_green_b_unoutlined_soft_heavy_shadow/blue.png",
+        "button/button_green_yellow_d_white_outline_soft_lite_shadow/green.png",
+        "button/button_green_yellow_d_white_outline_soft_heavy_shadow/green.png",
+    ]:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        decision = classify_route(img)
+        assert decision.route == "pymatting_known_b", rel
+        assert decision.backend == "comfy-pymatting-known-b", rel
+        complex_info = decision.analysis["complex_button_boundary"]
+        assert complex_info["semi_alpha_gate"] is False, rel
+
+
+def test_route_square_known_b_hole_buttons_stay_pymatting_not_character():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    for rel in [
+        "button/button_hole_yellow_ring_green/green.png",
+        "button/button_hole_ornate_plate_blue/blue.png",
+    ]:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        decision = classify_route(img)
+        assert decision.route == "pymatting_known_b", rel
+        assert decision.backend == "comfy-pymatting-known-b", rel
+        assert decision.asset_kind == "button", rel
+
+
 def test_route_icon_and_character_use_corridorkey():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
     icon = np.asarray(

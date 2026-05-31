@@ -49,8 +49,8 @@ current failure class.
 Latest full RouteMatte baseline:
 
 ```text
-out/auto_routematte_full_20260531/summary.json
-out/auto_routematte_full_20260531/timing_report.md
+out/auto_routematte_routefix_20260531/summary.json
+out/auto_routematte_routefix_20260531/timing_report.md
 ```
 
 Result: 85/85 completed successfully with Web/API `backend=auto`, which submits
@@ -62,14 +62,14 @@ Route distribution in the latest full B/I/C run:
 
 | Route | Backend | Count |
 |---|---|---:|
-| `pymatting_known_b` | `comfy-pymatting-known-b` | 31 |
-| `corridorkey` | `comfy-corridorkey` | 54 |
+| `pymatting_known_b` | `comfy-pymatting-known-b` | 37 |
+| `corridorkey` | `comfy-corridorkey` | 48 |
 
 Category/backend split:
 
 | Category | `comfy-pymatting-known-b` | `comfy-corridorkey` |
 |---|---:|---:|
-| Button | 31 | 25 |
+| Button | 37 | 19 |
 | Icon / effect | 0 | 20 |
 | Character | 0 | 9 |
 
@@ -77,18 +77,21 @@ Timing on the 2026-05-31 full run:
 
 | Scope | Count | Avg | Median | P95 | Min | Max |
 |---|---:|---:|---:|---:|---:|---:|
-| Overall client elapsed | 85 | 1.101s | 0.935s | 3.673s | 0.172s | 5.088s |
-| `comfy-pymatting-known-b` client elapsed | 31 | 0.310s | 0.222s | 0.624s | 0.172s | 0.886s |
-| `comfy-corridorkey` client elapsed | 54 | 1.555s | 1.001s | 3.882s | 0.879s | 5.088s |
-| Button client elapsed | 56 | 0.648s | 0.506s | 1.351s | 0.172s | 1.759s |
-| Icon client elapsed | 20 | 1.081s | 0.996s | 1.411s | 0.965s | 1.922s |
-| Character client elapsed | 9 | 3.965s | 3.676s | 4.920s | 3.496s | 5.088s |
+| Overall client elapsed | 85 | 1.073s | 0.936s | 3.961s | 0.190s | 5.172s |
+| `comfy-pymatting-known-b` client elapsed | 37 | 0.355s | 0.266s | 0.846s | 0.190s | 1.085s |
+| `comfy-corridorkey` client elapsed | 48 | 1.626s | 1.025s | 4.569s | 0.915s | 5.172s |
+| Button client elapsed | 56 | 0.585s | 0.433s | 1.196s | 0.190s | 1.355s |
+| Icon client elapsed | 20 | 1.077s | 1.021s | 1.405s | 0.989s | 1.432s |
+| Character client elapsed | 9 | 4.097s | 3.985s | 4.949s | 3.173s | 5.172s |
 
-Slowest cases are character CorridorKey runs, led by C005 at 5.088s client /
-3.118s node. Lowest `alpha > 128` coverage remains I010, I020, I019, then
-heavy-shadow/soft-shadow button cases B010, B040, B030, B005, and B035. The
-coverage metric is still a triage signal rather than ground truth for
-translucent/glow samples.
+The route-fix run moves hard soft-shadow buttons B020/B025, white-outline
+contact-shadow buttons B053/B054, and known-B hole buttons B055/B056 back to
+PyMatting. Slowest cases remain character CorridorKey runs, led by C005 at
+5.172s client / 3.048s node. Lowest `alpha > 128` coverage is I010, then B056,
+I020, I019, and several heavy-shadow/soft-shadow button cases. B056 is now
+correctly routed by policy but needs PyMatting-path quality tuning. The coverage
+metric is still a triage signal rather than ground truth for translucent/glow
+samples.
 
 ## Phase Plan
 

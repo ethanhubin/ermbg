@@ -525,8 +525,17 @@ def _route_asset_kind(image_srgb: np.ndarray, profile: str, screen_mode: str) ->
     h, w = image_srgb.shape[:2]
     aspect = float(w / max(1, h))
     long_side = int(max(h, w))
-    if profile == "composite_character_corridor_only" or (0.75 <= aspect <= 1.35 and long_side >= 512):
+    # Character routing should not be a pure "square image" shortcut. The game
+    # eval set has 512x512 square UI controls with known-B holes that can look
+    # composite to CorridorKey's profile classifier; treating every 512 square
+    # as a character sends deterministic button mechanics to the learned keyer.
+    # Reserve the automatic square-character rule for large composite assets.
+    if profile == "composite_character_corridor_only" and long_side >= 768:
         return "character"
+    if 0.75 <= aspect <= 1.35 and long_side >= 768:
+        return "character"
+    if profile == "composite_character_corridor_only" and long_side < 768:
+        return "button"
     if aspect >= 1.45 or profile.startswith("opaque_hard_ui") or profile == "translucent_button":
         return "button"
     if screen_mode in {"green", "blue"}:
@@ -613,7 +622,11 @@ def _wide_button_complex_boundary_score(
     p75 = float(np.percentile(support_gradient, 75.0))
     mean = float(support_gradient.mean())
     gradient_gate = p75 >= 200.0
-    semi_alpha_gate = semi_alpha_fraction >= 0.18
+    # A broad mid-alpha band alone is not enough for "glass": soft/contact
+    # shadows on hard UI also produce lots of mid-alpha key evidence, but with
+    # low local structure. Require meaningful gradient energy for the pure
+    # semi-alpha gate so heavy shadows stay on deterministic PyMatting.
+    semi_alpha_gate = semi_alpha_fraction >= 0.18 and p75 >= 100.0
     # Broad glass/translucency evidence can split across two imperfect
     # observables: a material band that is not wide enough to pass the pure
     # semi-alpha gate, plus distributed specular/edge gradients that are below
@@ -638,6 +651,7 @@ def _wide_button_complex_boundary_score(
         # or a broad semi-alpha band from known-background blending.
         "support_gradient_p75_min": 200.0,
         "semi_alpha_fraction_min": 0.18,
+        "semi_alpha_gradient_p75_min": 100.0,
         "combined_support_gradient_p75_min": 160.0,
         "combined_semi_alpha_fraction_min": 0.14,
         "reason": "" if accepted else "below complex-boundary and semi-alpha gates",
@@ -716,20 +730,17 @@ def classify_route(
         "corridorkey_analysis": ck.to_dict(),
     }
 
-    corridor_profiles = {
-        "translucent_button",
-        "screen_tinted_translucency",
-        "composite_character_corridor_only",
-    }
+    button_corridor_profiles = {"translucent_button"}
     complex_button_boundary, complex_button_info = _wide_button_complex_boundary_score(
         image_srgb,
         ck.background_color,
     )
     analysis["complex_button_boundary"] = complex_button_info
     if known_corridor_screen and (
-        asset_kind in {"icon", "character"} or profile in corridor_profiles or complex_button_boundary
+        asset_kind in {"icon", "character"}
+        or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
     ):
-        if complex_button_boundary and asset_kind == "button" and profile not in corridor_profiles:
+        if complex_button_boundary and asset_kind == "button" and profile not in button_corridor_profiles:
             reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
         else:
             reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")
