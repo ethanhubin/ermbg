@@ -94,6 +94,7 @@ def test_index_serves_upload_ui():
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
     assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
+    assert '<option value="direct-worker">direct-worker</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' in response.text
     assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' in response.text
@@ -115,6 +116,7 @@ def test_index_serves_upload_ui():
     assert 'shadowEnabled.disabled = isBusy' in response.text
     assert 'formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false")' in response.text
     assert "pymattingSettingControls" in response.text
+    assert 'corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey")' in response.text
     assert 'pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b")' in response.text
     assert 'pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); })' in response.text
     assert "<summary>[设置]</summary>" in response.text
@@ -206,6 +208,7 @@ def test_game_eval_page_serves_result_table():
     assert "选择测试路径" in response.text
     assert 'id="eval-test-path"' in response.text
     assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
+    assert '<option value="direct-worker">Direct Worker</option>' in response.text
     assert '<option value="corridorkey">CorridorKey</option>' in response.text
     assert '<option value="rmbg">RMBG</option>' in response.text
     assert "全选" in response.text
@@ -377,6 +380,39 @@ def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
     assert launch_payload["test_path_label"] == "RMBG"
 
 
+def test_game_eval_start_run_accepts_direct_worker_path(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            self.command = command
+            self.kwargs = kwargs
+            self.pid = 12345
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web.subprocess, "Popen", FakePopen)
+    web._GAME_EVAL_JOBS.clear()
+
+    client = TestClient(app)
+    response = client.post("/eval/game/run", json={"sample_ids": ["B002"], "test_path": "direct-worker"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["runId"].startswith("direct_worker_")
+    assert payload["progress"]["total"] == 1
+    process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
+    assert "--backend" in process.command
+    assert "direct-worker" in process.command
+    launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
+    launch_payload = json.loads(launch.read_text(encoding="utf-8"))
+    assert launch_payload["backend"] == "direct-worker"
+    assert launch_payload["test_path"] == "direct-worker"
+    assert launch_payload["test_path_label"] == "Direct Worker"
+
+
 def test_game_eval_runs_order_by_mtime_and_default_latest(monkeypatch, tmp_path):
     import ermbg.web as web
 
@@ -432,6 +468,47 @@ def test_game_eval_status_recognizes_corridorkey_summary(monkeypatch, tmp_path):
     assert status["hasReport"] is True
     assert status["progress"]["completed"] == 2
     assert status["progress"]["total"] == 2
+
+
+def test_game_eval_status_counts_direct_worker_running_summary(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    class FakePopen:
+        def poll(self):
+            return None
+
+    run_root = tmp_path / "out" / "direct_worker_20260531_v001"
+    run_root.mkdir(parents=True)
+    (run_root / "summary.json").write_text(
+        json.dumps(
+            {
+                "backend": "direct-worker",
+                "run_count": 85,
+                "ok_count": 2,
+                "runs": [
+                    {"status": "ok", "backend": "direct-worker"},
+                    {"status": "ok", "backend": "direct-worker"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web.subprocess, "Popen", FakePopen)
+    web._GAME_EVAL_JOBS.clear()
+    web._GAME_EVAL_JOBS["direct_worker_20260531_v001"] = {
+        "process": FakePopen(),
+        "expected_total": 85,
+    }
+
+    status = web._game_eval_batch_status("direct_worker_20260531_v001")
+
+    assert status["status"] == "running"
+    assert status["hasReport"] is True
+    assert status["progress"]["completed"] == 2
+    assert status["progress"]["total"] == 85
+    assert status["progress"]["percent"] == 2.4
 
 
 def test_game_eval_running_progress_counts_partial_summaries(monkeypatch, tmp_path):
@@ -908,6 +985,69 @@ def test_matte_candidates_endpoint_serializes_comfy_rmbg_debug(monkeypatch):
     ]
     assert payload["candidates"][0]["debug"]["remote"]["prompt_id"] == "prompt-1"
     assert payload["candidates"][0]["debug"]["remote"]["soft_mask"]["shape"] == [16, 16]
+
+
+def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="corridorkey_effect_icon",
+            background_color=(0, 200, 0),
+            debug={
+                "direct_worker": {"server_elapsed_sec": 1.25, "execution_backend": "direct-corridorkey"},
+                "auto_route": {
+                    "selected_backend": "direct-worker",
+                    "route": "corridorkey",
+                    "asset_kind": "icon",
+                    "parameter_profile": "effect_icon",
+                    "execution_profile": "corridorkey-effect-icon",
+                },
+            },
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "direct-worker",
+            "shadow_enabled": "false",
+            "corridorkey_preset": "detail_safe",
+            "corridorkey_hard_ui_hint_mode": "boundary_2px",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["direct_worker_url"] == web.DEFAULT_DIRECT_WORKER_URL
+    assert captured["shadow_mode"] == "off"
+    assert captured["corridorkey_preset"] == "detail_safe"
+    assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px"
+    payload = response.json()
+    assert payload["strategy"] == "corridorkey_effect_icon"
+    assert payload["backend"] == "direct-worker"
+    assert payload["requested_backend"] == "direct-worker"
+    assert payload["route"] == "corridorkey"
+    assert payload["asset_kind"] == "icon"
+    assert payload["parameter_profile"] == "effect_icon"
+    assert payload["execution_profile"] == "corridorkey-effect-icon"
+    assert payload["debug"]["direct_worker"]["server_elapsed_sec"] == 1.25
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "Direct Worker", True)
+    ]
 
 
 def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch):

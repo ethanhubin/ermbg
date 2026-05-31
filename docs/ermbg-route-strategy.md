@@ -63,16 +63,66 @@ Available ERMBG nodes:
 contract for Web/API auto mode. `ErmbgRouteStrategy` remains useful for debug
 and custom graph branching.
 
+## Direct Worker Backend
+
+`backend="direct-worker"` is an experimental Web/API and Game Eval backend for
+testing the same route strategy without ComfyUI prompt execution or Comfy's
+single queue. It runs on the remote GPU host through
+`ermbg.direct_worker_server` and exposes HTTP endpoints on
+`ERMBG_DIRECT_URL` or the default `http://192.168.0.8:7871`.
+
+Direct Worker must preserve the same route/profile contract as
+`ErmbgRouteMatte`:
+
+- route selection still uses `ermbg.router.classify_route()`;
+- `selected_backend` remains the logical production backend, for example
+  `comfy-corridorkey` or `comfy-pymatting-known-b`;
+- actual execution is reported separately as `direct-corridorkey` or
+  `direct-pymatting-known-b`;
+- `parameter_profile` and `execution_profile` must match the Comfy auto path
+  for the same input.
+
+The direct path is not a second implementation of CorridorKey behavior.
+`ermbg.corridorkey_runner.LocalCorridorKeyClient` is the single maintained
+in-process CorridorKey adapter. Both the Comfy custom node wrapper and the
+Direct Worker call this runner so hint conversion, model invocation, color
+protection, and debug metadata cannot drift. PyMatting Known-B already calls
+the shared `_matte_image_pymatting_known_b()` implementation.
+
+When changing CorridorKey execution details, update the shared runner instead
+of patching `comfy_nodes/ermbg_nodes.py` or `ermbg/direct_worker.py`
+separately. After the change, compare an `auto` batch and a `direct-worker`
+batch on the same samples. Expected residual differences should be only
+floating-point/8-bit rounding level; profile or hint-source differences are a
+bug.
+
+Useful commands:
+
+```bash
+# Start/restart the remote Direct Worker on the GPU host.
+ssh ermbg-comfy 'cd /d C:\Users\darkv\ermbg_src && E:/ComfyUI/.venv/Scripts/python.exe -m ermbg.direct_worker_server --host 0.0.0.0 --port 7871 --cpu-workers 4'
+
+# Focused parity check.
+.venv/bin/python scripts/run_corridorkey_game_eval.py --backend auto --sample-id I003,I019,I008,B010 --out-dir out/auto_parity_<date>
+.venv/bin/python scripts/run_corridorkey_game_eval.py --backend direct-worker --sample-id I003,I019,I008,B010 --out-dir out/direct_parity_<date>
+
+# HTTP worker smoke.
+.venv/bin/python scripts/smoke_direct_worker_http.py --base-url http://192.168.0.8:7871 --sample-id B001,I011
+```
+
 ## Web Verification
 
 After Web-facing route changes:
 
 1. Restart the local Web server on `127.0.0.1:7860`.
-2. Verify the index contains `Auto RouteMatte`, `comfy-pymatting-known-b`, and
-   `comfy-corridorkey`.
+2. Verify the index contains `Auto RouteMatte`, `direct-worker`,
+   `comfy-pymatting-known-b`, and `comfy-corridorkey`.
 3. Post real samples to `/api/matte-candidates` with `backend=auto` and confirm
    `requested_backend`, `backend`, `debug.auto_route.selected_backend`,
    `debug.auto_route.route`, `execution_profile`, and `server_elapsed_sec`.
+4. For Direct Worker changes, also post a known CorridorKey sample with
+   `backend=direct-worker` and confirm `requested_backend="direct-worker"`,
+   `debug.direct_worker.execution_backend`, and `server_elapsed_sec`.
 
 The standard smoke set is:
 

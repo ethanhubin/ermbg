@@ -34,6 +34,7 @@ Workflow templates live in `ermbg/probe/comfyui_*.json`, with `${variable}` plac
 | Task | Where |
 |---|---|
 | Full ERMBG Web/API auto matting | ComfyUI `ErmbgRouteMatte` (Mac only uploads, submits, polls, downloads) |
+| Queue-bypass auto-route validation | Remote Direct Worker `ermbg.direct_worker_server` / backend `direct-worker` |
 | Route decision debugging/custom graphs | ComfyUI `ErmbgRouteStrategy` or local `ermbg.router.classify_route()` |
 | Hard known-background buttons | ComfyUI `ErmbgPyMattingKnownB` / backend `comfy-pymatting-known-b` |
 | Icon/character/glass known-screen assets | ComfyUI `comfy-corridorkey` |
@@ -61,6 +62,10 @@ ermbg/
   despill.py          chroma_cap | local_borrow | closed_form | none
   lightwrap.py        edge halo suppression (Brinkmann light wrap)
   qa.py               composite to 6 backgrounds, score halos
+  corridorkey_runner.py shared in-process CorridorKey runner for Comfy/direct-worker parity
+  direct_worker.py    queue-bypass auto route executor for remote direct worker
+  direct_worker_server.py HTTP server for direct-worker validation backend
+  direct_worker_client.py Web/API client for direct-worker validation backend
   cli.py              segment / diagnose / matte / phase1 / probe
   probe/
     generator.py      backend protocol
@@ -157,6 +162,13 @@ prompt. The Mac side only uploads the input, submits the workflow, polls
   ComfyUI, and downloads foreground/alpha/metadata; route analysis, parameter
   selection, CorridorKey, PyMatting Known-B, PyMatting fallback, passthrough,
   and ShadowPatch all run inside the Comfy process.
+
+`backend=direct-worker` is an experimental remote validation path that keeps
+the same router/profile contract but bypasses ComfyUI prompt execution. It
+must not fork CorridorKey behavior: the Comfy node wrapper and direct worker
+both call `ermbg.corridorkey_runner.LocalCorridorKeyClient`. When direct output
+differs from `backend=auto`, first compare profile, hint source, shared runner
+debug, and alpha/RGBA diffs before tuning thresholds.
 
 - Local Python changes under `ermbg/` are source changes, not sufficient
   deployment proof. After Web-facing or algorithmic changes, verify the remote

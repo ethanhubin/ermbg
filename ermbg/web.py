@@ -33,8 +33,9 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
-from .api import matte_image
+from .api import MatteResponse, matte_image
 from .candidates import MatteCandidate, generate_matte_candidates
+from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
@@ -44,6 +45,7 @@ ALLOWED_BACKENDS = {
     "comfy-corridorkey",
     "pymatting-known-b",
     "comfy-pymatting-known-b",
+    "direct-worker",
 }
 REMOTE_DIRECT_BACKENDS = {
     "passthrough",
@@ -51,6 +53,7 @@ REMOTE_DIRECT_BACKENDS = {
     "comfy-corridorkey",
     "pymatting-known-b",
     "comfy-pymatting-known-b",
+    "direct-worker",
 }
 WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -61,12 +64,14 @@ SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
 AUTO_EVAL_PREFIX = "auto_"
 CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
 RMBG_EVAL_PREFIX = "rmbg_"
+DIRECT_WORKER_EVAL_PREFIX = "direct_worker_"
 GAME_EVAL_RUN_PREFIXES = (
     LOCAL_OWNERSHIP_EVAL_PREFIX,
     SOLID_GRAPHIC_EVAL_PREFIX,
     AUTO_EVAL_PREFIX,
     CORRIDORKEY_EVAL_PREFIX,
     RMBG_EVAL_PREFIX,
+    DIRECT_WORKER_EVAL_PREFIX,
 )
 FAST_GAME_EVAL_SAMPLE_IDS = ("B001", "B016", "B031", "B046", "I011", "I019", "C004", "C009")
 GAME_EVAL_SCREENS = ("green", "blue")
@@ -90,6 +95,11 @@ GAME_EVAL_TEST_PATHS = {
         "label": "RMBG",
         "backend": "comfy-rmbg",
         "prefix": RMBG_EVAL_PREFIX,
+    },
+    "direct-worker": {
+        "label": "Direct Worker",
+        "backend": "direct-worker",
+        "prefix": DIRECT_WORKER_EVAL_PREFIX,
     },
 }
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -283,7 +293,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto RouteMatte</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto RouteMatte</option><option value="direct-worker">direct-worker</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -2039,6 +2049,37 @@ def _route_metadata(result: MatteResponse) -> dict[str, Any]:
     }
 
 
+def _run_web_backend(
+    image: Image.Image,
+    *,
+    backend: str,
+    shadow_mode: str,
+    corridorkey_screen_mode: str = "auto",
+    corridorkey_preset: str = "auto",
+    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    **kwargs: Any,
+) -> MatteResponse:
+    if backend == "direct-worker":
+        return matte_image_direct_worker(
+            image,
+            direct_worker_url=DEFAULT_DIRECT_WORKER_URL,
+            shadow_mode=shadow_mode,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        )
+    return matte_image(
+        image,
+        backend=backend,
+        qa=False,
+        shadow_mode=shadow_mode,
+        corridorkey_screen_mode=corridorkey_screen_mode,
+        corridorkey_preset=corridorkey_preset,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        **kwargs,
+    )
+
+
 def _parse_rgb_triplet(value: str) -> tuple[int, int, int]:
     parts = [part.strip() for part in value.split(",")]
     if len(parts) != 3:
@@ -2129,7 +2170,12 @@ def matte_endpoint(
         pymatting_cg_rtol=pymatting_cg_rtol,
     )
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode=shadow_mode, **pymatting_params)
+        result = _run_web_backend(
+            image,
+            backend=backend,
+            shadow_mode=shadow_mode,
+            **pymatting_params,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
@@ -2250,10 +2296,9 @@ def matte_candidates_endpoint(
     )
     server_started_at = time.perf_counter()
     try:
-        result = matte_image(
+        result = _run_web_backend(
             image,
             backend=backend,
-            qa=False,
             shadow_mode=shadow_mode,
             corridorkey_gamma_space=corridorkey_gamma_space,
             corridorkey_despill_strength=corridorkey_despill_strength,
@@ -2283,6 +2328,8 @@ def matte_candidates_endpoint(
             direct_label = "远端 PyMatting Known-B"
         elif effective_backend == "comfy-rmbg":
             direct_label = "远端 RMBG"
+        elif effective_backend == "direct-worker":
+            direct_label = "Direct Worker"
         elif effective_backend == "passthrough":
             direct_label = "远端 Passthrough"
         else:
@@ -2626,8 +2673,10 @@ def _remote_backend_summary_path(root: Path) -> Path | None:
     runs = payload.get("runs")
     if not isinstance(runs, list):
         return None
+    remote_summary_backends = {"direct-worker"}
     for item in runs:
-        if isinstance(item, dict) and str(item.get("backend", "")).startswith("comfy-"):
+        backend = str(item.get("backend", "")) if isinstance(item, dict) else ""
+        if backend.startswith("comfy-") or backend in remote_summary_backends:
             return path
     return None
 
@@ -4607,6 +4656,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <label for="eval-test-path">测试路径
           <select id="eval-test-path" name="eval-test-path">
             <option value="auto" selected>Auto RouteMatte</option>
+            <option value="direct-worker">Direct Worker</option>
             <option value="corridorkey">CorridorKey</option>
             <option value="rmbg">RMBG</option>
           </select>

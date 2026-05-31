@@ -82,7 +82,7 @@ tar \
   --exclude='out' \
   --exclude='ermbg.egg-info' \
   -czf - \
-  ermbg comfy_nodes docs samples/corridorkey_semantic pyproject.toml README.md DEPLOY.md AGENTS.md \
+  ermbg comfy_nodes docs samples/corridorkey_semantic scripts/benchmark_direct_worker_path.py scripts/smoke_direct_worker_http.py pyproject.toml README.md DEPLOY.md AGENTS.md \
   | "${ssh_base[@]}" "tar -xzf - -C \"$remote_root\""
 
 if [[ "$install_editable" -eq 1 ]]; then

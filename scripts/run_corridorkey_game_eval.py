@@ -16,10 +16,11 @@ from PIL import Image, ImageDraw
 
 from ermbg import matte_image
 from ermbg.comfy import DEFAULT_COMFY_URL
+from ermbg.direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
-EVAL_BACKENDS = ("auto", "comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg")
+EVAL_BACKENDS = ("auto", "direct-worker", "comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg")
 COLOR_PROTECTION_MODES = ("auto", "on", "off")
 HARD_UI_HINT_MODES = (
     "all_white",
@@ -64,6 +65,11 @@ def _debug_timings(debug: dict[str, Any]) -> dict[str, float]:
         "corridorkey_refine_sec",
         "color_protection_sec",
         "total_sec",
+        "server_elapsed_sec",
+        "route_sec",
+        "backend_sec",
+        "decode_sec",
+        "worker_elapsed_sec",
     )
     out: dict[str, float] = {}
     for key in keys:
@@ -214,6 +220,15 @@ def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
             shutil.copy2(src, case_dir / dst_name)
 
 
+def _write_direct_worker_outputs(case_dir: Path, result: Any) -> None:
+    rgba = np.asarray(result.rgba, dtype=np.uint8)
+    alpha = (np.clip(np.asarray(result.alpha, dtype=np.float32), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    foreground = np.asarray(result.foreground_srgb, dtype=np.uint8)
+    Image.fromarray(rgba, mode="RGBA").save(case_dir / "rgba.png")
+    Image.fromarray(alpha, mode="L").save(case_dir / "alpha.png")
+    Image.fromarray(foreground, mode="RGB").save(case_dir / "foreground.png")
+
+
 def _case_outputs(case_dir: Path) -> dict[str, str]:
     names = {
         "input": "input.png",
@@ -343,21 +358,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         print(f"[{case_index}/{total}] {sample_id}-{screen[:1].upper()} {case_id}", flush=True)
         start = time.perf_counter()
         try:
-            result = matte_image(
-                input_path,
-                backend=args.backend,
-                output_dir=case_dir,
-                qa=False,
-                comfy_url=args.comfy_url,
-                corridorkey_preset=args.corridorkey_preset,
-                corridorkey_color_protection=_color_protection_arg(args.corridorkey_color_protection),
-                corridorkey_auto_mask=args.corridorkey_hard_ui_hint_mode != "all_white",
-                corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
-            )
+            if args.backend == "direct-worker":
+                result = matte_image_direct_worker(
+                    input_path,
+                    direct_worker_url=args.direct_worker_url,
+                    shadow_mode="on",
+                    corridorkey_preset=args.corridorkey_preset,
+                    corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
+                )
+                _write_direct_worker_outputs(case_dir, result)
+            else:
+                result = matte_image(
+                    input_path,
+                    backend=args.backend,
+                    output_dir=case_dir,
+                    qa=False,
+                    comfy_url=args.comfy_url,
+                    corridorkey_preset=args.corridorkey_preset,
+                    corridorkey_color_protection=_color_protection_arg(args.corridorkey_color_protection),
+                    corridorkey_auto_mask=args.corridorkey_hard_ui_hint_mode != "all_white",
+                    corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
+                )
             elapsed = time.perf_counter() - start
             effective_backend = _effective_backend(args.backend, result)
             stem = input_path.stem
-            _copy_backend_outputs(case_dir, stem)
+            if args.backend != "direct-worker":
+                _copy_backend_outputs(case_dir, stem)
             _write_contact_sheet(case_dir)
             background = _case_background(manifest, case, screen)
             metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
@@ -430,6 +456,7 @@ def main() -> None:
     parser.add_argument("--sample-id", default="", help="Comma-separated sample ids, e.g. B001,I011,C004")
     parser.add_argument("--category", default="", help="Comma-separated manifest categories, e.g. button,icon")
     parser.add_argument("--comfy-url", default=DEFAULT_COMFY_URL)
+    parser.add_argument("--direct-worker-url", default=DEFAULT_DIRECT_WORKER_URL)
     parser.add_argument("--subject-threshold", type=float, default=35.0)
     parser.add_argument("--corridorkey-preset", default="auto", choices=("auto", "detail_safe", "spill_safe", "manual"))
     parser.add_argument("--corridorkey-color-protection", default="auto", choices=COLOR_PROTECTION_MODES)

@@ -218,6 +218,11 @@ Batch tests:
 Remote/Web verification:
 
 - run direct `ErmbgRouteMatte` smoke through ComfyUI;
+- for `direct-worker`, verify parity against `backend=auto` on the same
+  manifest subset before using the timing numbers. `selected_backend`,
+  `parameter_profile`, `execution_profile`, and hint source should match; large
+  alpha/RGBA differences mean the execution layer diverged and must be fixed in
+  shared code, not tuned as a separate backend.
 - run focused direct `comfy-corridorkey` and `comfy-pymatting-known-b` smokes
   when a profile-specific backend is changed;
 - run real HTTP `/api/matte-candidates` smoke through `127.0.0.1:7860`;
@@ -233,3 +238,10 @@ CorridorKey and PyMatting: input analysis, profile selection, parameter
 adaptation, mask hints, ShadowPatch, diagnostics, batch evaluation, and Web
 controls. Unknown-background fallback is PyMatting Known-B with a configured
 fallback background, not RMBG.
+
+The Direct Worker path is a queue-bypass validation backend for this same
+roadmap. It may report `direct-corridorkey` or `direct-pymatting-known-b` as
+the execution backend, but it must not fork CorridorKey behavior. All
+in-process CorridorKey execution belongs in
+`ermbg.corridorkey_runner.LocalCorridorKeyClient`, which is used by both the
+Comfy custom node wrapper and Direct Worker.
