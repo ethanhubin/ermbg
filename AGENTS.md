@@ -133,7 +133,7 @@ After any change to [ermbg/web.py](ermbg/web.py), Web UI behavior, Web API behav
 
 - After starting, verify all three layers before reporting success:
   1. `lsof -nP -iTCP:7860 -sTCP:LISTEN` shows the expected `.venv/bin/python -m uvicorn ermbg.web:app` process.
-  2. `curl -sS http://127.0.0.1:7860/` contains a marker from the change under test, not just any HTML response. For backend changes, verify expected option/text such as `comfy-pymatting-known-b`, `comfy-corridorkey`, `comfy-rmbg`, `server_elapsed_sec`, or the specific UI string under test.
+  2. `curl -sS http://127.0.0.1:7860/` contains a marker from the change under test, not just any HTML response. For backend changes, verify expected option/text such as `comfy-pymatting-known-b`, `comfy-corridorkey`, `Auto RouteMatte`, `server_elapsed_sec`, or the specific UI string under test.
   3. Run a real HTTP smoke test through `127.0.0.1:7860`, not only `TestClient`. For Comfy-backed matting, post representative PNGs to `/api/matte-candidates` with `backend=auto` and confirm status 200 plus JSON route metadata and `server_elapsed_sec`.
 
 - If Web reports a ComfyUI connection error, compare from the same shell before changing algorithm code:
@@ -227,6 +227,13 @@ prompt. The Mac side only uploads the input, submits the workflow, polls
 - **Auto route**: Web/API `backend=auto` always goes through remote
   `ErmbgRouteMatte`, which dispatches to PyMatting Known-B, CorridorKey,
   PyMatting fallback, or passthrough in ComfyUI. Auto does not invoke RMBG.
+- **Execution profiles**: the router must emit the final
+  `params.execution_profile` before matting. Execution consumes that profile
+  and the attached parameters directly; it must not re-infer character, glass
+  button, or effect-icon handling from CorridorKey semantic analysis. Current
+  profiles are `corridorkey-character`, `corridorkey-transparent-button`,
+  `corridorkey-effect-icon`, `corridorkey-shaped-icon`,
+  `pymatting-hard-button`, `pymatting-known-bg`, and `pymatting-fallback`.
 - **Background convention**: green-screen RGB (0, 200, 0) — see `ermbg.probe.prompts.GREEN_SCREEN_PROMPT`
 - **Despill default**: `chroma_cap` (auto-degrades to `local_borrow` when B has no dominant channel)
 - **QA backgrounds**: black / white / grey / cyan / magenta / checker, plus a `_lightwrap` screen for each

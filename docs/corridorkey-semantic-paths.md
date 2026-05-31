@@ -73,6 +73,35 @@ Category/backend split:
 | Icon / effect | 0 | 20 |
 | Character | 0 | 9 |
 
+Latest execution-profile verification:
+
+```text
+out/verify_route_profiles_character_glass_icon_20260531/summary.json
+```
+
+This targeted run verifies that the router now selects a final
+`execution_profile` before execution, so CorridorKey parameter choices do not
+bleed between glass buttons, characters, and icons.
+
+| Sample family | Execution profile | Backend |
+|---|---|---|
+| B046-B049 real glass buttons | `corridorkey-transparent-button` | `comfy-corridorkey` |
+| I011-I012 soft/effect icons | `corridorkey-effect-icon` | `comfy-corridorkey` |
+| I019-I020 shaped glow icons | `corridorkey-shaped-icon` | `comfy-corridorkey` |
+| C001-C009 characters | `corridorkey-character` | `comfy-corridorkey` |
+
+Profile rules:
+
+- `corridorkey-transparent-button`: full-frame glass control, color protection
+  forced off, profile-specific mask prior.
+- `corridorkey-character`: full-frame character control, color protection
+  forced off, character-specific mask prior.
+- `corridorkey-effect-icon`: full-frame effect control for additive/soft-alpha
+  icon material.
+- `corridorkey-shaped-icon`: shaped foreground hint, including key-color
+  material icons where protection may remain enabled.
+- `pymatting-hard-button`: deterministic known-B hard UI/button route.
+
 Timing on the 2026-05-31 full run:
 
 | Scope | Count | Avg | Median | P95 | Min | Max |
@@ -114,7 +143,8 @@ Accepted scope:
 
 ### Phase 2: Recognition And Route Audit
 
-Status: in progress.
+Status: route profile contract established; continue auditing sample families
+for recognizer gaps and path-specific quality.
 
 The next step is to run the full confirmed sample set through the Web/Game Eval
 path and inspect failures by family. This phase should answer: which route or
@@ -140,8 +170,11 @@ routes should be recorded as recognizer gaps.
 Status: deferred until Phase 2 is usable.
 
 Only after route selection is accurate enough should CorridorKey parameters be
-tuned per route: color protection, despill, refiner strength, despeckle,
-foreground recovery, and shadow/soft-layer handling.
+tuned per execution profile: color protection, despill, refiner strength,
+despeckle, foreground recovery, and shadow/soft-layer handling. Do not tune
+generic CorridorKey settings in a way that makes `corridorkey-character`,
+`corridorkey-transparent-button`, `corridorkey-effect-icon`, or
+`corridorkey-shaped-icon` affect each other.
 
 ## Route Pressures To Audit
 

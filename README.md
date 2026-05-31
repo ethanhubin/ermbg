@@ -19,7 +19,8 @@ AI image model  ->  known background image  ->  ERMBG  ->  RGBA asset
 - **自动路由**:干净 RGBA、绿/品红/青等饱和底、白/黑/灰底、噪声底自动分流。
 - **Known-B foreground recovery**:已知背景时用 linear-RGB unmix,不只靠经验 chroma 脚本。
 - **RGBA hygiene check**:脏透明 PNG 的白边/黑边/旧背景泄漏/硬二值 alpha 会被识别并重抠。
-- **CorridorKey game UI mainline**:游戏 UI 资产优先走远端 `comfy-corridorkey`,
+- **CorridorKey game UI mainline**:游戏 UI 资产由 ERMBG router 先选最终
+  execution profile,再走远端 `comfy-corridorkey` 或 `comfy-pymatting-known-b`。
   ERMBG 负责背景/色彩分析、参数适配、mask hint、ShadowPatch、QA 和回退。
 - **Keyer + matting 融合**:补小漏检、守住 topology、修 hard edge、对同色歧义生成候选。
 - **Local ownership 归属判断**:对 hole / soft subject / shadow-like layer 做本地多假设评分,
@@ -102,11 +103,11 @@ known background image
 
 样本规模:
 
-- Button:54
+- Button:56
 - Icon / effect:20
 - Character:9 (1024x1024)
 
-第一阶段样本建设已完成。第二阶段目标是基于这 83 个确认样本做识别/路由审计,
+第一阶段样本建设已完成。第二阶段目标是基于这 85 个确认样本做识别/路由审计,
 再进入路径内参数调优。详情见
 [docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md)。
 
@@ -144,6 +145,11 @@ address used by this repository.
 **`comfy-pymatting-known-b`**,绿/蓝底 icon、character、玻璃/半透明按钮走
 **`comfy-corridorkey` + ShadowPatch**,未知/不稳定背景也走
 **`comfy-pymatting-known-b` PyMatting fallback**。
+Router 会在执行前写入最终 `execution_profile`,例如
+`pymatting-hard-button`、`corridorkey-transparent-button`、
+`corridorkey-character`、`corridorkey-effect-icon` 或
+`corridorkey-shaped-icon`。执行层只消费这个 profile 和随附参数,不再根据
+CorridorKey 的语义分析二次猜测路径。
 Web/API 的 `backend="auto"` 现在提交单个 **ERMBG Route Matte** Comfy 节点;
 Mac 侧只负责上传输入、提交 workflow、轮询和拉取结果图/metadata。背景/色彩
 分析、参数适配、CorridorKey hint、ShadowPatch 和 PyMatting fallback 均在 Comfy 端运行。

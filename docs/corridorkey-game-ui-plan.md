@@ -1,51 +1,53 @@
 # CorridorKey Game UI Workflow Plan
 
-This is the current development plan for game UI assets. The mainline is moving
-from ERMBG-owned detail matting toward CorridorKey as the mature detail keyer,
-with ERMBG providing analysis, parameter selection, Web tooling, QA, and
-fallbacks.
+This is the current development plan for game UI assets. The mainline has moved
+to ERMBG-owned routing with profile-specific execution: ERMBG decides the final
+path and parameters, then ComfyUI executes PyMatting Known-B, CorridorKey,
+passthrough, or PyMatting fallback inside the remote process.
 
 ## Summary
 
-- Route game UI assets through ERMBG strategy first.
+- Route game UI assets through ERMBG strategy first and emit a final
+  `execution_profile` before matting.
 - Remove the old `comfy-ermbg`/AutoMatte full-matting backend from active routes.
 - Route unknown backgrounds to PyMatting fallback; auto no longer invokes RMBG.
-- Add a lightweight local analysis layer before remote CorridorKey execution.
-- Support green-screen first, then add blue-screen support only after verifying
-  the concrete Comfy/CorridorKey route.
-- Preserve missing cast/contact shadows with a local `ShadowPatch` layer under
-  the CorridorKey subject layer.
-- Add Web-side fallback controls: SAM3 auto mask plus simple manual mask edits.
+- Run route analysis, parameter selection, CorridorKey/PyMatting execution,
+  ShadowPatch, and metadata generation in the remote `ErmbgRouteMatte` node.
+- Use CorridorKey for green/blue known-screen icon, character, glass, and
+  translucent button profiles.
+- Use PyMatting Known-B for deterministic hard buttons and unknown/unstable
+  fallback.
 
 ## Mainline Architecture
 
 ```text
 uploaded image
-  -> local screen/color analysis
-  -> if green/blue: recommended CorridorKey settings
-      -> optional SAM3/user hint mask
-      -> remote comfy-corridorkey
-      -> local ShadowPatch gate + shadow layer composite
-      -> color protection / QA / Web candidates
+  -> remote ErmbgRouteMatte
+      -> screen/color analysis
+      -> final execution_profile + parameters
+      -> PyMatting Known-B, CorridorKey, passthrough, or PyMatting fallback
+      -> ShadowPatch / QA / route metadata
       -> RGBA game UI asset
-  -> if unknown: remote PyMatting fallback
 ```
 
-The local analysis layer should be deterministic and cheap. It should not run
-heavy models on the Mac. Heavy segmentation or model inference stays on the
-remote ComfyUI server.
+The Mac side should only upload the image, submit the workflow, poll ComfyUI,
+and download the result images and metadata. It should not duplicate route
+analysis or perform post-matting repair for the production auto path.
 
 ## Screen And Color Analysis
 
-Add a `corridorkey_analyze_asset()` style entrypoint that returns:
+The route analyzer returns:
 
 - `screen_mode`: `green`, `blue`, or `unknown`.
 - `background_color`: measured sRGB key color.
 - `background_confidence`: confidence that the image is a known screen asset.
 - `purity_sigma`: how stable the background is across trusted regions.
 - `subject_key_color_risk`: whether subject material is close to the key color.
-- `recommended_settings`: CorridorKey gamma, despill, refiner, despeckle, and
-  color-protection thresholds.
+- `execution_profile`: final execution profile, for example
+  `corridorkey-transparent-button`, `corridorkey-character`, or
+  `pymatting-hard-button`.
+- `recommended_settings`: CorridorKey/PyMatting gamma, thresholds, despill,
+  refiner, despeckle, hint, color-protection, and ShadowPatch settings.
 
 The analysis should use observable signals rather than sample-specific rules:
 
@@ -54,6 +56,22 @@ The analysis should use observable signals rather than sample-specific rules:
 - background variance/purity to decide whether auto mode is safe;
 - subject/key-color overlap risk to avoid erasing green or blue subject details;
 - connected-component scale to avoid despeckle removing small UI ornaments.
+
+## Execution Profiles
+
+The execution profile is the production contract. CorridorKey semantic profiles
+can inform routing, but execution must not re-infer the asset family after the
+router has made the decision.
+
+| Execution profile | Path | Notes |
+|---|---|---|
+| `corridorkey-character` | CorridorKey | full-frame character control, color protection off |
+| `corridorkey-transparent-button` | CorridorKey | full-frame glass control, color protection off |
+| `corridorkey-effect-icon` | CorridorKey | full-frame effect control for additive or soft-alpha icons |
+| `corridorkey-shaped-icon` | CorridorKey | shaped hint for icon material that still needs protection |
+| `pymatting-hard-button` | PyMatting Known-B | deterministic hard UI and button families |
+| `pymatting-known-bg` | PyMatting Known-B | stable known-background graphic fallback |
+| `pymatting-fallback` | PyMatting Known-B | unknown or unstable background fallback |
 
 ## Parameter Adaptation
 
@@ -79,7 +97,7 @@ CorridorKey; unknown backgrounds skip this path and go to PyMatting fallback.
 The layer stack is:
 
 ```text
-shadow layer     measured locally from known-background scalar darkening
+shadow layer     measured from known-background scalar darkening
 subject layer    remote CorridorKey RGBA/alpha, kept as the owner of hard edges
 ```
 
@@ -131,37 +149,52 @@ background darkening into dirty yellow foreground plus partial alpha. That is a
 model decomposition weakness, not a core ShadowPatch failure, and those samples
 are no longer active B016-B030 targets.
 
-Latest full baseline:
+Historical direct CorridorKey blue/green baseline:
 
 ```text
 out/corridorkey_full_blue_green_baseline_20260531/summary.json
 ```
 
-Result: 83/83 completed successfully. B016-B030 all ran successfully as
-blue-screen green-button samples.
+Result: 83/83 completed successfully. This predates the final 85-sample
+RouteMatte auto contract, but remains useful as a direct CorridorKey reference.
+B016-B030 all ran successfully as blue-screen green-button samples.
 
-Background detection should live in the ERMBG/Mac layer because the Web UI,
-batch scripts, reports, and Comfy workflow selection all need the same decision.
-The Comfy wrapper should receive explicit `screen_mode`, `background_color`, and
-settings rather than re-guessing them independently.
+Latest full RouteMatte baseline:
 
-## Web UI Fallbacks
+```text
+out/auto_routematte_routefix_20260531/summary.json
+out/auto_routematte_routefix_20260531/timing_report.md
+```
 
-The Web UI should become an operator surface for the CorridorKey path:
+Result: 85/85 completed successfully through Web/API `backend=auto`, which
+submits the remote `ErmbgRouteMatte` node. The active set is 56 buttons, 20
+icon/effect samples, and 9 character samples. Route distribution was 37
+PyMatting Known-B cases and 48 CorridorKey cases.
 
-- Default backend for game UI work: `comfy-corridorkey`.
-- Show the analysis result: screen mode, measured background, confidence, and
-  selected preset.
-- Provide manual overrides for screen mode, despill, refiner, despeckle, and
-  color protection.
-- Add SAM3 auto mask through the remote ComfyUI `SAM3_Detect` node using the
-  installed `sam3.1_multiplex_fp16` checkpoint.
-- Add simple manual mask editing: keep brush, erase brush, clear, reset to SAM,
-  and rerun.
+The targeted execution-profile verification is:
 
-The SAM/manual mask should not directly replace final alpha. It should act as a
-coarse CorridorKey hint or protection input, preserving CorridorKey as the detail
-matting engine.
+```text
+out/verify_route_profiles_character_glass_icon_20260531/summary.json
+```
+
+It verifies B046-B049 as `corridorkey-transparent-button`, I011-I012 as
+`corridorkey-effect-icon`, I019-I020 as `corridorkey-shaped-icon`, and
+C001-C009 as `corridorkey-character`.
+
+## Web UI And Debug Controls
+
+The Web UI should surface the route decision rather than force users to reason
+about raw backends:
+
+- Default backend for game UI work: `auto`, which submits `ErmbgRouteMatte`.
+- Show `requested_backend`, selected backend, route, asset kind,
+  `execution_profile`, parameter profile, measured background, confidence,
+  server elapsed time, and route reasons.
+- Manual/debug controls may still target `comfy-corridorkey` or
+  `comfy-pymatting-known-b`, but production quality audits should start with
+  `backend=auto`.
+- Mask editing remains a debug/operator aid. It should feed a coarse hint or
+  protection signal, not replace the final detail alpha directly.
 
 ## Testing And Verification
 
@@ -184,17 +217,19 @@ Batch tests:
 
 Remote/Web verification:
 
-- run direct `comfy-corridorkey` smoke through ComfyUI;
-- run SAM3 mask smoke through ComfyUI;
+- run direct `ErmbgRouteMatte` smoke through ComfyUI;
+- run focused direct `comfy-corridorkey` and `comfy-pymatting-known-b` smokes
+  when a profile-specific backend is changed;
 - run real HTTP `/api/matte-candidates` smoke through `127.0.0.1:7860`;
-- save batch summaries under `out/` with selected screen mode, settings, timing,
-  and quality metrics.
+- save batch summaries under `out/` with selected backend, route,
+  `execution_profile`, settings, timing, and quality metrics.
 
 ## Relationship To Existing ERMBG Work
 
 The previous solid-background/local-ownership work remains useful as fallback
 and QA infrastructure, but it is no longer the primary detail-matting roadmap
 for game UI assets. ERMBG should focus on the orchestration layer around
-CorridorKey: input analysis, parameter adaptation, mask hints, local
-ShadowPatch, diagnostics, batch evaluation, and Web controls. Unknown-background
-fallback is RMBG until ERMBG has a separately validated specialty route.
+CorridorKey and PyMatting: input analysis, profile selection, parameter
+adaptation, mask hints, ShadowPatch, diagnostics, batch evaluation, and Web
+controls. Unknown-background fallback is PyMatting Known-B with a configured
+fallback background, not RMBG.
