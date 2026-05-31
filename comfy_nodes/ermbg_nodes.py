@@ -358,6 +358,102 @@ class _LocalCorridorKeyClient:
     """CorridorKey runner that stays inside the current Comfy process."""
 
     _processor: Any | None = None
+    _corridorkey_node: Any | None = None
+
+    @staticmethod
+    def _registry_node_class(name: str) -> Any | None:
+        registry = sys.modules.get("nodes")
+        if registry is None:
+            try:
+                import nodes as registry
+            except Exception:
+                registry = None
+        mapping = getattr(registry, "NODE_CLASS_MAPPINGS", None)
+        if isinstance(mapping, dict):
+            node_cls = mapping.get(name)
+            if node_cls is not None:
+                return node_cls
+        return None
+
+    @staticmethod
+    def _loaded_corridorkey_node_class() -> Any | None:
+        registry_node = _LocalCorridorKeyClient._registry_node_class("CorridorKey")
+        if registry_node is not None:
+            return registry_node
+
+        for module in list(sys.modules.values()):
+            mapping = getattr(module, "NODE_CLASS_MAPPINGS", None)
+            if not isinstance(mapping, dict):
+                continue
+            node_cls = mapping.get("CorridorKey")
+            if node_cls is not None:
+                return node_cls
+        return None
+
+    @classmethod
+    def _get_loaded_node(cls) -> Any | None:
+        node_cls = cls._loaded_corridorkey_node_class()
+        if node_cls is None:
+            return None
+        if cls._corridorkey_node is None or not isinstance(cls._corridorkey_node, node_cls):
+            cls._corridorkey_node = node_cls()
+        return cls._corridorkey_node
+
+    @classmethod
+    def _corridorkey_mask_tensor_from_hint(
+        cls,
+        hint: np.ndarray,
+        *,
+        screen_color: str,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        image_to_mask_cls = cls._registry_node_class("ImageToMask")
+        if image_to_mask_cls is not None:
+            try:
+                hint_u8 = np.clip(hint * 255.0 + 0.5, 0, 255).astype(np.uint8)
+                hint_rgb = np.repeat(hint_u8[..., None], 3, axis=2)
+                node = image_to_mask_cls()
+                function_name = getattr(image_to_mask_cls, "FUNCTION", "image_to_mask")
+                function = getattr(node, function_name)
+                converted = function(_numpy_image_to_tensor(hint_rgb), "red")
+                mask_tensor = converted[0] if isinstance(converted, (tuple, list)) else converted
+                if isinstance(mask_tensor, torch.Tensor):
+                    mask_arr = _mask_to_numpy(mask_tensor)
+                    if mask_arr is None:
+                        raise RuntimeError("ImageToMask returned no mask")
+                    return mask_tensor, {
+                        "convention": "comfy_image_to_mask_node",
+                        "source_node": f"{image_to_mask_cls.__module__}.{image_to_mask_cls.__name__}",
+                        "min": float(mask_arr.min()),
+                        "max": float(mask_arr.max()),
+                        "mean": float(mask_arr.mean()),
+                    }
+            except Exception:
+                pass
+
+        hint_min = float(hint.min()) if hint.size else 0.0
+        if hint_min >= 0.999:
+            # Full-frame hints are a control signal, not a foreground shape. A
+            # literal 1.0 mask makes CorridorKey own the whole frame; zero is
+            # right for blue glass, while the green checkpoint needs a small
+            # soft prior to preserve translucent material and particle effects.
+            if str(screen_color) == "green":
+                corridorkey_mask = np.full(hint.shape, 0.32, dtype=np.float32)
+                convention = "corridorkey_green_all_white_soft_prior"
+            else:
+                corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
+                convention = "corridorkey_all_white_zero_prior"
+        else:
+            # Shaped hints already describe foreground support for CorridorKey.
+            # Inverting them turns known background into model-owned support,
+            # which shows up as full-frame green/blue residue on soft glow icons.
+            corridorkey_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
+            convention = "corridorkey_shaped_foreground_hint"
+        return _numpy_mask_to_tensor(corridorkey_mask), {
+            "convention": convention,
+            "min": float(corridorkey_mask.min()),
+            "max": float(corridorkey_mask.max()),
+            "mean": float(corridorkey_mask.mean()),
+        }
 
     @staticmethod
     def _ensure_import_path() -> None:
@@ -408,8 +504,6 @@ class _LocalCorridorKeyClient:
         else:
             hint_source = hint_source or "provided_alpha_hint"
 
-        self._ensure_import_path()
-        from corridor_key import CorridorKeySettings
         from ermbg.probe.comfyui_corridorkey import (
             ComfyCorridorKeyResult,
             KeyerThresholds,
@@ -419,22 +513,55 @@ class _LocalCorridorKeyClient:
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
         image_tensor = _numpy_image_to_tensor(image_srgb)
-        hint_tensor = _numpy_mask_to_tensor(np.clip(hint_alpha.astype(np.float32), 0.0, 1.0))
-        settings = CorridorKeySettings(
-            gamma_space=str(gamma_space),
+        hint = np.clip(hint_alpha.astype(np.float32), 0.0, 1.0)
+        # Match the explicit comfy-corridorkey workflow: ERMBG writes a
+        # white=foreground hint image, then Comfy ImageToMask converts it before
+        # CorridorKey sees it. Passing the ERMBG alpha directly makes all-white
+        # glass hints behave like full-frame foreground with the green model.
+        hint_tensor, corridorkey_mask_debug = self._corridorkey_mask_tensor_from_hint(
+            hint,
             screen_color=str(screen_color),
-            despill_strength=float(despill_strength),
-            refiner_strength=float(refiner_strength),
-            auto_despeckle=str(auto_despeckle),
-            despeckle_size=int(despeckle_size),
         )
         step_start = time.perf_counter()
-        foreground_tensor, alpha_tensor, _processed, _qc = self._get_processor().refine(
-            image=image_tensor,
-            mask=hint_tensor,
-            settings=settings,
-            progress_callback=lambda *_args: None,
-        )
+        loaded_node = self._get_loaded_node()
+        if loaded_node is not None:
+            # Reuse the CorridorKey class that ComfyUI loaded at startup. The
+            # global Comfy registry is the source of truth for explicit
+            # comfy-corridorkey prompts; importing the extension directly can
+            # load a second module copy and change the green-model runtime state.
+            runner = "loaded_comfy_node"
+            runner_module = type(loaded_node).__module__
+            foreground_tensor, alpha_tensor, _processed, _qc = loaded_node.run(
+                image=image_tensor,
+                mask=hint_tensor,
+                gamma_space=str(gamma_space),
+                screen_color=str(screen_color),
+                despill_strength=float(despill_strength),
+                refiner_strength=float(refiner_strength),
+                auto_despeckle=str(auto_despeckle),
+                despeckle_size=int(despeckle_size),
+                unique_id=None,
+            )
+        else:
+            self._ensure_import_path()
+            from corridor_key import CorridorKeySettings
+
+            settings = CorridorKeySettings(
+                gamma_space=str(gamma_space),
+                screen_color=str(screen_color),
+                despill_strength=float(despill_strength),
+                refiner_strength=float(refiner_strength),
+                auto_despeckle=str(auto_despeckle),
+                despeckle_size=int(despeckle_size),
+            )
+            runner = "direct_processor_fallback"
+            runner_module = "corridor_key.CorridorKeyProcessor"
+            foreground_tensor, alpha_tensor, _processed, _qc = self._get_processor().refine(
+                image=image_tensor,
+                mask=hint_tensor,
+                settings=settings,
+                progress_callback=lambda *_args: None,
+            )
         timings["corridorkey_refine_sec"] = time.perf_counter() - step_start
         foreground = _image_to_numpy(foreground_tensor)
         raw_alpha = _mask_to_numpy(alpha_tensor)
@@ -462,7 +589,6 @@ class _LocalCorridorKeyClient:
         alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
         rgba = np.dstack([foreground, alpha_u8]).astype(np.uint8)
         timings["total_sec"] = time.perf_counter() - total_start
-        hint = np.clip(hint_alpha.astype(np.float32), 0.0, 1.0)
         return ComfyCorridorKeyResult(
             rgba=rgba,
             alpha=alpha.astype(np.float32),
@@ -484,6 +610,8 @@ class _LocalCorridorKeyClient:
                     "auto_despeckle": auto_despeckle,
                     "despeckle_size": int(despeckle_size),
                     "apply_color_protection": bool(apply_color_protection),
+                    "runner": runner,
+                    "runner_module": runner_module,
                 },
                 "hint": {
                     "source": hint_source,
@@ -491,6 +619,7 @@ class _LocalCorridorKeyClient:
                     "max": float(hint.max()),
                     "mean": float(hint.mean()),
                 },
+                "corridorkey_mask": corridorkey_mask_debug,
                 "color_protection": protection_debug,
                 "timings": timings,
             },
@@ -623,7 +752,7 @@ class ErmbgRouteMatte:
                 comfy_url="local-comfy-node",
                 screen_mode=params.get("corridorkey_screen_mode", corridorkey_screen_mode),
                 preset=params.get("corridorkey_preset", corridorkey_preset),
-                hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                hard_ui_hint_mode=params.get("corridorkey_hard_ui_hint_mode", corridorkey_hard_ui_hint_mode),
                 corridorkey_client=_LocalCorridorKeyClient(),
                 auto_mask=params.get("corridorkey_auto_mask", False),
                 apply_color_protection=params.get("corridorkey_color_protection", None),

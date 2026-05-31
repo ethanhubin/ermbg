@@ -8,6 +8,7 @@ exercised by tests/test_api.py.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ from comfy_nodes.ermbg_nodes import (  # noqa: E402
     ErmbgClassify,
     ErmbgPyMattingKnownB,
     ErmbgRouteStrategy,
+    _LocalCorridorKeyClient,
     _dev_reload_ermbg_modules,
     _mask_to_numpy,
 )
@@ -150,3 +152,81 @@ def test_convert_masks_to_images_node():
     assert images.shape == (1, 16, 20, 3)
     assert images.dtype == torch.float32
     assert float(images.min()) == pytest.approx(0.5)
+
+
+def test_local_corridorkey_client_reuses_loaded_comfy_node(monkeypatch):
+    calls = []
+
+    class FakeCorridorKeyNode:
+        def run(
+            self,
+            image,
+            mask,
+            gamma_space,
+            screen_color,
+            despill_strength,
+            refiner_strength,
+            auto_despeckle,
+            despeckle_size,
+            unique_id=None,
+        ):
+            calls.append(
+                {
+                    "gamma_space": gamma_space,
+                    "screen_color": screen_color,
+                    "refiner_strength": refiner_strength,
+                    "auto_despeckle": auto_despeckle,
+                    "despeckle_size": despeckle_size,
+                    "unique_id": unique_id,
+                    "mask_mean": float(mask.mean()),
+                }
+            )
+            alpha = torch.ones_like(mask) * 0.25
+            return image, alpha, image, image
+
+    class FakeImageToMaskNode:
+        FUNCTION = "image_to_mask"
+
+        def image_to_mask(self, image, channel):
+            assert channel == "red"
+            return (torch.ones(image.shape[:3], dtype=torch.float32) * 0.30,)
+
+    fake_module = types.SimpleNamespace(
+        NODE_CLASS_MAPPINGS={
+            "CorridorKey": FakeCorridorKeyNode,
+            "ImageToMask": FakeImageToMaskNode,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "nodes", fake_module)
+    monkeypatch.setattr(_LocalCorridorKeyClient, "_corridorkey_node", None)
+
+    image = _green_with_red_subject(16, 16)
+    result = _LocalCorridorKeyClient().matte(
+        image,
+        hint_alpha=np.ones((16, 16), dtype=np.float32),
+        gamma_space="sRGB",
+        screen_color="green",
+        refiner_strength=1.15,
+        auto_despeckle="Off",
+        despeckle_size=64,
+        apply_color_protection=False,
+    )
+
+    assert calls == [
+        {
+            "gamma_space": "sRGB",
+            "screen_color": "green",
+            "refiner_strength": pytest.approx(1.15),
+            "auto_despeckle": "Off",
+            "despeckle_size": 64,
+            "unique_id": None,
+            "mask_mean": pytest.approx(0.30),
+        }
+    ]
+    assert result.debug["settings"]["runner"] == "loaded_comfy_node"
+    assert result.debug["settings"]["runner_module"] == FakeCorridorKeyNode.__module__
+    assert result.debug["corridorkey_mask"]["convention"] == "comfy_image_to_mask_node"
+    assert result.debug["corridorkey_mask"]["source_node"] == (
+        f"{FakeImageToMaskNode.__module__}.{FakeImageToMaskNode.__name__}"
+    )
+    assert float(result.alpha.mean()) == pytest.approx(0.25)

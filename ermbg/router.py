@@ -740,15 +740,23 @@ def classify_route(
         asset_kind in {"icon", "character"}
         or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
     ):
+        params = _corridorkey_route_params(ck)
         if complex_button_boundary and asset_kind == "button" and profile not in button_corridor_profiles:
             reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
+            # Complex-boundary button routing is the glass/translucent escape
+            # hatch. Force the same full-frame hint profile that explicit
+            # CorridorKey glass tests use, because bbox/keyed hints can turn
+            # transparent screen tint into broad foreground residue.
+            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         else:
             reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")
+            if asset_kind == "button" and profile in button_corridor_profiles:
+                params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         return RouteDecision(
             route="corridorkey",
             asset_kind=asset_kind,
             backend="comfy-corridorkey",
-            params=_corridorkey_route_params(ck),
+            params=params,
             confidence=float(max(0.50, ck.background_confidence)),
             reasons=reasons,
             analysis=analysis,

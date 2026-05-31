@@ -192,6 +192,7 @@ def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundar
         decision = classify_route(img)
         assert decision.route == "corridorkey", rel
         assert decision.asset_kind == "button", rel
+        assert decision.params["corridorkey_hard_ui_hint_mode"] == "translucent_button", rel
         complex_info = decision.analysis["complex_button_boundary"]
         assert (
             complex_info["gradient_gate"]

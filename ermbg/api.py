@@ -352,7 +352,7 @@ def matte_image(
             screen_mode=auto_params.get("corridorkey_screen_mode", corridorkey_screen_mode),
             preset=auto_params.get("corridorkey_preset", corridorkey_preset),
             hint_alpha=corridorkey_hint_alpha,
-            hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            hard_ui_hint_mode=auto_params.get("corridorkey_hard_ui_hint_mode", corridorkey_hard_ui_hint_mode),
             auto_route=auto_route,
         )
 
