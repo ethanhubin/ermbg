@@ -933,6 +933,7 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
                     "route": "corridorkey",
                     "asset_kind": "icon",
                     "parameter_profile": "edge_cleanup",
+                    "execution_profile": "corridorkey-shaped-icon",
                     "confidence": 0.82,
                     "reasons": ["known_screen_icon_defaults_to_corridorkey"],
                 },
@@ -957,6 +958,7 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
     assert payload["route"] == "corridorkey"
     assert payload["asset_kind"] == "icon"
     assert payload["parameter_profile"] == "edge_cleanup"
+    assert payload["execution_profile"] == "corridorkey-shaped-icon"
     assert payload["route_confidence"] == 0.82
     assert payload["route_reasons"] == ["known_screen_icon_defaults_to_corridorkey"]
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [

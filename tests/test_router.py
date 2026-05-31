@@ -161,6 +161,7 @@ def test_route_hard_button_uses_pymatting_known_b():
     assert decision.route == "pymatting_known_b"
     assert decision.backend == "comfy-pymatting-known-b"
     assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
 
 
@@ -178,6 +179,7 @@ def test_route_translucent_button_uses_corridorkey():
     assert decision.route == "corridorkey"
     assert decision.backend == "comfy-corridorkey"
     assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "corridorkey-transparent-button"
 
 
 def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundary_gate():
@@ -192,6 +194,7 @@ def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundar
         decision = classify_route(img)
         assert decision.route == "corridorkey", rel
         assert decision.asset_kind == "button", rel
+        assert decision.params["execution_profile"] == "corridorkey-transparent-button", rel
         assert decision.params["corridorkey_hard_ui_hint_mode"] == "translucent_button", rel
         complex_info = decision.analysis["complex_button_boundary"]
         assert (
@@ -244,8 +247,10 @@ def test_route_icon_and_character_use_corridorkey():
     character_decision = classify_route(character)
     assert icon_decision.route == "corridorkey"
     assert icon_decision.asset_kind == "icon"
+    assert icon_decision.params["execution_profile"] == "corridorkey-shaped-icon"
     assert character_decision.route == "corridorkey"
     assert character_decision.asset_kind == "character"
+    assert character_decision.params["execution_profile"] == "corridorkey-character"
 
 
 def test_route_unknown_unstable_background_uses_pymatting_fallback():
@@ -256,6 +261,7 @@ def test_route_unknown_unstable_background_uses_pymatting_fallback():
     assert decision.route == "pymatting_fallback"
     assert decision.backend == "comfy-pymatting-known-b"
     assert decision.asset_kind == "unknown_fallback"
+    assert decision.params["execution_profile"] == "pymatting-fallback"
     assert "unknown_or_unstable_background_uses_pymatting_fallback" in decision.reasons
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
     assert decision.params["pymatting_auto_adapt"] is False

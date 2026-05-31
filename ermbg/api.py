@@ -353,6 +353,7 @@ def matte_image(
             preset=auto_params.get("corridorkey_preset", corridorkey_preset),
             hint_alpha=corridorkey_hint_alpha,
             hard_ui_hint_mode=auto_params.get("corridorkey_hard_ui_hint_mode", corridorkey_hard_ui_hint_mode),
+            execution_profile=auto_params.get("corridorkey_execution_profile", "auto"),
             auto_route=auto_route,
         )
 
@@ -2915,6 +2916,7 @@ def _matte_image_comfy_corridorkey(
     preset: str = "auto",
     hint_alpha: np.ndarray | None = None,
     hard_ui_hint_mode: str = "bbox_2px",
+    execution_profile: str = "auto",
     auto_route: dict[str, Any] | None = None,
     corridorkey_client: Any | None = None,
 ) -> MatteResponse:
@@ -2969,13 +2971,25 @@ def _matte_image_comfy_corridorkey(
         color_protection_fg_min = settings.protection_fg_min
     elif apply_color_protection is None:
         apply_color_protection = True
-    if preset != "manual" and hard_ui_hint_mode == "translucent_button":
-        # Explicit glass/translucent routing is stronger than the local auto
-        # classifier. Blue-screen glass can look like ordinary edge cleanup in
-        # scalar statistics, but a color-protection floor turns transparent
-        # screen tint into dirty foreground residue. For glass buttons the
-        # simplest robust contract is: send a full-frame hint and let
-        # CorridorKey own the matte, with color protection forcibly disabled.
+    if execution_profile == "auto":
+        if hard_ui_hint_mode == "translucent_button":
+            execution_profile = "corridorkey-transparent-button"
+        elif analysis.parameter_profile == "composite_character_corridor_only":
+            execution_profile = "corridorkey-character"
+        elif analysis.parameter_profile == "translucent_button":
+            execution_profile = "corridorkey-transparent-button"
+        elif analysis.parameter_profile == "screen_tinted_translucency":
+            execution_profile = "corridorkey-effect-icon"
+        else:
+            execution_profile = "corridorkey-shaped-icon"
+
+    if preset != "manual" and execution_profile in {
+        "corridorkey-transparent-button",
+        "corridorkey-effect-icon",
+    }:
+        # The router has already decided this asset needs CorridorKey's
+        # translucent/complex-boundary profile. Keep the full recipe here so
+        # button/effect routes cannot inherit key-color material protection.
         forced_translucent_hint_settings = analysis.parameter_profile not in {
             "translucent_button",
             "screen_tinted_translucency",
@@ -2988,12 +3002,14 @@ def _matte_image_comfy_corridorkey(
         apply_color_protection = False
         color_protection_bg_max = 6.0
         color_protection_fg_min = 14.0
-    if preset != "manual" and analysis.parameter_profile == "composite_character_corridor_only":
-        # This experimental role path is specifically a CorridorKey-capability
-        # probe: full-frame hint, no color-protection ownership, and no local
-        # material repair. Force the color-protection knob off so Web's default
-        # checkbox cannot accidentally turn the experiment back into a protected
-        # mixed-material route.
+    if preset != "manual" and execution_profile == "corridorkey-character":
+        # Character is a first-class route profile: full-frame CorridorKey
+        # control, no color-protection ownership, and detail-safe cleanup.
+        gamma_space = "sRGB"
+        despill_strength = 1.0
+        refiner_strength = 1.0
+        auto_despeckle = "Off"
+        despeckle_size = 64
         apply_color_protection = False
         color_protection_bg_max = 6.0
         color_protection_fg_min = 14.0
@@ -3011,18 +3027,15 @@ def _matte_image_comfy_corridorkey(
         # hint; hard-UI strategies are used only when the caller opts in.
         hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
         hint_source = "all_white_alpha_hint"
-    elif hard_ui_hint_mode == "translucent_button":
+    elif execution_profile == "corridorkey-transparent-button":
         hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
         hint_source = "glass_all_white_corridorkey_hint"
-    elif analysis.parameter_profile == "composite_character_corridor_only":
+    elif execution_profile == "corridorkey-character":
         hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
         hint_source = "character_all_white_corridorkey_hint"
-    elif analysis.parameter_profile in {
-        "translucent_button",
-        "screen_tinted_translucency",
-    }:
+    elif execution_profile == "corridorkey-effect-icon":
         hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-        hint_source = "glass_auto_all_white_corridorkey_hint"
+        hint_source = "effect_all_white_corridorkey_hint"
     elif analysis.parameter_profile.startswith("opaque_hard_ui"):
         if hard_ui_hint_mode == "boundary_2px":
             hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
@@ -3060,6 +3073,7 @@ def _matte_image_comfy_corridorkey(
         color_protection_bg_max=color_protection_bg_max,
         color_protection_fg_min=color_protection_fg_min,
         protect_hint_supported_material=analysis.parameter_profile == "key_color_material",
+        execution_profile=execution_profile,
     )
     subject_alpha = remote.alpha
     subject_foreground_srgb = remote.foreground_srgb
@@ -3208,6 +3222,7 @@ def _matte_image_comfy_corridorkey(
         "shadow": shadow_info,
         "hard_ui_hint": {
             "mode": hard_ui_hint_mode,
+            "execution_profile": execution_profile,
             "forced_translucent_settings": forced_translucent_hint_settings,
             "solid_interior_pixels": solid_interior_pixels,
             "material_floor_lift_pixels": material_floor_lift_pixels,

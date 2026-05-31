@@ -677,7 +677,9 @@ class ComfyUICorridorKeyClient:
         color_protection_bg_max: float = 12.0,
         color_protection_fg_min: float = 28.0,
         protect_hint_supported_material: bool = False,
+        execution_profile: str = "auto",
     ) -> ComfyCorridorKeyResult:
+        del execution_profile
         if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
             raise ValueError("matte() expects HxWx3 sRGB uint8")
         if gamma_space not in {"sRGB", "Linear"}:

@@ -94,6 +94,7 @@ class RouteDecision:
             "asset_kind": self.asset_kind,
             "selected_backend": self.backend,
             "parameter_profile": parameter_profile,
+            "execution_profile": self.params.get("execution_profile"),
             "params": self.params,
             "confidence": self.confidence,
             "reasons": self.reasons,
@@ -543,8 +544,13 @@ def _route_asset_kind(image_srgb: np.ndarray, profile: str, screen_mode: str) ->
     return "unknown"
 
 
-def _pymatting_route_params(background_color: tuple[int, int, int]) -> dict[str, Any]:
+def _pymatting_route_params(
+    background_color: tuple[int, int, int],
+    *,
+    execution_profile: str = "pymatting-known-b",
+) -> dict[str, Any]:
     return {
+        "execution_profile": execution_profile,
         "pymatting_method": "cf",
         "pymatting_image_space": "linear",
         "pymatting_bg_source": "custom",
@@ -558,9 +564,11 @@ def _pymatting_route_params(background_color: tuple[int, int, int]) -> dict[str,
     }
 
 
-def _corridorkey_route_params(analysis: Any) -> dict[str, Any]:
+def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[str, Any]:
     settings = analysis.recommended_settings
     return {
+        "execution_profile": execution_profile,
+        "corridorkey_execution_profile": execution_profile,
         "corridorkey_screen_mode": analysis.screen_mode,
         "corridorkey_preset": "auto",
         "corridorkey_gamma_space": settings.gamma_space,
@@ -740,18 +748,25 @@ def classify_route(
         asset_kind in {"icon", "character"}
         or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
     ):
-        params = _corridorkey_route_params(ck)
+        if asset_kind == "character":
+            execution_profile = "corridorkey-character"
+        elif asset_kind == "button":
+            execution_profile = "corridorkey-transparent-button"
+        elif profile == "screen_tinted_translucency":
+            execution_profile = "corridorkey-effect-icon"
+        else:
+            execution_profile = "corridorkey-shaped-icon"
+
+        params = _corridorkey_route_params(ck, execution_profile=execution_profile)
+        if asset_kind == "button":
+            # The router owns the transparent/glass-button decision and sends
+            # the complete execution recipe. Downstream code should not infer
+            # button behavior from CorridorKey's generic semantic profile.
+            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         if complex_button_boundary and asset_kind == "button" and profile not in button_corridor_profiles:
             reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
-            # Complex-boundary button routing is the glass/translucent escape
-            # hatch. Force the same full-frame hint profile that explicit
-            # CorridorKey glass tests use, because bbox/keyed hints can turn
-            # transparent screen tint into broad foreground residue.
-            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         else:
             reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")
-            if asset_kind == "button" and profile in button_corridor_profiles:
-                params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         return RouteDecision(
             route="corridorkey",
             asset_kind=asset_kind,
@@ -775,14 +790,20 @@ def classify_route(
             route="pymatting_known_b",
             asset_kind=asset_kind if asset_kind != "unknown" else "known_bg_graphic",
             backend="comfy-pymatting-known-b",
-            params=_pymatting_route_params(stable_bg),
+            params=_pymatting_route_params(
+                stable_bg,
+                execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
+            ),
             confidence=float(max(0.45, ck.background_confidence, 0.80)),
             reasons=reasons,
             analysis=analysis,
         )
 
     reasons.append("unknown_or_unstable_background_uses_pymatting_fallback")
-    fallback_params = _pymatting_route_params(fallback_background_color)
+    fallback_params = _pymatting_route_params(
+        fallback_background_color,
+        execution_profile="pymatting-fallback",
+    )
     # Unknown fallback is not a true measured known-B screen. The normal
     # adaptive thresholding treats noisy/colorful borders as background noise
     # and can raise the foreground threshold until the trimap has no foreground

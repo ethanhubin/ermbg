@@ -2033,6 +2033,7 @@ def _route_metadata(result: MatteResponse) -> dict[str, Any]:
         "route": auto_route.get("route"),
         "asset_kind": auto_route.get("asset_kind"),
         "parameter_profile": auto_route.get("parameter_profile"),
+        "execution_profile": auto_route.get("execution_profile"),
         "route_confidence": auto_route.get("confidence"),
         "route_reasons": reasons,
     }

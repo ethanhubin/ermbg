@@ -405,6 +405,7 @@ class _LocalCorridorKeyClient:
         hint: np.ndarray,
         *,
         screen_color: str,
+        execution_profile: str,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         image_to_mask_cls = cls._registry_node_class("ImageToMask")
         if image_to_mask_cls is not None:
@@ -432,16 +433,21 @@ class _LocalCorridorKeyClient:
 
         hint_min = float(hint.min()) if hint.size else 0.0
         if hint_min >= 0.999:
-            # Full-frame hints are a control signal, not a foreground shape. A
-            # literal 1.0 mask makes CorridorKey own the whole frame; zero is
-            # right for blue glass, while the green checkpoint needs a small
-            # soft prior to preserve translucent material and particle effects.
-            if str(screen_color) == "green":
+            # Full-frame hints are a route-level control signal, not a literal
+            # foreground shape. Keep priors profile-specific so transparent
+            # buttons, characters, and effect icons cannot disturb each other.
+            if execution_profile == "corridorkey-character":
                 corridorkey_mask = np.full(hint.shape, 0.32, dtype=np.float32)
-                convention = "corridorkey_green_all_white_soft_prior"
+                convention = "corridorkey_character_full_frame_prior"
+            elif execution_profile == "corridorkey-transparent-button" and str(screen_color) != "green":
+                corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
+                convention = "corridorkey_transparent_button_zero_prior"
+            elif str(screen_color) == "green":
+                corridorkey_mask = np.full(hint.shape, 0.32, dtype=np.float32)
+                convention = f"{execution_profile}_green_full_frame_soft_prior"
             else:
                 corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
-                convention = "corridorkey_all_white_zero_prior"
+                convention = f"{execution_profile}_full_frame_zero_prior"
         else:
             # Shaped hints already describe foreground support for CorridorKey.
             # Inverting them turns known background into model-owned support,
@@ -494,6 +500,7 @@ class _LocalCorridorKeyClient:
         color_protection_bg_max: float = 12.0,
         color_protection_fg_min: float = 28.0,
         protect_hint_supported_material: bool = False,
+        execution_profile: str = "auto",
     ):
         del protect_hint_supported_material
         if hint_alpha is None:
@@ -521,6 +528,7 @@ class _LocalCorridorKeyClient:
         hint_tensor, corridorkey_mask_debug = self._corridorkey_mask_tensor_from_hint(
             hint,
             screen_color=str(screen_color),
+            execution_profile=str(execution_profile),
         )
         step_start = time.perf_counter()
         loaded_node = self._get_loaded_node()
@@ -610,6 +618,7 @@ class _LocalCorridorKeyClient:
                     "auto_despeckle": auto_despeckle,
                     "despeckle_size": int(despeckle_size),
                     "apply_color_protection": bool(apply_color_protection),
+                    "execution_profile": execution_profile,
                     "runner": runner,
                     "runner_module": runner_module,
                 },
@@ -763,6 +772,7 @@ class ErmbgRouteMatte:
                 refiner_strength=params.get("corridorkey_refiner_strength", 1.0),
                 auto_despeckle=params.get("corridorkey_auto_despeckle", "On"),
                 despeckle_size=params.get("corridorkey_despeckle_size", 400),
+                execution_profile=params.get("corridorkey_execution_profile", "auto"),
                 auto_route=auto_route,
             )
         elif selected_backend == "comfy-rmbg":

@@ -1400,7 +1400,8 @@ def test_matte_image_comfy_corridorkey_auto_glass_uses_all_white_hint(monkeypatc
         corridorkey_hard_ui_hint_mode="bbox_2px",
     )
 
-    assert captured["hint_source"] == "glass_auto_all_white_corridorkey_hint"
+    assert captured["hint_source"] == "glass_all_white_corridorkey_hint"
+    assert captured["execution_profile"] == "corridorkey-transparent-button"
     assert np.all(captured["hint_alpha"] == 1.0)
     assert captured["apply_color_protection"] is False
     assert result.debug["hard_ui_hint"]["solid_interior_pixels"] == 0
@@ -1493,6 +1494,7 @@ def test_matte_image_comfy_corridorkey_composite_character_uses_all_white_no_pro
 
     assert result.debug["corridorkey_analysis"]["parameter_profile"] == "composite_character_corridor_only"
     assert captured["hint_source"] == "character_all_white_corridorkey_hint"
+    assert captured["execution_profile"] == "corridorkey-character"
     assert np.all(captured["hint_alpha"] == 1.0)
     assert captured["apply_color_protection"] is False
     assert captured["protect_hint_supported_material"] is False
