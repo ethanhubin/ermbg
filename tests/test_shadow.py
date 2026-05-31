@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from ermbg import io
-from ermbg.matting import matte
 from ermbg.planner import RiskRegion
 from ermbg.shadow import (
     ShadowPrior,
@@ -374,33 +373,3 @@ def test_shadow_prior_from_planner_regions_maps_semantic_masks():
     assert int(prior.subject_mask.sum()) == int(subject_mask.sum())
     assert int(prior.shadow_ownership_mask.sum()) == int(shadow_mask.sum())
 
-
-def test_matte_composites_detected_shadow_behind_subject():
-    image, subject, shadow_gt, bg = _green_subject_with_shadow(shadow=True)
-
-    result = matte(image, segmenter=_StubSegmenter(subject))
-    shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
-
-    assert result.debug["shadow"]["detected"] is True
-    assert result.debug["subject_alpha"][shadow_core].mean() < 0.05
-    assert result.debug["shadow_alpha_physical"][shadow_core].mean() > 0.20
-    assert result.debug["shadow_alpha"][shadow_core].mean() < result.debug["shadow_alpha_physical"][shadow_core].mean()
-    assert result.alpha[shadow_core].mean() > 0.20
-
-    bg_arr = np.asarray(bg, dtype=np.float32).reshape(1, 1, 3)
-    rgba = result.rgba.astype(np.float32)
-    a = rgba[..., 3:4] / 255.0
-    viewer_comp = rgba[..., :3] * a + bg_arr * (1.0 - a)
-    assert np.abs(viewer_comp[shadow_core] - image.astype(np.float32)[shadow_core]).mean() < 3.0
-
-
-def test_matte_shadow_mode_off_skips_shadow_recovery():
-    image, subject, shadow_gt, _ = _green_subject_with_shadow(shadow=True)
-
-    result = matte(image, segmenter=_StubSegmenter(subject), shadow_mode="off")
-    shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
-
-    assert result.debug["shadow"]["detected"] is False
-    assert result.debug["shadow"]["mode"] == "off"
-    assert float(result.debug["shadow_alpha_physical"].max()) == 0.0
-    assert result.alpha[shadow_core].mean() < 0.05

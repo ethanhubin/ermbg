@@ -33,8 +33,10 @@ Workflow templates live in `ermbg/probe/comfyui_*.json`, with `${variable}` plac
 
 | Task | Where |
 |---|---|
-| Full ERMBG AutoMatte / Web default matting | ComfyUI (`ErmbgAutoMatte`, backend `comfy-ermbg`) |
-| BiRefNet-matting (1 GB) | Local MPS (`ermbg.segmenter.BiRefNetSegmenter`) |
+| Full ERMBG Web/API auto matting | ComfyUI `ErmbgRouteMatte` (Mac only uploads, submits, polls, downloads) |
+| Route decision debugging/custom graphs | ComfyUI `ErmbgRouteStrategy` or local `ermbg.router.classify_route()` |
+| Hard known-background buttons | ComfyUI `ErmbgPyMattingKnownB` / backend `comfy-pymatting-known-b` |
+| Icon/character/glass known-screen assets | ComfyUI `comfy-corridorkey` |
 | BRIA RMBG-2.0 (gated) | ComfyUI (`BriaRemoveImageBackground` node) |
 | RMBG-1.4 / IS-Net family | ComfyUI (`Image Rembg` with `isnet-general-use`) |
 | SDXL / FLUX / Qwen-Edit generation | ComfyUI (always) |
@@ -50,11 +52,10 @@ Workflow templates live in `ermbg/probe/comfyui_*.json`, with `${variable}` plac
 
 ```
 ermbg/
-  segmenter.py        BiRefNet (default: ZhengPeng7/BiRefNet-matting)
-  matting.py          end-to-end pipeline
+  segmenter.py        legacy segmenter helpers for standalone diagnostics
   diagnose.py         background diagnoser (B, purity, edge_q10)
-  trimap.py           trimap construction (legacy path only)
-  alpha.py            projection / per-channel / guided filter (legacy path)
+  trimap.py           known-B trimap utilities
+  alpha.py            archived alpha helpers
   foreground.py       KNN F_ref (used by despill.local_borrow)
   recover.py          legacy decontamination (deprecated)
   despill.py          chroma_cap | local_borrow | closed_form | none
@@ -66,7 +67,6 @@ ermbg/
     synthetic.py      mask-and-paste baseline
     sdxl_inpaint.py   archived local SDXL inpainting path; do not run on Mac
     comfyui.py        Qwen-Edit via remote ComfyUI
-    comfyui_ermbg_matte.py  full ERMBG AutoMatte via remote ComfyUI
     openai_image.py   gpt-image-1 via OpenAI API
     comfyui_*.json    workflow templates
     prompts.py        GREEN_SCREEN_RGB / GREEN_SCREEN_PROMPT
@@ -133,8 +133,8 @@ After any change to [ermbg/web.py](ermbg/web.py), Web UI behavior, Web API behav
 
 - After starting, verify all three layers before reporting success:
   1. `lsof -nP -iTCP:7860 -sTCP:LISTEN` shows the expected `.venv/bin/python -m uvicorn ermbg.web:app` process.
-  2. `curl -sS http://127.0.0.1:7860/` contains a marker from the change under test, not just any HTML response. For backend changes, verify expected option/text such as `comfy-ermbg`, `server_elapsed_sec`, or the specific UI string under test.
-  3. Run a real HTTP smoke test through `127.0.0.1:7860`, not only `TestClient`. For Comfy-backed matting, post a small PNG to `/api/matte-candidates` with `backend=comfy-ermbg` and confirm status 200 plus JSON `backend == "comfy-ermbg"` and `server_elapsed_sec` is present.
+  2. `curl -sS http://127.0.0.1:7860/` contains a marker from the change under test, not just any HTML response. For backend changes, verify expected option/text such as `comfy-pymatting-known-b`, `comfy-corridorkey`, `comfy-rmbg`, `server_elapsed_sec`, or the specific UI string under test.
+  3. Run a real HTTP smoke test through `127.0.0.1:7860`, not only `TestClient`. For Comfy-backed matting, post representative PNGs to `/api/matte-candidates` with `backend=auto` and confirm status 200 plus JSON route metadata and `server_elapsed_sec`.
 
 - If Web reports a ComfyUI connection error, compare from the same shell before changing algorithm code:
 
@@ -151,9 +151,12 @@ After any change to [ermbg/web.py](ermbg/web.py), Web UI behavior, Web API behav
 
 ### Comfy ERMBG development contract
 
-`comfy-ermbg` is the production matting path. The Web UI and slice-to-matte flow
-use the remote ComfyUI `ErmbgAutoMatte` node because local full matting is too
-slow for normal interactive use.
+ERMBG is the production route strategy layer. Web auto and slice-to-matte flow
+use `backend=auto`, which submits a single remote ComfyUI `ErmbgRouteMatte`
+prompt. The Mac side only uploads the input, submits the workflow, polls
+  ComfyUI, and downloads foreground/alpha/metadata; route analysis, parameter
+  selection, CorridorKey, PyMatting Known-B, PyMatting fallback, passthrough,
+  and ShadowPatch all run inside the Comfy process.
 
 - Local Python changes under `ermbg/` are source changes, not sufficient
   deployment proof. After Web-facing or algorithmic changes, verify the remote
@@ -187,8 +190,9 @@ slow for normal interactive use.
   reloaded changed modules. For faster iteration, start ComfyUI with
   `ERMBG_DEV_RELOAD=1` (see [scripts/restart_comfy_ssh.sh](scripts/restart_comfy_ssh.sh)
   `--dev-reload`), then ordinary `ermbg/` source syncs are picked up on the
-  next `ErmbgAutoMatte` prompt. If dev reload is off, a behavior change may
-  still require a ComfyUI restart even after `--smoke` passes.
+  next `ErmbgRouteMatte` / route / PyMatting node prompt. If dev reload is off,
+  a behavior change may still require a ComfyUI restart even after `--smoke`
+  passes.
 - Only use `--nodes` when `comfy_nodes/` changed. That syncs the Comfy custom
   node wrapper and requires a ComfyUI restart because Comfy loads node classes
   at startup:
@@ -199,7 +203,7 @@ slow for normal interactive use.
 
 - Pure source syncs do not reinstall packages. However, the current running
   ComfyUI process may keep already-imported Python modules in memory. If a
-  synced algorithm change is not reflected in `comfy-ermbg`, restart ComfyUI
+  synced algorithm change is not reflected in `ErmbgRouteMatte`, restart ComfyUI
   once before debugging the algorithm further.
 - When restarting ComfyUI for ERMBG work, prefer the offline restart helper:
 
@@ -211,9 +215,8 @@ slow for normal interactive use.
   cached BiRefNet model is used without blocking on Hugging Face HEAD requests.
 - Keep `comfy_nodes/` compatible with local API changes and update/restart the
   remote custom-node install when the node wrapper or called API surface changes.
-- Use [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md) as the
-  checklist for required pytest groups, direct `backend="comfy-ermbg"` smoke,
-  and `/api/matte-candidates` Web smoke.
+- Use [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md) as the
+  checklist for required pytest groups and `/api/matte-candidates` Web smoke.
 - Generated game-eval samples do not replace real user regressions. Add real
   failure classes under `samples/regression/<case_id>/input.png` with a
   `case.json`, and add at least one focused pytest guard that can run without
@@ -221,7 +224,9 @@ slow for normal interactive use.
 
 ## Default decisions
 
-- **Matting model**: `ZhengPeng7/BiRefNet-matting` (MIT, matting-trained)
+- **Auto route**: Web/API `backend=auto` always goes through remote
+  `ErmbgRouteMatte`, which dispatches to PyMatting Known-B, CorridorKey,
+  PyMatting fallback, or passthrough in ComfyUI. Auto does not invoke RMBG.
 - **Background convention**: green-screen RGB (0, 200, 0) — see `ermbg.probe.prompts.GREEN_SCREEN_PROMPT`
 - **Despill default**: `chroma_cap` (auto-degrades to `local_borrow` when B has no dominant channel)
 - **QA backgrounds**: black / white / grey / cyan / magenta / checker, plus a `_lightwrap` screen for each
@@ -230,15 +235,16 @@ slow for normal interactive use.
 
 - Local ownership decision semantics are documented in `docs/local-ownership.md`.
 - Use local, deterministic ownership scoring from measurable known-background evidence for ownership decisions.
-- The Web UI default backend is `comfy-ermbg`; slice-to-matte transfer also selects `comfy-ermbg`. This runs the full ERMBG pipeline in the remote ComfyUI `ErmbgAutoMatte` node and returns foreground/alpha outputs to the Mac-side Web server.
+- The Web UI default backend is `auto`; slice-to-matte transfer also selects
+  `auto`, so the full route and matting work executes in `ErmbgRouteMatte`.
 - Do not add Web quick paths that skip shadow removal. Web matting must preserve `WEB_SHADOW_MODE = "on"` unless Ethan explicitly asks for a preview-only speed mode.
 - Local ownership flow:
   1. local matte and known-background diagnosis compute `B`, alpha, and foreground/debug outputs;
   2. local evidence extractors produce risk/debug regions;
   3. `ermbg.ownership.rank_regions_ownership()` ranks each region as `hole`, `opaque_subject`, `subject_soft_layer`, `shadow_like_layer`, or `conservative_unknown`;
   4. `ermbg.ownership.resolve_execution_masks()` performs global arbitration before any role becomes an execution mask;
-  5. `ermbg.matting.matte()` uses `subject_material_mask` only as a protective constraint, restoring soft-layer alpha after destructive keyer/repair changes;
-  6. shadow opacity is still measured locally from `C_linear ~= scale * B_linear`.
+  5. legacy protected reruns are removed from production; ownership evidence remains diagnostic.
+  6. shadow opacity is still measured locally from `C_linear ~= scale * B_linear` in maintained known-B/CorridorKey paths.
 - Do not route ownership ambiguity to model planning by default. First inspect local signals, role scores, execution masks, and whether foreground/color recovery is the real failure.
 - Use focused B/I/C subsets from `samples/corridorkey_semantic/manifest.json` for fast loops; full route/eval work should run through the manifest-backed batch flow.
 - Documents under `docs/archive/` are historical reference only; do not treat archived plans as active instructions.

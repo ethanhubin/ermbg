@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 torch = pytest.importorskip("torch")
 
@@ -21,9 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from comfy_nodes.ermbg_nodes import (  # noqa: E402
     ConvertMasksToImages,
-    ErmbgAutoMatte,
     ErmbgClassify,
     ErmbgPyMattingKnownB,
+    ErmbgRouteStrategy,
     _dev_reload_ermbg_modules,
     _mask_to_numpy,
 )
@@ -39,15 +40,6 @@ def _to_comfy_image(arr_uint8: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr_uint8.astype(np.float32) / 255.0).unsqueeze(0)
 
 
-@pytest.fixture
-def _force_grabcut(monkeypatch):
-    """Force the matting backend to grabcut so tests don't download BiRefNet."""
-    import ermbg.api as api
-
-    real = api.build_segmenter
-    monkeypatch.setattr(api, "build_segmenter", lambda backend="auto", **kw: real(backend="grabcut"))
-
-
 def test_classify_node_returns_strings():
     img = _to_comfy_image(_green_with_red_subject())
     node = ErmbgClassify()
@@ -57,28 +49,23 @@ def test_classify_node_returns_strings():
     assert "saturated_bg" in payload_json
 
 
-def test_automatte_returns_image_mask_summary(_force_grabcut):
-    img = _to_comfy_image(_green_with_red_subject())
-    node = ErmbgAutoMatte()
-    fg, alpha, summary, rgba_rgb = node.run(
-        image=img,
-        despill="auto (router decides)",
-        use_keyer="auto (router decides)",
-        bg_color="0,200,0",
-        matting_model="ZhengPeng7/BiRefNet-matting",
-        shadow_mode="off",
+def test_route_strategy_node_runs_server_side_router():
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
     )
-    # IMAGE convention: [B, H, W, C] float
-    assert fg.shape == (1, 128, 128, 3)
-    assert fg.dtype == torch.float32
-    assert rgba_rgb.shape == (1, 128, 128, 3)
-    assert rgba_rgb.dtype == torch.float32
-    # MASK convention: [B, H, W] float
-    assert alpha.shape == (1, 128, 128)
-    # The AutoMatte node itself already runs inside ComfyUI, so it must execute
-    # ERMBG locally instead of submitting a nested comfy-* prompt to the server.
-    assert "saturated_bg" in summary
-    assert "comfy_corridorkey" not in summary
+    img = _to_comfy_image(np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8))
+    node = ErmbgRouteStrategy()
+    backend, route, asset_kind, payload_json = node.run(
+        image=img,
+        screen_mode="auto",
+        preset="auto",
+        fallback_bg_color="0,200,0",
+    )
+    assert backend == "comfy-pymatting-known-b"
+    assert route == "pymatting_known_b"
+    assert asset_kind == "button"
+    assert '"selected_backend": "comfy-pymatting-known-b"' in payload_json
 
 
 def test_dev_reload_is_opt_in(monkeypatch):
@@ -88,33 +75,7 @@ def test_dev_reload_is_opt_in(monkeypatch):
     monkeypatch.setenv("ERMBG_DEV_RELOAD", "1")
     note = _dev_reload_ermbg_modules()
     assert note.startswith("dev_reload=")
-    assert "matting" in note
-
-
-def test_automatte_with_source_mask_passes_through(_force_grabcut):
-    """A clean RGBA-style source mask should let the node use passthrough."""
-    h, w = 128, 128
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    cy, cx = h // 2, w // 2
-    rad = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    a = np.clip((40.0 - rad) / 4.0, 0.0, 1.0).astype(np.float32)
-    F = np.array([220, 30, 30], dtype=np.float32)
-    rgb = (a[..., None] * F).astype(np.uint8)
-
-    img = _to_comfy_image(rgb)
-    mask = torch.from_numpy(a).unsqueeze(0)
-
-    node = ErmbgAutoMatte()
-    _, _, summary, _ = node.run(
-        image=img,
-        despill="auto (router decides)",
-        use_keyer="auto (router decides)",
-        bg_color="0,200,0",
-        matting_model="ZhengPeng7/BiRefNet-matting",
-        shadow_mode="off",
-        source_mask=mask,
-    )
-    assert "rgba_passthrough" in summary
+    assert "router" in note
 
 
 def test_pymatting_known_b_node_returns_outputs():

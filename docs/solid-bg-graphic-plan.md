@@ -284,12 +284,10 @@ file.
 2. Add focused synthetic tests for ownership roles before wiring it into Web.
 3. Teach the router to choose `solid_bg_graphic` only for high-confidence
    stable solid backgrounds and graphic-like assets.
-4. In `matting.py`, try `solid_bg_graphic` before building/running the
-   segmenter; fallback to the existing path when confidence is insufficient.
-5. Update Comfy/Web debug summaries to expose the chosen path and ownership
-   masks.
-6. Run local tests, direct remote `backend="comfy-ermbg"` regression, and real
-   Web HTTP smoke.
+4. This older local prepass is superseded by ERMBG route strategy plus
+   PyMatting Known-B for deterministic hard UI.
+5. Keep the mechanism tests as isolated ownership/analysis guards.
+6. Run local tests, auto-route manifest audit, and real Web HTTP smoke.
 
 ## Pixel-Patch Cleanup TODO
 

@@ -6,10 +6,8 @@ import numpy as np
 import pytest
 
 from ermbg import io
-from ermbg.matting import matte
 from ermbg.ownership import ownership_masks, rank_region_ownership, resolve_execution_masks
 from ermbg.planner import RiskRegion
-from ermbg.vlm_semantic import MattingSemanticPrior
 
 pytestmark = pytest.mark.core
 
@@ -141,24 +139,3 @@ def test_resolve_execution_masks_suppresses_shadow_fragments_inside_soft_layer()
     assert int(resolved["subject_soft_layer"].sum()) == 6400
     assert not resolved["shadow_like_layer"].any()
 
-
-def test_matte_subject_material_prior_restores_soft_alpha_after_keyer_gate():
-    image = np.full((48, 64, 3), (0, 200, 0), dtype=np.uint8)
-    soft = np.zeros((48, 64), dtype=np.float32)
-    soft[16:32, 22:42] = 0.45
-    material = soft > 0
-
-    unprotected = matte(image, segmenter=_StubSegmenter(soft))
-    protected = matte(
-        image,
-        segmenter=_StubSegmenter(soft),
-        semantic_prior=MattingSemanticPrior(
-            subject_material_mask=material.astype(np.float32),
-            subject_mask=material.astype(np.float32),
-            source="test",
-        ),
-    )
-
-    assert unprotected.alpha[material].mean() < 0.05
-    assert protected.alpha[material].mean() > 0.40
-    assert protected.debug["keyer"]["subject_material_keyer_reverted_pixels"] == int(material.sum())

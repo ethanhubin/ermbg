@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 import pytest
 
-from ermbg import io, matte_image
+from ermbg import io
 from ermbg.colorspace import oklab_distance, srgb_to_oklab
 from ermbg.qa import composite
 from ermbg.solid_graphic import analyze_solid_bg_graphic, _local_background_family_continuity_mask
@@ -572,22 +570,3 @@ def test_solid_background_photo_like_subject_falls_back():
 
     assert result.accepted is False
     assert result.reason == "subject palette is photo-like"
-
-
-def test_real_small_ui_icon_can_use_solid_graphic_prepass():
-    path = Path("samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png")
-
-    result = matte_image(str(path), backend="grabcut", qa=False)
-
-    assert result.strategy_name == "solid_bg_graphic"
-    assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"
-
-
-def test_real_wide_star_button_can_use_solid_graphic_prepass():
-    path = Path("samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png")
-
-    result = matte_image(str(path), backend="grabcut", qa=False)
-
-    assert result.strategy_name == "solid_bg_graphic"
-    assert result.report["strategy"]["extras"]["fallback_strategy"] == "saturated_bg"
-    assert result.report["strategy"]["extras"]["solid_graphic_confidence"] > 0.90

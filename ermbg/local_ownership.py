@@ -15,7 +15,6 @@ import numpy as np
 
 from .candidates import MatteCandidate
 from .keyer import key_alpha
-from .matting import matte
 from .ownership import rank_regions_ownership, resolve_execution_masks
 from .planner import RiskRegion
 from .risk import (
@@ -25,8 +24,6 @@ from .risk import (
     extract_same_bg_enclosed_regions,
     extract_translucent_candidate_regions,
 )
-from .segmenter import build_segmenter
-from .vlm_semantic import MattingSemanticPrior
 
 
 @dataclass(frozen=True)
@@ -155,47 +152,16 @@ def generate_local_ownership_candidate(
     soft_mask: np.ndarray | None = None,
     shadow_mode: str = "on",
 ) -> MatteCandidate | None:
-    """Return a protected local-ownership candidate when soft material exists."""
-    analysis = analyze_local_ownership(image_srgb, base_rgba, background_color)
-    soft_mask = analysis.role_masks["subject_soft_layer"]
-    if not soft_mask.any():
-        return None
+    """Legacy protected rerun candidate.
 
-    shadow_mask = analysis.role_masks["shadow_like_layer"]
-    semantic_prior = MattingSemanticPrior(
-        subject_material_mask=soft_mask.astype(np.float32),
-        subject_mask=soft_mask.astype(np.float32),
-        shadow_ownership_mask=(
-            shadow_mask.astype(np.float32)
-            if shadow_mask.any()
-            else np.zeros(image_srgb.shape[:2], dtype=np.float32)
-        ),
-        source="local_ownership",
-    )
-    seg = segmenter if segmenter is not None or soft_mask is not None else build_segmenter(backend=backend)
-    protected = matte(
-        image_srgb,
-        segmenter=seg,
-        semantic_prior=semantic_prior,
-        soft_mask=soft_mask,
-        shadow_mode=shadow_mode,
-    )
-    return MatteCandidate(
-        id="local_ownership",
-        label="Local Ownership",
-        rgba=protected.rgba,
-        selected=True,
-        debug={
-            "local_ownership": {
-                "region_count": len(analysis.regions),
-                "role_mask_pixels": analysis.role_mask_pixels,
-                "evidence_info": analysis.evidence_info,
-                "ownership": analysis.ownership,
-                "protected_keyer": protected.debug.get("keyer", {}),
-                "protected_shadow": protected.debug.get("shadow", {}),
-            }
-        },
-    )
+    The old implementation re-entered the removed ERMBG full-matting pipeline
+    with semantic protection masks. Keep the public hook as a no-op so Web
+    candidate rendering and old callers remain stable while local ownership
+    evidence can still be inspected through ``analyze_local_ownership``.
+    """
+    del backend, segmenter, soft_mask, shadow_mode
+    analysis = analyze_local_ownership(image_srgb, base_rgba, background_color)
+    return None
 
 
 def _counts(regions: list[RiskRegion]) -> dict[str, int]:

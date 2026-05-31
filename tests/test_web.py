@@ -1,4 +1,4 @@
-"""Tests for the ERMBG web service."""
+"""Tests for the RMBG web service."""
 
 from __future__ import annotations
 
@@ -93,11 +93,11 @@ def test_index_serves_upload_ui():
     assert 'sourceFrame.appendChild(img); img.src = pending.rgb;' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>auto</option>' in response.text
+    assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' in response.text
     assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' in response.text
-    assert '<option value="comfy-ermbg">comfy-ermbg</option>' in response.text
+    assert '<option value="comfy-rmbg">comfy-rmbg</option>' in response.text
     assert 'id="corridorkey-settings" open' in response.text
     assert 'id="pymatting-settings" open' in response.text
     assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
@@ -173,7 +173,7 @@ def test_slice_page_serves_slice_mode_entry():
     client = TestClient(app)
     response = client.get("/slice")
     assert response.status_code == 200
-    assert "ERMBG 切图" in response.text
+    assert "RMBG 切图" in response.text
     assert 'href="/">返回抠图</a>' in response.text
     assert '"/api/slice-preview"' in response.text
     assert '"/api/slice-crops"' in response.text
@@ -197,7 +197,7 @@ def test_game_eval_page_serves_result_table():
     client = TestClient(app)
     response = client.get("/eval/game")
     assert response.status_code == 200
-    assert "ERMBG Game Eval" in response.text
+    assert "RMBG Game Eval" in response.text
     assert 'id="run-select"' in response.text
     assert 'id="start-full-eval"' in response.text
     assert 'id="eval-panel"' in response.text
@@ -205,9 +205,8 @@ def test_game_eval_page_serves_result_table():
     assert "选择测试样本" in response.text
     assert "选择测试路径" in response.text
     assert 'id="eval-test-path"' in response.text
-    assert '<option value="auto" selected>Auto</option>' in response.text
+    assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
     assert '<option value="corridorkey">CorridorKey</option>' in response.text
-    assert '<option value="ermbg">ERMBG</option>' in response.text
     assert '<option value="rmbg">RMBG</option>' in response.text
     assert "全选" in response.text
     assert "取消全选" in response.text
@@ -362,20 +361,20 @@ def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
     web._GAME_EVAL_JOBS.clear()
 
     client = TestClient(app)
-    response = client.post("/eval/game/run", json={"sample_ids": ["B002"], "test_path": "ermbg"})
+    response = client.post("/eval/game/run", json={"sample_ids": ["B002"], "test_path": "rmbg"})
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["runId"].startswith("ermbg_")
+    assert payload["runId"].startswith("rmbg_")
     assert payload["progress"]["total"] == 1
     process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
     assert "--backend" in process.command
-    assert "comfy-ermbg" in process.command
+    assert "comfy-rmbg" in process.command
     launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
     launch_payload = json.loads(launch.read_text(encoding="utf-8"))
-    assert launch_payload["backend"] == "comfy-ermbg"
-    assert launch_payload["test_path"] == "ermbg"
-    assert launch_payload["test_path_label"] == "ERMBG"
+    assert launch_payload["backend"] == "comfy-rmbg"
+    assert launch_payload["test_path"] == "rmbg"
+    assert launch_payload["test_path_label"] == "RMBG"
 
 
 def test_game_eval_runs_order_by_mtime_and_default_latest(monkeypatch, tmp_path):
@@ -595,7 +594,7 @@ def test_game_eval_page_renders_solid_graphic_compare_batch(monkeypatch, tmp_pat
     assert "/eval/game/file/out/solid_graphic_game9_compare_20260527/B005_ui_panel_green/alpha_abs_diff.png" in response.text
 
 
-def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
+def test_game_eval_page_renders_comfy_rmbg_batch(monkeypatch, tmp_path):
     import ermbg.web as web
 
     sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "ui_panel"
@@ -634,7 +633,7 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
                     {
                         "case": "B005_green",
                         "phase": "remote",
-                        "backend": "comfy-ermbg",
+                        "backend": "comfy-rmbg",
                         "input": str(sample_root / "green.png"),
                         "elapsed_sec_client": 6.2,
                         "outputs": {
@@ -671,8 +670,8 @@ def test_game_eval_page_renders_comfy_ermbg_batch(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert "comfy_full_test_20260529" in response.text
-    assert "comfy-ermbg remote" in response.text
-    assert "comfy-ermbg" in response.text
+    assert "comfy-rmbg remote" in response.text
+    assert "comfy-rmbg" in response.text
     assert "contact sheet" not in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/rgba.png" in response.text
     assert "/eval/game/file/out/comfy_full_test_20260529/B005_green_remote/alpha.png" in response.text
@@ -771,7 +770,7 @@ def test_matte_endpoint_returns_png(monkeypatch):
     response = client.post(
         "/api/matte",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "grabcut"},
+        data={"backend": "auto"},
     )
 
     assert response.status_code == 200
@@ -816,7 +815,7 @@ def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
     response = client.post(
         "/api/matte",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "grabcut"},
+        data={"backend": "auto"},
     )
 
     assert response.status_code == 200
@@ -850,7 +849,7 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "grabcut"},
+        data={"backend": "auto"},
     )
 
     assert response.status_code == 200
@@ -868,9 +867,9 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert Image.open(BytesIO(png)).mode == "RGBA"
 
 
-def test_matte_candidates_endpoint_serializes_comfy_ermbg_debug(monkeypatch):
+def test_matte_candidates_endpoint_serializes_comfy_rmbg_debug(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        assert backend == "comfy-ermbg"
+        assert backend == "comfy-rmbg"
         assert kwargs["shadow_mode"] == "on"
         del qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -882,7 +881,7 @@ def test_matte_candidates_endpoint_serializes_comfy_ermbg_debug(monkeypatch):
             rgba=rgba,
             alpha=np.ones((h, w), dtype=np.float32),
             foreground_srgb=rgba[..., :3],
-            strategy_name="comfy_ermbg",
+            strategy_name="comfy_rmbg",
             background_color=(0, 200, 0),
             debug={"soft_mask": np.ones((h, w), dtype=np.float32), "prompt_id": "prompt-1"},
         )
@@ -895,17 +894,17 @@ def test_matte_candidates_endpoint_serializes_comfy_ermbg_debug(monkeypatch):
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "comfy-ermbg"},
+        data={"backend": "comfy-rmbg"},
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["strategy"] == "comfy_ermbg"
-    assert payload["backend"] == "comfy-ermbg"
+    assert payload["strategy"] == "comfy_rmbg"
+    assert payload["backend"] == "comfy-rmbg"
     assert isinstance(payload["server_elapsed_sec"], float)
     assert payload["debug"]["prompt_id"] == "prompt-1"
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "远端 ERMBG", True)
+        ("auto", "远端 RMBG", True)
     ]
     assert payload["candidates"][0]["debug"]["remote"]["prompt_id"] == "prompt-1"
     assert payload["candidates"][0]["debug"]["remote"]["soft_mask"]["shape"] == [16, 16]
@@ -929,7 +928,14 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
             background_color=(0, 200, 0),
             debug={
                 "soft_mask": np.ones((h, w), dtype=np.float32),
-                "auto_route": {"selected_backend": "comfy-corridorkey", "reason": "green_screen"},
+                "auto_route": {
+                    "selected_backend": "comfy-corridorkey",
+                    "route": "corridorkey",
+                    "asset_kind": "icon",
+                    "parameter_profile": "edge_cleanup",
+                    "confidence": 0.82,
+                    "reasons": ["known_screen_icon_defaults_to_corridorkey"],
+                },
             },
         )
 
@@ -948,6 +954,11 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
     payload = response.json()
     assert payload["backend"] == "comfy-corridorkey"
     assert payload["requested_backend"] == "auto"
+    assert payload["route"] == "corridorkey"
+    assert payload["asset_kind"] == "icon"
+    assert payload["parameter_profile"] == "edge_cleanup"
+    assert payload["route_confidence"] == 0.82
+    assert payload["route_reasons"] == ["known_screen_icon_defaults_to_corridorkey"]
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "远端 CorridorKey", True)
     ]
@@ -1271,7 +1282,7 @@ def test_matte_candidates_endpoint_returns_same_color_hole_candidates(monkeypatc
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("ring.png", _ring_png_bytes(), "image/png")},
-        data={"backend": "grabcut"},
+        data={"backend": "auto"},
     )
 
     assert response.status_code == 200
@@ -1327,7 +1338,7 @@ def test_matte_candidates_endpoint_selects_local_ownership_candidate(monkeypatch
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "grabcut"},
+        data={"backend": "auto"},
     )
 
     assert response.status_code == 200

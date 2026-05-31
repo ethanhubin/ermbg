@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ermbg.router import assess_source_alpha, classify_strategy
+from ermbg.router import assess_source_alpha, classify_route, classify_strategy
 
 pytestmark = pytest.mark.core
 
@@ -137,6 +137,98 @@ def test_classify_clean_rgba_passes_through():
     s = classify_strategy(rgb, source_alpha=a)
     assert s.passthrough is True
     assert s.bg_type == "rgba_passthrough"
+
+
+def test_route_clean_rgba_passthrough():
+    rgb, a = _make_clean_rgba()
+    decision = classify_route(rgb, source_alpha=a)
+    assert decision.route == "rgba_passthrough"
+    assert decision.backend == "passthrough"
+    assert decision.asset_kind == "rgba"
+
+
+def test_route_hard_button_uses_pymatting_known_b():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "corridorkey_semantic"
+        / "button"
+        / "button_green_yellow_a_outlined_no_shadow"
+        / "green.png"
+    )
+    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    decision = classify_route(img)
+    assert decision.route == "pymatting_known_b"
+    assert decision.backend == "comfy-pymatting-known-b"
+    assert decision.asset_kind == "button"
+    assert decision.params["pymatting_bg_color"] == (0, 200, 0)
+
+
+def test_route_translucent_button_uses_corridorkey():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "corridorkey_semantic"
+        / "button"
+        / "button_green_yellow_c_translucent_soft_lite_shadow"
+        / "green.png"
+    )
+    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    decision = classify_route(img)
+    assert decision.route == "corridorkey"
+    assert decision.backend == "comfy-corridorkey"
+    assert decision.asset_kind == "button"
+
+
+def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundary_gate():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    for rel in [
+        "button/button_blue_green_c_translucent_no_shadow/blue.png",
+        "button/button_green_blue_c_translucent_soft_heavy_shadow/green.png",
+        "button/button_real_glass_blue_bg_yellow/blue.png",
+        "button/button_real_glass_blue_bg_green/blue.png",
+    ]:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        decision = classify_route(img)
+        assert decision.route == "corridorkey", rel
+        assert decision.asset_kind == "button", rel
+        complex_info = decision.analysis["complex_button_boundary"]
+        assert (
+            complex_info["gradient_gate"]
+            or complex_info["semi_alpha_gate"]
+            or complex_info["combined_glass_gate"]
+        ), rel
+
+
+def test_route_icon_and_character_use_corridorkey():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    icon = np.asarray(
+        Image.open(root / "icon/icon_icon_a01_hard_boundary_strong_outline/green.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+    character = np.asarray(
+        Image.open(root / "character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+    icon_decision = classify_route(icon)
+    character_decision = classify_route(character)
+    assert icon_decision.route == "corridorkey"
+    assert icon_decision.asset_kind == "icon"
+    assert character_decision.route == "corridorkey"
+    assert character_decision.asset_kind == "character"
+
+
+def test_route_unknown_unstable_background_uses_pymatting_fallback():
+    rng = np.random.default_rng(123)
+    img = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)
+    img[32:96, 32:96] = (20, 40, 180)
+    decision = classify_route(img, fallback_background_color=(0, 200, 0))
+    assert decision.route == "pymatting_fallback"
+    assert decision.backend == "comfy-pymatting-known-b"
+    assert decision.asset_kind == "unknown_fallback"
+    assert "unknown_or_unstable_background_uses_pymatting_fallback" in decision.reasons
+    assert decision.params["pymatting_bg_color"] == (0, 200, 0)
+    assert decision.params["pymatting_auto_adapt"] is False
 
 
 # --- broader bg-color sweep --------------------------------------------------

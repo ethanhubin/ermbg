@@ -140,32 +140,30 @@ COMFY_URL=http://127.0.0.1:8000
 If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
 address used by this repository.
 
-当前游戏 UI 资产自动路径是:蓝/绿已知幕布走 **`comfy-corridorkey` +
-ShadowPatch**,未知背景直接走 **`comfy-rmbg` fallback**。Mac 侧负责上传、
-HTTP 编排、背景/色彩分析、参数适配和 Web 候选管理,远端 ComfyUI
-`CorridorKey` 节点负责成熟绿幕细节抠图。`comfy-ermbg` 暂不进入自动路径,
-只保留为显式诊断/对照 backend。
-
-CorridorKey 路径会在远端主体层返回后运行本地 **ShadowPatch**:只有当本地
-known-background 阴影证据置信度高、且 CorridorKey 没有保留该阴影 alpha 时,
-才在主体层下方补一个独立 shadow layer。触发要保守;一旦触发,阴影支持会相对
-激进地覆盖完整软阴影尾部,最终由 CorridorKey 主体层在合成时遮住主体区域。
-这条路径不依赖 color protection 或 Hint 来救阴影。
+当前游戏 UI 资产自动路径统一由 ERMBG route strategy 决定:硬边按钮走
+**`comfy-pymatting-known-b`**,绿/蓝底 icon、character、玻璃/半透明按钮走
+**`comfy-corridorkey` + ShadowPatch**,未知/不稳定背景也走
+**`comfy-pymatting-known-b` PyMatting fallback**。
+Web/API 的 `backend="auto"` 现在提交单个 **ERMBG Route Matte** Comfy 节点;
+Mac 侧只负责上传输入、提交 workflow、轮询和拉取结果图/metadata。背景/色彩
+分析、参数适配、CorridorKey hint、ShadowPatch 和 PyMatting fallback 均在 Comfy 端运行。
 
 后续 Web/API 行为更新不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
 
 `comfy_nodes/` 提供:
 
-- **ERMBG AutoMatte**:IMAGE 加可选 source/subject mask -> foreground、alpha、debug summary。
+- **ERMBG Route Strategy**:在 Comfy 进程内运行同一套 auto 路由策略。
+- **ERMBG Route Matte**:生产 auto 节点,在 Comfy 进程内完成路由和具体抠图。
+- **ERMBG PyMatting Known-B**:已知背景硬边按钮路径。
 - **ERMBG Classify (preview)**:只跑 router,用于工作流分支。
 
 最简工作流:
 
 ```text
-KSampler -> VAEDecode -> ERMBG AutoMatte -> SaveImage(RGBA)
+KSampler -> VAEDecode -> ERMBG Route Matte -> foreground/alpha/rgba_rgb
 ```
 
-开发/迭代验证流程见 [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md)。
+开发/迭代验证流程见 [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md)。
 节点部署见 [comfy_nodes/README.md](comfy_nodes/README.md) 和 [DEPLOY.md](DEPLOY.md)。
 
 ## OpenClaw
@@ -226,8 +224,8 @@ case 需要带 `case.json` 并说明它覆盖的失败机制。
   当前开发主线:CorridorKey 游戏 UI 工作流、自动参数适配、蓝底路线和 Web mask 兜底。
 - [docs/local-ownership.md](docs/local-ownership.md):
   local ownership、执行层仲裁和当前复现命令。
-- [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md):
-  正式 `comfy-ermbg` 路径的开发、同步、远端 smoke 和 Web 验证流程。
+- [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md):
+  ERMBG auto 路由策略、Comfy 节点和 Web smoke 验证流程。
 - [docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md):
   当前全量测试样本、阶段状态和下一阶段路线。
 - [docs/archive/](docs/archive/):

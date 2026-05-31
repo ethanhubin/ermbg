@@ -39,34 +39,33 @@ from .local_ownership import generate_local_ownership_candidate
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
 ALLOWED_BACKENDS = {
-    "grabcut",
     "auto",
-    "birefnet",
     "comfy-rmbg",
-    "comfy-ermbg",
     "comfy-corridorkey",
     "pymatting-known-b",
     "comfy-pymatting-known-b",
 }
-REMOTE_DIRECT_BACKENDS = {"comfy-ermbg", "comfy-corridorkey", "pymatting-known-b", "comfy-pymatting-known-b"}
+REMOTE_DIRECT_BACKENDS = {
+    "passthrough",
+    "comfy-rmbg",
+    "comfy-corridorkey",
+    "pymatting-known-b",
+    "comfy-pymatting-known-b",
+}
 WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 GAME_SAMPLE_REL = Path("samples") / "corridorkey_semantic"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
 SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
-COMFY_ERMBG_EVAL_PREFIX = "comfy_"
 AUTO_EVAL_PREFIX = "auto_"
 CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
-ERMBG_EVAL_PREFIX = "ermbg_"
 RMBG_EVAL_PREFIX = "rmbg_"
 GAME_EVAL_RUN_PREFIXES = (
     LOCAL_OWNERSHIP_EVAL_PREFIX,
     SOLID_GRAPHIC_EVAL_PREFIX,
-    COMFY_ERMBG_EVAL_PREFIX,
     AUTO_EVAL_PREFIX,
     CORRIDORKEY_EVAL_PREFIX,
-    ERMBG_EVAL_PREFIX,
     RMBG_EVAL_PREFIX,
 )
 FAST_GAME_EVAL_SAMPLE_IDS = ("B001", "B016", "B031", "B046", "I011", "I019", "C004", "C009")
@@ -78,7 +77,7 @@ FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
 DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
     "auto": {
-        "label": "Auto",
+        "label": "Auto RouteMatte",
         "backend": "auto",
         "prefix": AUTO_EVAL_PREFIX,
     },
@@ -86,11 +85,6 @@ GAME_EVAL_TEST_PATHS = {
         "label": "CorridorKey",
         "backend": "comfy-corridorkey",
         "prefix": CORRIDORKEY_EVAL_PREFIX,
-    },
-    "ermbg": {
-        "label": "ERMBG",
-        "backend": "comfy-ermbg",
-        "prefix": ERMBG_EVAL_PREFIX,
     },
     "rmbg": {
         "label": "RMBG",
@@ -289,7 +283,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>auto</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option><option value="comfy-ermbg">comfy-ermbg</option><option value="grabcut">grabcut</option><option value="birefnet">birefnet</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto RouteMatte</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -990,14 +984,14 @@ def _matte_page_html() -> str:
       <label>
         后端
         <select id="backend" name="backend">
-          <option value="auto" selected>auto</option>
+          <option value="auto" selected>Auto RouteMatte</option>
           <option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>
           <option value="pymatting-known-b">pymatting-known-b</option>
           <option value="comfy-corridorkey">comfy-corridorkey</option>
           <option value="comfy-rmbg">comfy-rmbg</option>
-          <option value="comfy-ermbg">comfy-ermbg</option>
-          <option value="grabcut">grabcut</option>
-          <option value="birefnet">birefnet</option>
+          
+          
+          
         </select>
       </label>
       <div class="slice-settings" id="slice-settings">
@@ -2027,6 +2021,23 @@ def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
     return requested_backend
 
 
+def _route_metadata(result: MatteResponse) -> dict[str, Any]:
+    auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
+    if not isinstance(auto_route, dict):
+        return {}
+    reasons = auto_route.get("reasons")
+    if not isinstance(reasons, list):
+        reason = auto_route.get("reason")
+        reasons = [reason] if isinstance(reason, str) and reason else []
+    return {
+        "route": auto_route.get("route"),
+        "asset_kind": auto_route.get("asset_kind"),
+        "parameter_profile": auto_route.get("parameter_profile"),
+        "route_confidence": auto_route.get("confidence"),
+        "route_reasons": reasons,
+    }
+
+
 def _parse_rgb_triplet(value: str) -> tuple[int, int, int]:
     parts = [part.strip() for part in value.split(",")]
     if len(parts) != 3:
@@ -2086,7 +2097,7 @@ def _pymatting_kwargs(
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
-    backend: Annotated[str, Form()] = "grabcut",
+    backend: Annotated[str, Form()] = "auto",
     shadow_enabled: Annotated[bool, Form()] = True,
     pymatting_method: Annotated[str, Form()] = "cf",
     pymatting_image_space: Annotated[str, Form()] = "linear",
@@ -2158,7 +2169,7 @@ def matte_endpoint(
 def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
     corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
-    backend: Annotated[str, Form()] = "grabcut",
+    backend: Annotated[str, Form()] = "auto",
     shadow_enabled: Annotated[bool, Form()] = True,
     corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
     corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
@@ -2265,12 +2276,14 @@ def matte_candidates_endpoint(
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     effective_backend = _effective_backend(backend, result)
     if effective_backend in REMOTE_DIRECT_BACKENDS:
-        if effective_backend == "comfy-ermbg":
-            direct_label = "远端 ERMBG"
-        elif effective_backend == "comfy-corridorkey":
+        if effective_backend == "comfy-corridorkey":
             direct_label = "远端 CorridorKey"
         elif effective_backend == "comfy-pymatting-known-b":
             direct_label = "远端 PyMatting Known-B"
+        elif effective_backend == "comfy-rmbg":
+            direct_label = "远端 RMBG"
+        elif effective_backend == "passthrough":
+            direct_label = "远端 Passthrough"
         else:
             direct_label = "PyMatting Known-B"
         candidates = [
@@ -2306,6 +2319,7 @@ def matte_candidates_endpoint(
         "background": list(result.background_color),
         "backend": effective_backend,
         "requested_backend": backend,
+        **_route_metadata(result),
         "server_elapsed_sec": time.perf_counter() - server_started_at,
         "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
@@ -2601,7 +2615,7 @@ def _solid_graphic_summary_path(root: Path) -> Path | None:
     return None
 
 
-def _comfy_ermbg_summary_path(root: Path) -> Path | None:
+def _remote_backend_summary_path(root: Path) -> Path | None:
     path = root / "summary.json"
     if not path.is_file():
         return None
@@ -2611,8 +2625,6 @@ def _comfy_ermbg_summary_path(root: Path) -> Path | None:
     runs = payload.get("runs")
     if not isinstance(runs, list):
         return None
-    if root.name.startswith(COMFY_ERMBG_EVAL_PREFIX):
-        return path
     for item in runs:
         if isinstance(item, dict) and str(item.get("backend", "")).startswith("comfy-"):
             return path
@@ -2626,7 +2638,7 @@ def _game_eval_root_has_data(root: Path) -> bool:
         return True
     if _solid_graphic_summary_path(root) is not None:
         return True
-    if _comfy_ermbg_summary_path(root) is not None:
+    if _remote_backend_summary_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -2636,7 +2648,7 @@ def _game_eval_root_is_complete(root: Path) -> bool:
     if report_path is None:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is None:
-            comfy_path = _comfy_ermbg_summary_path(root)
+            comfy_path = _remote_backend_summary_path(root)
             if comfy_path is None:
                 return False
             report = _load_json(comfy_path)
@@ -2796,7 +2808,7 @@ def _game_eval_status_report_path(root: Path) -> Path | None:
     return (
         _game_report_path(root)
         or _solid_graphic_summary_path(root)
-        or _comfy_ermbg_summary_path(root)
+        or _remote_backend_summary_path(root)
         or _game_matte_summary_path(root)
     )
 
@@ -3521,7 +3533,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
         remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
         timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}
-        strategy = str(item.get("backend") or "comfy-ermbg")
+        strategy = str(item.get("backend") or "auto")
         elapsed = item.get("elapsed_sec_client")
         alpha_mean = metrics.get("alpha_mean")
         alpha_pixels = metrics.get("alpha_nonzero_pixels")
@@ -3587,7 +3599,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
     progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
     return {
         "runId": root.name,
-        "model": f"{str(payload.get('backend') or (runs[0].get('backend') if runs and isinstance(runs[0], dict) else 'comfy-ermbg'))} remote",
+        "model": f"{str(payload.get('backend') or (runs[0].get('backend') if runs and isinstance(runs[0], dict) else 'auto'))} remote",
         "success": f"{ok_count}/{len(runs)}",
         "expectedHit": f"{ok_count}/{len(runs)}",
         "expectedAnyHit": f"{ok_count}/{len(runs)}",
@@ -3613,7 +3625,7 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is not None:
             return _game_eval_data_from_solid_graphic_summary(root, solid_path)
-        comfy_path = _comfy_ermbg_summary_path(root)
+        comfy_path = _remote_backend_summary_path(root)
         if comfy_path is not None:
             return _game_eval_data_from_comfy_ermbg_summary(root, comfy_path)
         data = _game_eval_data_from_matte_summary(root)
@@ -4593,9 +4605,8 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <div class="path-tools" aria-label="选择测试路径">
         <label for="eval-test-path">测试路径
           <select id="eval-test-path" name="eval-test-path">
-            <option value="auto" selected>Auto</option>
+            <option value="auto" selected>Auto RouteMatte</option>
             <option value="corridorkey">CorridorKey</option>
-            <option value="ermbg">ERMBG</option>
             <option value="rmbg">RMBG</option>
           </select>
         </label>

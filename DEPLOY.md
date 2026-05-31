@@ -1,6 +1,9 @@
 # 部署到 ComfyUI 服务器
 
-把 ERMBG 装到一台跑 ComfyUI 的机器上,让 `ErmbgAutoMatte` / `ErmbgClassify` 出现在节点面板。本文以局域网 Windows 服务器(`darkv@192.168.0.8`,RTX 4090,ComfyUI 0.21.1 desktop 版,uv 管理的 venv)为例,其他平台同理。
+把 ERMBG 装到一台跑 ComfyUI 的机器上,让 `ErmbgRouteMatte` /
+`ErmbgRouteStrategy` / `ErmbgPyMattingKnownB` / `ErmbgClassify` 出现在节点面板。
+本文以局域网 Windows 服务器(`darkv@192.168.0.8`,RTX 4090,ComfyUI desktop 版,
+uv 管理的 venv)为例,其他平台同理。
 
 ## 前提
 
@@ -65,14 +68,16 @@ ssh darkv@192.168.0.8 'powershell -Command "Stop-Process -Id <PID> -Force"'
 curl -s http://192.168.0.8:8000/object_info | \
     python3 -c "import json,sys; d=json.load(sys.stdin); \
         print('ermbg:', [k for k in d if k.lower().startswith('ermbg')])"
-# 期望:['ErmbgAutoMatte', 'ErmbgClassify']
+# 期望包含:['ErmbgRouteMatte', 'ErmbgRouteStrategy', 'ErmbgPyMattingKnownB', 'ErmbgClassify']
 ```
 
 ## 已知坑
 
 - **`/manager/reboot` 不一定起作用**。ComfyUI Manager 桌面版的 reboot 端点在我这台上是 405,实际重启走 `Stop-Process` + 自动 respawn 路径才管用。
 - **`ermbg` 名字冲突**。装好包后 site-packages 下有 `ermbg/`,custom_nodes 不能也叫 `ermbg`,否则 ComfyUI 加载器会用相对导入,把 `ermbg` 优先解析到 custom_nodes 那个目录,丢失主包内容。
-- **首次跑会下 BiRefNet 权重**(≈1 GB)到 HF 缓存,延迟集中在第一次推理。
+- **旧 AutoMatte 已移除**。Web/API 的 `backend=auto` 现在提交单个
+  `ErmbgRouteMatte` 节点。该节点在 Comfy 进程内完成 route、CorridorKey /
+  PyMatting Known-B / PyMatting fallback / passthrough 和 ShadowPatch;auto 不再调用 RMBG。
 - **PIL / numpy 版本** 安装时如果报"无法卸载现有包",是 ComfyUI 还在跑、文件被占用 — 先 kill 再装。
 
 ## 升级

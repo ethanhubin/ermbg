@@ -75,7 +75,25 @@ def build_known_background_trimap(
     # cutouts, not antialiasing unknowns. Leaving them unknown lets local
     # smoothness solvers propagate surrounding foreground through UI holes.
     sure_bg = exterior_bg | enclosed_bg
-    sure_fg &= ~enclosed_bg
+    shadow_bg, shadow_info = _known_background_shadow_like_background_mask(
+        image_srgb,
+        bg,
+        subject_seed=sure_fg,
+    )
+    # Cast/contact shadows on a known screen are background behavior, not
+    # subject ownership. If those scalar-darkened background pixels enter the
+    # PyMatting unknown band, the solver can return colored semi-transparent
+    # "subject" that a later shadow patch cannot cleanly subtract. Mark only
+    # source-measurable, near-subject scalar darkening as sure background; the
+    # independent shadow patch will reconstruct its opacity from the source.
+    sure_bg |= shadow_bg
+    # Shadow-like scalar darkening can have a large OKLab distance from the
+    # background, so the normal distance rule may mark it as sure foreground.
+    # That pins PyMatting alpha to 1 and exports dark green/blue screen residue
+    # as opaque material. Let measured known-B shadow evidence override
+    # distance-based foreground; the separate ShadowPatch will reconstruct the
+    # black alpha layer from the same source pixels.
+    sure_fg &= ~(enclosed_bg | shadow_bg)
     unknown = ~(sure_fg | sure_bg)
     labels_count, _, stats, _ = cv2.connectedComponentsWithStats(enclosed_bg.astype(np.uint8), 8)
     enclosed_areas = [int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)]
@@ -99,6 +117,125 @@ def build_known_background_trimap(
         "enclosed_bg_pixels": int(enclosed_bg.sum()),
         "enclosed_bg_components": int(labels_count - 1),
         "largest_enclosed_bg_component": int(max(enclosed_areas, default=0)),
+        "shadow_background": shadow_info,
+    }
+
+
+def _known_background_shadow_like_background_mask(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    subject_seed: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Detect scalar-darkened known-B pixels that should be trimap background.
+
+    Core rule: PyMatting owns the subject edge; ShadowPatch owns the shadow.
+    Scalar-darkened known-B pixels are therefore pinned to trimap background so
+    PyMatting cannot turn green-screen shadows into colored foreground.
+    """
+    h, w = subject_seed.shape
+    if not bool(subject_seed.any()):
+        return np.zeros((h, w), dtype=bool), {
+            "enabled": True,
+            "reason": "no subject seed",
+            "pixels": 0,
+        }
+
+    bg = background_color.astype(np.float32).reshape(3)
+    img = image_srgb.astype(np.float32)
+    informative = bg >= max(8.0, float(bg.max()) * 0.12)
+    if not bool(informative.any()):
+        informative = bg == float(bg.max())
+    off_background = bg < max(8.0, float(bg.max()) * 0.12)
+
+    denom = max(float((bg[informative] * bg[informative]).sum()), 1e-6)
+    scale = (img[..., informative] * bg[informative]).sum(axis=-1) / denom
+    strength = np.clip(1.0 - scale, 0.0, 1.0).astype(np.float32)
+    recon = scale[..., None] * bg.reshape(1, 1, 3)
+    err = np.sqrt(np.mean((img - recon) * (img - recon), axis=-1)).astype(np.float32)
+    off_excess = (
+        np.where(off_background.reshape(1, 1, 3), img - bg.reshape(1, 1, 3), 0.0).max(axis=-1)
+        if bool(off_background.any())
+        else np.zeros((h, w), dtype=np.float32)
+    )
+
+    dist_to_seed = cv2.distanceTransform((~subject_seed).astype(np.uint8), cv2.DIST_L2, 3)
+    near_px = float(max(8.0, min(80.0, round(min(h, w) * 0.34))))
+    near_seed = dist_to_seed <= near_px
+    border = _border_mask((h, w))
+    border_strength = strength[border].astype(np.float32)
+    strength_floor = float(np.percentile(border_strength, 99.5)) if border_strength.size else 0.0
+    strength_min = max(2.0 / 255.0, strength_floor + 1.0 / 255.0)
+
+    # These guards are 8-bit reconstruction tolerances. The values are broad
+    # enough for generated shadow texture but still reject colorful subject
+    # material because off-background channels would have to stay quiet.
+    err_max = max(18.0, float(np.percentile(err[border], 99.5)) + 6.0) if border.any() else 18.0
+    off_excess_max = max(28.0, float(np.percentile(off_excess[border], 99.5)) + 8.0) if border.any() else 28.0
+    candidate = near_seed & (strength >= strength_min) & (err <= err_max) & (off_excess <= off_excess_max)
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    min_area = int(max(4.0, float(h * w) * 0.00003))
+    coherent_anchor_area = int(max(float(min_area), float(h * w) * 0.005))
+    kept = np.zeros((h, w), dtype=bool)
+    largest_kept_area = 0
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        values = strength[comp]
+        p90 = float(np.percentile(values, 90.0)) if values.size else 0.0
+        keep = bool(area >= min_area and p90 >= max(strength_min * 1.5, 0.02))
+        if keep:
+            kept |= comp
+            largest_kept_area = max(largest_kept_area, area)
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "strength_p90": p90,
+                "keep": keep,
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    if largest_kept_area < coherent_anchor_area:
+        return np.zeros((h, w), dtype=bool), {
+            "enabled": True,
+            "reason": "no coherent shadow anchor component",
+            "pixels": 0,
+            "candidate_pixels": int(candidate.sum()),
+            "near_subject_px": near_px,
+            "strength_min": float(strength_min),
+            "err_max_u8": float(err_max),
+            "off_excess_max_u8": float(off_excess_max),
+            "component_min_area": int(min_area),
+            # Profile gate: no coherent shadow anchor means no shadow path.
+            # Fragmented dark outlines can look shadow-like, but should stay
+            # with the subject instead of creating a false shadow layer.
+            "coherent_anchor_min_area": int(coherent_anchor_area),
+            "largest_kept_component_area": int(largest_kept_area),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+        }
+    return kept, {
+        "enabled": True,
+        "reason": "" if bool(kept.any()) else "no scalar-darkening background near subject",
+        "pixels": int(kept.sum()),
+        "candidate_pixels": int(candidate.sum()),
+        "near_subject_px": near_px,
+        "strength_min": float(strength_min),
+        "err_max_u8": float(err_max),
+        "off_excess_max_u8": float(off_excess_max),
+        "component_min_area": int(min_area),
+        "coherent_anchor_min_area": int(coherent_anchor_area),
+        "largest_kept_component_area": int(largest_kept_area),
+        "components": components[:12],
+        "omitted_components": max(0, len(components) - 12),
     }
 
 

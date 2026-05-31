@@ -116,6 +116,33 @@ def test_known_background_trimap_allows_broad_ui_antialias_band():
     assert trimap.unknown.sum() > 0
 
 
+def test_known_background_trimap_marks_scalar_shadow_as_background():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 200, 3), bg, dtype=np.uint8)
+    subject = np.zeros((128, 200), dtype=bool)
+    subject[30:86, 36:154] = True
+    shadow = np.zeros((128, 200), dtype=bool)
+    shadow[90:108, 44:166] = True
+    image[subject] = (40, 110, 245)
+    image[shadow] = (0, 128, 0)
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=30.0,
+        boundary_band_px=2,
+    )
+
+    # Mechanism: scalar-darkened known-B near a UI control is shadow behavior,
+    # not subject ownership. If PyMatting sees it as unknown/foreground, it can
+    # return colored semi-transparent subject pixels that ShadowPatch cannot
+    # cleanly remove later.
+    assert info["shadow_background"]["pixels"] >= int(shadow.sum() * 0.8)
+    assert trimap.sure_bg[shadow].mean() > 0.8
+    assert trimap.sure_fg[shadow].mean() == 0.0
+
+
 def test_solid_graphic_pymatting_refiner_is_explicit_and_debugged():
     image, _, _, _ = _aa_disc_case()
 

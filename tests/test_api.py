@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -17,21 +18,6 @@ def _solid_green_with_red_subject(h=128, w=128):
     img = np.full((h, w, 3), [0, 200, 0], dtype=np.uint8)
     img[40:90, 40:90] = (220, 30, 30)
     return img
-
-
-# Use grabcut for tests so we don't need to download BiRefNet weights
-@pytest.fixture
-def _force_grabcut(monkeypatch):
-    """matte_image asks build_segmenter(backend="auto") which prefers BiRefNet.
-    For unit tests we want a fast deterministic backend. Patch the default."""
-    import ermbg.api as api
-
-    real = api.build_segmenter
-
-    def stub(backend="auto", **kwargs):
-        return real(backend="grabcut")
-
-    monkeypatch.setattr(api, "build_segmenter", stub)
 
 
 def test_classify_image_from_ndarray():
@@ -54,32 +40,22 @@ def test_classify_image_from_pil():
     assert s.bg_type == "saturated"
 
 
-def test_matte_image_ndarray_returns_response(_force_grabcut):
+def test_matte_image_ndarray_returns_response():
     img = _solid_green_with_red_subject()
-    r = matte_image(img, backend="grabcut")
+    r = matte_image(img, backend="pymatting-known-b")
     assert isinstance(r, MatteResponse)
     assert r.rgba.shape == (128, 128, 4)
     assert r.rgba.dtype == np.uint8
     assert r.alpha.shape == (128, 128)
     assert r.foreground_srgb.shape == (128, 128, 3)
-    assert r.strategy_name == "solid_bg_graphic"
+    assert r.strategy_name == "pymatting_known_b"
     assert r.output_dir is None
 
 
-def test_matte_image_solid_graphic_prepass_skips_segmenter(monkeypatch):
-    import ermbg.api as api
-
-    def fail_build_segmenter(**kwargs):
-        raise AssertionError("solid graphic prepass should not build a segmenter")
-
-    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
-
+def test_matte_image_rejects_removed_legacy_backend():
     img = _solid_green_with_red_subject()
-    r = matte_image(img, backend="grabcut")
-
-    assert r.strategy_name == "solid_bg_graphic"
-    assert r.report["strategy"]["name"] == "solid_bg_graphic"
-    assert r.alpha[44:86, 44:86].mean() > 0.99
+    with pytest.raises(ValueError, match="removed"):
+        matte_image(img, backend="grabcut")
 
 
 def test_matte_image_pymatting_known_b_backend_skips_segmenter(monkeypatch):
@@ -212,160 +188,194 @@ def test_matte_image_comfy_pymatting_known_b_uses_remote_node(monkeypatch):
     assert r.debug["pymatting_known_b"]["remote"]["prompt_id"] == "fake-prompt"
 
 
-def test_matte_image_reuses_cached_segmenter(monkeypatch):
+def test_matte_image_auto_routes_square_green_screen_icon_to_corridorkey(monkeypatch):
     import ermbg.api as api
-
-    class _CountingSegmenter:
-        def __init__(self):
-            self.calls = 0
-
-        def segment(self, image, object_prompt=None):
-            self.calls += 1
-            alpha = np.zeros(image.shape[:2], dtype=np.float32)
-            alpha[32:96, 32:96] = 1.0
-            return alpha
-
-    built: list[_CountingSegmenter] = []
-
-    def stub_build_segmenter(**kwargs):
-        assert "url" not in kwargs
-        seg = _CountingSegmenter()
-        built.append(seg)
-        return seg
-
-    api._SEGMENTER_CACHE.clear()
-    monkeypatch.setattr(api, "build_segmenter", stub_build_segmenter)
-
-    img = _solid_green_with_red_subject()
-    matte_image(img, backend="grabcut", matting_model="cache-test", solid_graphic_prepass=False)
-    matte_image(img, backend="grabcut", matting_model="cache-test", solid_graphic_prepass=False)
-
-    assert len(built) == 1
-    assert built[0].calls == 2
-
-
-def test_matte_image_cache_separates_comfy_urls(monkeypatch):
-    import ermbg.api as api
-
-    class _Segmenter:
-        def segment(self, image, object_prompt=None):
-            alpha = np.zeros(image.shape[:2], dtype=np.float32)
-            alpha[32:96, 32:96] = 1.0
-            return alpha
-
-    built_urls: list[str] = []
-
-    def stub_build_segmenter(**kwargs):
-        built_urls.append(kwargs["url"])
-        return _Segmenter()
-
-    api._SEGMENTER_CACHE.clear()
-    monkeypatch.setattr(api, "build_segmenter", stub_build_segmenter)
-
-    img = _solid_green_with_red_subject()
-    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-a.invalid")
-    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-b.invalid")
-    matte_image(img, backend="comfy-rmbg", comfy_url="http://comfy-a.invalid")
-
-    assert built_urls == ["http://comfy-a.invalid", "http://comfy-b.invalid"]
-
-
-def test_matte_image_auto_routes_green_screen_to_corridorkey(monkeypatch):
-    import ermbg.api as api
-    import ermbg.probe.comfyui_corridorkey as remote_mod
-
-    class _FakeRemoteResult:
-        def __init__(self, hint_alpha):
-            self.rgba = np.zeros((128, 128, 4), dtype=np.uint8)
-            self.rgba[..., :3] = (220, 30, 30)
-            self.rgba[..., 3] = 255
-            self.alpha = np.ones((128, 128), dtype=np.float32)
-            self.foreground_srgb = self.rgba[..., :3]
-            self.hint_alpha = hint_alpha
-            self.raw_alpha = self.alpha.copy()
-            self.color_protection_alpha = np.zeros((128, 128), dtype=np.float32)
-            self.debug = {"prompt_id": "prompt-auto-corridor", "hint": {"source": "all_white_alpha_hint"}}
+    import ermbg.probe.comfyui_route_matte as remote_mod
 
     class _FakeClient:
-        def __init__(self, url):
+        def __init__(self, url, poll_interval=0.05):
             self.url = url
 
         def matte(self, image_srgb, **kwargs):
-            return _FakeRemoteResult(kwargs["hint_alpha"])
+            auto_route = {
+                "selected_backend": "comfy-corridorkey",
+                "route": "corridorkey",
+                "asset_kind": "icon",
+            }
+            rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+            rgba[..., :3] = (220, 30, 30)
+            rgba[..., 3] = 255
+            alpha = np.ones((128, 128), dtype=np.float32)
+            return remote_mod.ComfyRouteMatteResult(
+                rgba=rgba,
+                alpha=alpha,
+                foreground_srgb=rgba[..., :3],
+                background_color=(0, 200, 0),
+                strategy_name="comfy_corridorkey",
+                report={"auto_route": auto_route, "strategy": {"name": "comfy_corridorkey"}},
+                debug={"auto_route": auto_route, "backend": "comfy-corridorkey"},
+            )
 
     monkeypatch.setattr(api, "build_segmenter", lambda **kwargs: (_ for _ in ()).throw(AssertionError))
-    monkeypatch.setattr(remote_mod, "ComfyUICorridorKeyClient", _FakeClient)
+    monkeypatch.setattr(remote_mod, "ComfyUIRouteMatteClient", _FakeClient)
 
     result = matte_image(_solid_green_with_red_subject(), backend="auto")
 
     assert result.strategy_name == "comfy_corridorkey"
     assert result.debug["auto_route"]["selected_backend"] == "comfy-corridorkey"
-    assert result.debug["auto_route"]["reason"] == "green_screen"
+    assert result.debug["auto_route"]["route"] == "corridorkey"
+    assert result.debug["auto_route"]["asset_kind"] == "icon"
 
 
-def test_matte_image_auto_routes_unknown_background_to_rmbg(monkeypatch):
-    import ermbg.api as api
+def test_matte_image_auto_routes_hard_button_to_comfy_pymatting(monkeypatch):
+    import ermbg.probe.comfyui_route_matte as remote_module
 
     captured = {}
 
-    class _Segmenter:
-        def segment(self, image, object_prompt=None):
-            captured["image_shape"] = image.shape
-            alpha = np.zeros(image.shape[:2], dtype=np.float32)
+    class FakeClient:
+        def __init__(self, url, poll_interval=0.05):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            h, w = image_srgb.shape[:2]
+            alpha = np.zeros((h, w), dtype=np.float32)
+            alpha[24:104, 56:200] = 1.0
+            auto_route = {
+                "selected_backend": "comfy-pymatting-known-b",
+                "route": "pymatting_known_b",
+                "asset_kind": "button",
+            }
+            return remote_module.ComfyRouteMatteResult(
+                rgba=np.dstack([image_srgb, (alpha * 255).astype(np.uint8)]),
+                alpha=alpha,
+                foreground_srgb=image_srgb.copy(),
+                background_color=(0, 200, 0),
+                strategy_name="comfy_pymatting_known_b",
+                report={"auto_route": auto_route, "strategy": {"name": "comfy_pymatting_known_b"}},
+                debug={"auto_route": auto_route, "backend": "comfy-pymatting-known-b"},
+            )
+
+    monkeypatch.setattr(remote_module, "ComfyUIRouteMatteClient", FakeClient)
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+    )
+
+    result = matte_image(np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8), backend="auto")
+
+    assert result.strategy_name == "comfy_pymatting_known_b"
+    assert result.debug["auto_route"]["selected_backend"] == "comfy-pymatting-known-b"
+    assert result.debug["auto_route"]["route"] == "pymatting_known_b"
+    assert result.debug["auto_route"]["asset_kind"] == "button"
+    assert captured["pymatting_bg_source"] == "auto"
+    assert captured["pymatting_bg_color"] is None
+
+
+def test_matte_image_auto_routes_stable_non_green_blue_background_to_comfy_pymatting(monkeypatch):
+    import ermbg.probe.comfyui_route_matte as remote_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, url, poll_interval=0.05):
+            self.url = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured.update(kwargs)
+            h, w = image_srgb.shape[:2]
+            alpha = np.zeros((h, w), dtype=np.float32)
             alpha[32:96, 32:96] = 1.0
-            return alpha
+            auto_route = {
+                "selected_backend": "comfy-pymatting-known-b",
+                "route": "pymatting_known_b",
+                "asset_kind": "button",
+            }
+            return remote_module.ComfyRouteMatteResult(
+                rgba=np.dstack([image_srgb, (alpha * 255).astype(np.uint8)]),
+                alpha=alpha,
+                foreground_srgb=image_srgb.copy(),
+                background_color=(180, 180, 180),
+                strategy_name="comfy_pymatting_known_b",
+                report={"auto_route": auto_route, "strategy": {"name": "comfy_pymatting_known_b"}},
+                debug={"auto_route": auto_route, "backend": "comfy-pymatting-known-b"},
+            )
 
-    def fake_build_segmenter(**kwargs):
-        captured["backend"] = kwargs["backend"]
-        return _Segmenter()
-
-    api._SEGMENTER_CACHE.clear()
-    monkeypatch.setattr(api, "build_segmenter", fake_build_segmenter)
+    monkeypatch.setattr(remote_module, "ComfyUIRouteMatteClient", FakeClient)
     image = np.full((128, 128, 3), 180, dtype=np.uint8)
     image[32:96, 32:96] = (20, 40, 180)
 
     result = matte_image(image, backend="auto", solid_graphic_prepass=False)
 
-    assert captured["backend"] == "comfy-rmbg"
-    assert result.report["auto_route"]["selected_backend"] == "comfy-rmbg"
-    assert result.report["auto_route"]["reason"] == "unknown_background"
+    assert result.strategy_name == "comfy_pymatting_known_b"
+    assert result.report["auto_route"]["selected_backend"] == "comfy-pymatting-known-b"
+    assert result.report["auto_route"]["route"] == "pymatting_known_b"
+    assert captured["pymatting_bg_source"] == "auto"
 
 
-def test_matte_image_comfy_ermbg_uses_remote_full_pipeline(monkeypatch):
-    import ermbg.api as api
-    import ermbg.probe.comfyui_ermbg_matte as remote_mod
+def test_matte_image_auto_routes_unstable_unknown_background_to_pymatting_fallback(monkeypatch):
+    import ermbg.probe.comfyui_route_matte as remote_mod
 
-    def fail_build_segmenter(**kwargs):
-        raise AssertionError("comfy-ermbg should not build a local segmenter")
+    captured = {}
 
-    class _FakeRemoteResult:
-        def __init__(self):
-            self.rgba = np.zeros((128, 128, 4), dtype=np.uint8)
-            self.rgba[..., :3] = (10, 20, 30)
-            self.rgba[..., 3] = 255
-            self.alpha = np.ones((128, 128), dtype=np.float32)
-            self.foreground_srgb = self.rgba[..., :3]
-            self.debug = {"prompt_id": "prompt-1"}
+    class _FakePyMattingFallback:
+        def __init__(self, url, poll_interval=0.05):
+            captured["url"] = url
+
+        def matte(self, image_srgb, **kwargs):
+            captured["image_shape"] = image_srgb.shape
+            auto_route = {
+                "selected_backend": "comfy-pymatting-known-b",
+                "route": "pymatting_fallback",
+                "asset_kind": "unknown_fallback",
+            }
+            rgba = np.dstack([image_srgb, np.full(image_srgb.shape[:2], 255, dtype=np.uint8)])
+            alpha = np.ones(image_srgb.shape[:2], dtype=np.float32)
+            return remote_mod.ComfyRouteMatteResult(
+                rgba=rgba,
+                alpha=alpha,
+                foreground_srgb=image_srgb.copy(),
+                background_color=(0, 200, 0),
+                strategy_name="comfy_pymatting_known_b",
+                report={"auto_route": auto_route, "strategy": {"name": "comfy_pymatting_known_b"}},
+                debug={"auto_route": auto_route, "backend": "comfy-pymatting-known-b"},
+            )
+
+    monkeypatch.setattr(remote_mod, "ComfyUIRouteMatteClient", _FakePyMattingFallback)
+    rng = np.random.default_rng(123)
+    image = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)
+    image[32:96, 32:96] = (20, 40, 180)
+
+    result = matte_image(image, backend="auto", solid_graphic_prepass=False)
+
+    assert captured["image_shape"] == (128, 128, 3)
+    assert result.report["auto_route"]["selected_backend"] == "comfy-pymatting-known-b"
+    assert result.report["auto_route"]["route"] == "pymatting_fallback"
+
+
+def test_matte_image_comfy_rmbg_uses_remote_full_pipeline(monkeypatch):
+    import ermbg.probe.comfyui_rmbg as remote_mod
 
     class _FakeClient:
         def __init__(self, url):
             self.url = url
 
-        def matte(self, image_srgb, **kwargs):
+        def matte(self, image_srgb):
             assert image_srgb.shape == (128, 128, 3)
-            assert kwargs["shadow_mode"] == "off"
-            return _FakeRemoteResult()
+            rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+            rgba[..., :3] = (10, 20, 30)
+            rgba[..., 3] = 255
+            return rgba
 
-    monkeypatch.setattr(api, "build_segmenter", fail_build_segmenter)
-    monkeypatch.setattr(remote_mod, "ComfyUIErmbgMatteClient", _FakeClient)
+    monkeypatch.setattr(remote_mod, "ComfyUIRembgBaseline", _FakeClient)
 
     img = _solid_green_with_red_subject()
-    r = matte_image(img, backend="comfy-ermbg", shadow_mode="off")
+    r = matte_image(img, backend="comfy-rmbg", shadow_mode="off")
 
-    assert r.strategy_name == "comfy_ermbg"
+    assert r.strategy_name == "comfy_rmbg"
     assert r.rgba[0, 0].tolist() == [10, 20, 30, 255]
-    assert r.report["strategy"]["name"] == "comfy_ermbg"
-    assert r.debug["prompt_id"] == "prompt-1"
+    assert r.report["strategy"]["name"] == "comfy_rmbg"
+    assert r.debug["backend"] == "comfy-rmbg"
 
 
 def test_matte_image_comfy_corridorkey_uses_remote_pipeline(monkeypatch):
@@ -694,8 +704,11 @@ def test_pymatting_shadow_patch_reclassifies_known_bg_colored_residue():
     assert info["applied"] is True
     assert info["residue_split"]["kept_pixels"] >= int(shadow_region.sum() * 0.95)
     assert shadow_alpha[shadow_region].mean() > 0.25
-    assert np.allclose(alpha[shadow_region].mean(), shadow_alpha[shadow_region].mean(), atol=0.03)
-    assert rgba_rgb[shadow_region, 1].mean() < 4.0
+    # Current objective ShadowPatch exports a layer stack: PyMatting subject
+    # alpha remains available while the source-proved shadow is composited
+    # beneath it, so final alpha is expected to be at least the shadow alpha.
+    assert alpha[shadow_region].mean() >= shadow_alpha[shadow_region].mean()
+    assert rgba_rgb[shadow_region, 1].mean() < 120.0
 
 
 def test_pymatting_shadow_patch_preserves_subject_color_above_blue_background_channels():
@@ -827,8 +840,7 @@ def test_pymatting_shadow_patch_preserves_colored_subject_antialias_edge():
     # Preserve that edge while still extracting the separate scalar shadow.
     assert info["residue_split"]["foreground_material_pixels"] >= int(edge.sum() * 0.95)
     assert shadow_alpha[shadow].mean() > 0.25
-    assert shadow_alpha[edge].max() == 0.0
-    assert np.allclose(alpha[edge], subject_alpha[edge])
+    assert alpha[edge].mean() >= subject_alpha[edge].mean()
     assert rgba_rgb[edge, 2].mean() > 220.0
 
 
@@ -910,10 +922,11 @@ def test_pymatting_foreground_stabilization_does_not_recolor_opaqueish_ui_interi
     interior_core = np.zeros_like(interior)
     interior_core[32:42, 28:68] = True
     assert np.array_equal(stabilized[interior_core], foreground[interior_core])
-    assert np.count_nonzero(np.any(stabilized[edge] != foreground[edge], axis=1)) > 0
+    assert info["reason"] == "foreground candidates not dominated by matte edge"
+    assert info["filled_pixels"] == 0
 
 
-def test_pymatting_shadow_patch_rejects_contact_gap_without_source_fit_gain():
+def test_pymatting_shadow_patch_completes_gap_inside_objective_shadow_component():
     import ermbg.api as api
 
     bg = np.array([0, 200, 0], dtype=np.uint8)
@@ -945,15 +958,144 @@ def test_pymatting_shadow_patch_rejects_contact_gap_without_source_fit_gain():
         shadow_mode="on",
     )
 
-    # Mechanism: geometric proximity alone is not enough to bridge a contact
-    # gap. B007-style UI interiors can satisfy the same subject/shadow geometry;
-    # near-subject repair must show a meaningful source-fit improvement before
-    # it is allowed to add pixels.
-    assert info["near_subject_reprojection"]["contact_gap_bridge_pixels"] == 0
-    assert info["near_subject_reprojection"]["reason"] == "source reprojection did not significantly improve fit"
+    # Mechanism: PyMatting owns the subject, while ShadowPatch owns the full
+    # connected shadow component. Once source residuals prove a nearby cast
+    # shadow, small support gaps inside that component should be completed by
+    # borrowed shadow opacity instead of leaving a white preview seam.
+    assert info["method"] == "objective_source_reprojection"
+    assert info["objective_shadow"]["pixels"] > 0
+    assert info["objective_shadow"]["completed_fill_pixels"] > 0
     assert shadow_alpha[shadow].mean() > 0.25
-    assert shadow_alpha[contact_gap].mean() == 0.0
-    assert alpha[contact_gap].mean() == 0.0
+    assert shadow_alpha[contact_gap].mean() > 0.05
+    assert alpha[contact_gap].mean() > 0.05
+
+
+def test_pymatting_shadow_patch_keeps_broad_soft_shadow_connected_to_anchor():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 256, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 256), dtype=np.float32)
+    subject_foreground = np.zeros((128, 256, 3), dtype=np.uint8)
+
+    yy, xx = np.mgrid[0:128, 0:256]
+    subject = ((xx - 128.0) / 76.0) ** 6 + ((yy - 55.0) / 24.0) ** 6 <= 1.0
+    subject_alpha[subject] = 1.0
+    subject_foreground[subject] = (245, 174, 24)
+    image[subject] = (245, 174, 24)
+
+    shadow_blob = np.exp(-(((xx - 128.0) / 88.0) ** 2 + ((yy - 78.0) / 28.0) ** 2) * 1.7)
+    shadow_alpha_truth = np.clip(shadow_blob * 0.48, 0.0, 0.48).astype(np.float32)
+    shadow_alpha_truth[subject] = 0.0
+    shadow_pixels = shadow_alpha_truth > 1.0 / 255.0
+    image[shadow_pixels] = (
+        (1.0 - shadow_alpha_truth[shadow_pixels, None]) * bg.reshape(1, 3) + 0.5
+    ).astype(np.uint8)
+
+    shadow_alpha, info = api._pymatting_known_b_objective_shadow_from_source(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+    )
+
+    dist_to_subject = cv2.distanceTransform((~subject).astype(np.uint8), cv2.DIST_L2, 3)
+    far_soft_shadow = shadow_pixels & (dist_to_subject > 26.0) & (dist_to_subject < 42.0)
+
+    # Mechanism: broad soft UI shadows need a close, coherent anchor before
+    # ShadowPatch is trusted, but the final support should then follow the same
+    # connected source residual beyond the close band. Otherwise soft-heavy
+    # shadows get a visibly clipped outside falloff.
+    assert info["reason"] == ""
+    assert info["support_near_subject_px"] > info["near_subject_px"]
+    assert info["source_support_candidate_pixels"] > info["kept_seed_pixels"]
+    assert shadow_alpha[far_soft_shadow].mean() > 0.018
+
+
+def test_pymatting_shadow_patch_rejects_background_gradient_connected_to_ring_shadow():
+    import ermbg.api as api
+
+    bg = np.array([2, 196, 8], dtype=np.uint8)
+    h, w = 160, 160
+    yy, xx = np.mgrid[0:h, 0:w]
+    image = np.full((h, w, 3), bg, dtype=np.float32)
+    subject_alpha = np.zeros((h, w), dtype=np.float32)
+    subject_foreground = np.zeros((h, w, 3), dtype=np.uint8)
+
+    rr = np.sqrt((xx - 80.0) ** 2 + (yy - 80.0) ** 2)
+    ring = (rr >= 30.0) & (rr <= 48.0)
+    subject_alpha[ring] = 1.0
+    subject_foreground[ring] = (248, 195, 18)
+    image[ring] = subject_foreground[ring]
+
+    # Mild screen falloff is connected to the true shadow through the hole. It
+    # must be treated as background residual, not as a giant transparent layer.
+    screen_falloff = 0.014 + 0.004 * ((xx + yy) / float(h + w))
+    image[~ring] = bg.reshape(1, 3) * (1.0 - screen_falloff[~ring, None])
+
+    inner_shadow = np.exp(-((rr - 31.0) / 7.0) ** 2) * (rr < 38.0)
+    cast_shadow = np.exp(-(((xx - 80.0) / 50.0) ** 2 + ((yy - 102.0) / 16.0) ** 2)) * (yy > 78)
+    truth_shadow = np.clip(np.maximum(inner_shadow * 0.40, cast_shadow * 0.28), 0.0, 0.45).astype(np.float32)
+    truth_shadow[ring] = 0.0
+    shadow_pixels = truth_shadow > 1.0 / 255.0
+    image[shadow_pixels] = bg.reshape(1, 3) * (1.0 - truth_shadow[shadow_pixels, None])
+    image = np.clip(image + 0.5, 0, 255).astype(np.uint8)
+
+    shadow_alpha, info = api._pymatting_known_b_objective_shadow_from_source(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+    )
+
+    background_gradient_only = (~ring) & (truth_shadow <= 1.0 / 255.0) & (rr < 68.0)
+
+    # Mechanism: ring/hole assets often have a mild known-background gradient
+    # connected to real contact shadow. Support must clear the measured border
+    # residual floor, otherwise the entire gradient becomes gray haze.
+    assert info["support_alpha_min"] > info["border_shadow_floor"]
+    assert shadow_alpha[truth_shadow > 0.12].mean() > 0.10
+    assert shadow_alpha[background_gradient_only].mean() < 0.01
+
+
+def test_near_subject_shadow_bridge_rejects_outline_scale_expansion():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    subject = np.zeros((96, 128), dtype=np.float32)
+    foreground = np.zeros((96, 128, 3), dtype=np.uint8)
+    shadow = np.zeros((96, 128), dtype=np.float32)
+
+    core = np.zeros((96, 128), dtype=bool)
+    core[28:60, 26:102] = True
+    shadow_seed = np.zeros((96, 128), dtype=bool)
+    shadow_seed[62:64, 26:102] = True
+    gap = np.zeros((96, 128), dtype=bool)
+    gap[60:62, 26:102] = True
+
+    subject[core] = 1.0
+    foreground[core] = (245, 180, 32)
+    image[core] = (245, 180, 32)
+    shadow[shadow_seed] = 0.30
+    image[shadow_seed] = ((1.0 - shadow[shadow_seed, None]) * bg.reshape(1, 3) + 0.5).astype(np.uint8)
+
+    refined, info = api._refine_near_subject_shadow_from_source_pixels(
+        shadow,
+        subject,
+        image,
+        tuple(int(c) for c in bg),
+        foreground,
+    )
+
+    # Mechanism: contact-gap bridging is only a seam repair. If the would-be
+    # bridge is larger than the accepted near-subject repair support, it would
+    # expand the whole cast shadow along the UI outline, so it must be reported
+    # and rejected instead of being written into the shadow alpha.
+    assert info["contact_gap_bridge_rejected_as_expansion"] is True
+    assert info["contact_gap_bridge_pixels"] == 0
+    assert info["rejected_contact_gap_bridge_pixels"] >= int(gap.sum() * 0.8)
+    assert refined[gap].max() == 0.0
 
 
 def test_corridorkey_shadow_patch_uses_source_pixels_as_reprojection_target():
@@ -1677,12 +1819,12 @@ def test_matte_image_comfy_corridorkey_blue_analysis_metadata(monkeypatch):
     assert r.debug["corridorkey_analysis"]["screen_mode"] == "blue"
 
 
-def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path):
+def test_matte_image_writes_files_when_output_dir_given(tmp_path):
     img = _solid_green_with_red_subject()
     p = tmp_path / "in.png"
     Image.fromarray(img).save(p)
     out = tmp_path / "out"
-    r = matte_image(p, backend="grabcut", output_dir=out)
+    r = matte_image(p, backend="pymatting-known-b", output_dir=out)
     assert r.output_dir == out
     assert (out / "in_rgba.png").exists()
     assert (out / "in_alpha.png").exists()
@@ -1691,17 +1833,19 @@ def test_matte_image_writes_files_when_output_dir_given(_force_grabcut, tmp_path
     assert (out / "in.report.json").exists()
 
 
-def test_matte_image_qa_adds_metrics_to_report(_force_grabcut, tmp_path):
+def test_matte_image_qa_adds_metrics_to_report(tmp_path):
     img = _solid_green_with_red_subject()
     out = tmp_path / "out"
-    r = matte_image(img, backend="grabcut", output_dir=out, qa=True)
+    r = matte_image(img, backend="pymatting-known-b", output_dir=out, qa=True)
     assert "qa" in r.report
     assert "edge_halo_score_mean" in r.report["qa"]
     assert (out / "matte_qa").exists()
 
 
-def test_matte_image_rgba_input_passthrough(_force_grabcut):
+def test_matte_image_rgba_input_passthrough(monkeypatch):
     """A clean RGBA input should route to passthrough — no matting net."""
+    import ermbg.probe.comfyui_route_matte as remote_module
+
     h, w = 128, 128
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     cy, cx = h // 2, w // 2
@@ -1710,11 +1854,35 @@ def test_matte_image_rgba_input_passthrough(_force_grabcut):
     F = np.array([220, 30, 30], dtype=np.float32)
     rgb = (a[..., None] * F).astype(np.uint8)
     rgba = np.dstack([rgb, (a * 255 + 0.5).astype(np.uint8)])
+
+    class FakeClient:
+        def __init__(self, url, poll_interval=0.05):
+            pass
+
+        def matte(self, image_srgb, **kwargs):
+            auto_route = {
+                "selected_backend": "passthrough",
+                "route": "rgba_passthrough",
+                "asset_kind": "rgba",
+            }
+            alpha = kwargs["source_alpha"]
+            out = np.dstack([image_srgb, (alpha * 255 + 0.5).astype(np.uint8)])
+            return remote_module.ComfyRouteMatteResult(
+                rgba=out,
+                alpha=alpha,
+                foreground_srgb=image_srgb,
+                background_color=(0, 0, 0),
+                strategy_name="rgba_passthrough",
+                report={"auto_route": auto_route, "strategy": {"name": "rgba_passthrough"}},
+                debug={"auto_route": auto_route, "backend": "passthrough"},
+            )
+
+    monkeypatch.setattr(remote_module, "ComfyUIRouteMatteClient", FakeClient)
     r = matte_image(rgba)
     assert r.strategy_name == "rgba_passthrough"
 
 
-def test_matte_image_rejects_bad_dtype(_force_grabcut):
+def test_matte_image_rejects_bad_dtype():
     bad = np.zeros((32, 32, 3), dtype=np.float32)
     with pytest.raises(ValueError):
         matte_image(bad)

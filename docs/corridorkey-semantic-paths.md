@@ -9,11 +9,11 @@ samples/corridorkey_semantic/manifest.json
 samples/corridorkey_semantic/sheets/full_samples_v1_sheet.jpg
 ```
 
-The approved set contains 83 samples:
+The approved set contains 85 samples:
 
 | Class | Count | Focus |
 |---|---:|---|
-| Button | 54 | outlined/unoutlined/translucent button boundaries, hard/soft shadow strengths, white-outline buttons, real glass buttons |
+| Button | 56 | outlined/unoutlined/translucent button boundaries, hard/soft shadow strengths, white-outline buttons, real glass buttons, known-B hole regressions |
 | Icon / effect | 20 | hard boundary, soft boundary, translucent icons, particle effects, smooth glow |
 | Character | 9 | 1024x1024 composite cases combining hair/fur, hard opaque edges, translucent material, and glow |
 
@@ -46,33 +46,49 @@ Only the green-subject blue-screen block is active for B016-B030. Do not add
 alternate blue-screen color studies to the manifest unless they represent a new
 current failure class.
 
-Latest full baseline:
+Latest full RouteMatte baseline:
 
 ```text
-out/corridorkey_full_blue_green_baseline_20260531/summary.json
+out/auto_routematte_full_20260531/summary.json
+out/auto_routematte_full_20260531/timing_report.md
 ```
 
-Result: 83/83 completed successfully with `backend=auto`.
+Result: 85/85 completed successfully with Web/API `backend=auto`, which submits
+the remote `ErmbgRouteMatte` node. Auto no longer invokes RMBG fallback; unknown
+or unstable backgrounds route to `comfy-pymatting-known-b` as
+`pymatting_fallback`.
 
-Profile distribution in that run:
+Route distribution in the latest full B/I/C run:
 
-| Profile | Count |
-|---|---:|
-| edge_cleanup | 23 |
-| opaque_hard_ui_soft_shadow | 16 |
-| opaque_hard_ui_hard_shadow | 13 |
-| screen_tinted_translucency | 9 |
-| translucent_button | 7 |
-| key_color_material | 7 |
-| opaque_hard_ui_no_shadow | 5 |
-| balanced | 3 |
+| Route | Backend | Count |
+|---|---|---:|
+| `pymatting_known_b` | `comfy-pymatting-known-b` | 31 |
+| `corridorkey` | `comfy-corridorkey` | 54 |
 
-B016-B030 all ran successfully. The current low-coverage list is dominated by
-known hard cases: green translucent buttons B012-B015, real glass buttons,
-white-outline soft shadow B053, weak-contrast icon I003, same-screen
-translucency I010, and soft/additive glow icons I012/I013/I016/I018-I020. The
-coverage metric uses `alpha > 128`, so treat it as a triage signal rather than
-ground truth for translucent/glow samples.
+Category/backend split:
+
+| Category | `comfy-pymatting-known-b` | `comfy-corridorkey` |
+|---|---:|---:|
+| Button | 31 | 25 |
+| Icon / effect | 0 | 20 |
+| Character | 0 | 9 |
+
+Timing on the 2026-05-31 full run:
+
+| Scope | Count | Avg | Median | P95 | Min | Max |
+|---|---:|---:|---:|---:|---:|---:|
+| Overall client elapsed | 85 | 1.101s | 0.935s | 3.673s | 0.172s | 5.088s |
+| `comfy-pymatting-known-b` client elapsed | 31 | 0.310s | 0.222s | 0.624s | 0.172s | 0.886s |
+| `comfy-corridorkey` client elapsed | 54 | 1.555s | 1.001s | 3.882s | 0.879s | 5.088s |
+| Button client elapsed | 56 | 0.648s | 0.506s | 1.351s | 0.172s | 1.759s |
+| Icon client elapsed | 20 | 1.081s | 0.996s | 1.411s | 0.965s | 1.922s |
+| Character client elapsed | 9 | 3.965s | 3.676s | 4.920s | 3.496s | 5.088s |
+
+Slowest cases are character CorridorKey runs, led by C005 at 5.088s client /
+3.118s node. Lowest `alpha > 128` coverage remains I010, I020, I019, then
+heavy-shadow/soft-shadow button cases B010, B040, B030, B005, and B035. The
+coverage metric is still a triage signal rather than ground truth for
+translucent/glow samples.
 
 ## Phase Plan
 

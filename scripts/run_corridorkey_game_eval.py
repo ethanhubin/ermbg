@@ -19,7 +19,7 @@ from ermbg.comfy import DEFAULT_COMFY_URL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
-EVAL_BACKENDS = ("auto", "comfy-corridorkey", "comfy-pymatting-known-b", "comfy-ermbg", "comfy-rmbg")
+EVAL_BACKENDS = ("auto", "comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg")
 COLOR_PROTECTION_MODES = ("auto", "on", "off")
 HARD_UI_HINT_MODES = (
     "all_white",
@@ -49,6 +49,63 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _debug_timings(debug: dict[str, Any]) -> dict[str, float]:
+    timings = debug.get("timings") if isinstance(debug, dict) else None
+    if not isinstance(timings, dict):
+        return {}
+    keys = (
+        "node_total_sec",
+        "remote_total_sec",
+        "remote_wait_sec",
+        "remote_upload_sec",
+        "remote_queue_sec",
+        "corridorkey_refine_sec",
+        "color_protection_sec",
+        "total_sec",
+    )
+    out: dict[str, float] = {}
+    for key in keys:
+        value = timings.get(key)
+        if isinstance(value, (int, float)):
+            out[key] = float(value)
+    return out
+
+
+def _timing_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    ok_rows = [row for row in rows if row.get("status") == "ok"]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in ok_rows:
+        groups.setdefault(str(row.get("backend", "unknown")), []).append(row)
+
+    def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
+        elapsed = [float(item.get("elapsed_sec_client", 0.0)) for item in items]
+        timing_rows = [item.get("timings", {}) for item in items if isinstance(item.get("timings"), dict)]
+        metric_names = sorted({name for timing in timing_rows for name in timing})
+        metrics = {}
+        for name in metric_names:
+            values = [float(timing[name]) for timing in timing_rows if isinstance(timing.get(name), (int, float))]
+            if values:
+                metrics[name] = {
+                    "avg": sum(values) / len(values),
+                    "min": min(values),
+                    "max": max(values),
+                }
+        return {
+            "count": len(items),
+            "elapsed_sec_client": {
+                "avg": sum(elapsed) / len(elapsed) if elapsed else 0.0,
+                "min": min(elapsed) if elapsed else 0.0,
+                "max": max(elapsed) if elapsed else 0.0,
+            },
+            "timings": metrics,
+        }
+
+    return {
+        "overall": summarize(ok_rows) if ok_rows else {"count": 0},
+        "by_backend": {backend: summarize(items) for backend, items in sorted(groups.items())},
+    }
 
 
 def _rel(path: Path) -> str:
@@ -312,6 +369,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "input": _rel(input_path),
                 "sample_screen": screen,
                 "elapsed_sec_client": elapsed,
+                "timings": _debug_timings(result.debug),
                 "outputs": _case_outputs(case_dir),
                 "remote_debug": _json_safe(result.debug),
                 "quality_metrics": metrics,
@@ -351,6 +409,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "all_white",
                 "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
             },
+            "timing_summary": _timing_summary(runs),
             "runs": runs,
         }
         (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")

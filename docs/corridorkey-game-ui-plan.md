@@ -7,10 +7,9 @@ fallbacks.
 
 ## Summary
 
-- Default game UI assets to `comfy-corridorkey`.
-- Keep `comfy-ermbg` only as an explicit diagnostic/comparison backend for now;
-  it is not part of automatic routing.
-- Route unknown backgrounds directly to `comfy-rmbg` fallback.
+- Route game UI assets through ERMBG strategy first.
+- Remove the old `comfy-ermbg`/AutoMatte full-matting backend from active routes.
+- Route unknown backgrounds to PyMatting fallback; auto no longer invokes RMBG.
 - Add a lightweight local analysis layer before remote CorridorKey execution.
 - Support green-screen first, then add blue-screen support only after verifying
   the concrete Comfy/CorridorKey route.
@@ -29,7 +28,7 @@ uploaded image
       -> local ShadowPatch gate + shadow layer composite
       -> color protection / QA / Web candidates
       -> RGBA game UI asset
-  -> if unknown: remote comfy-rmbg fallback
+  -> if unknown: remote PyMatting fallback
 ```
 
 The local analysis layer should be deterministic and cheap. It should not run
@@ -76,7 +75,7 @@ so Web results and batch summaries are debuggable.
 `ShadowPatch` is the accepted shadow strategy for the CorridorKey game UI path.
 It is not an ERMBG fallback and it does not edit the CorridorKey subject layer.
 It only runs for green/blue known-screen assets that have already routed to
-CorridorKey; unknown backgrounds skip this path and go straight to RMBG.
+CorridorKey; unknown backgrounds skip this path and go to PyMatting fallback.
 The layer stack is:
 
 ```text
