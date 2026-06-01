@@ -19,6 +19,163 @@ class PyMattingAlphaResult:
     debug: dict[str, Any]
 
 
+def normalize_known_background_field(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    bg_threshold: float = 3.5,
+    fg_threshold: float = 30.0,
+    adaptive: bool = True,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Continuously normalize a mildly uneven known background.
+
+    Known-B PyMatting and ShadowPatch assume a single background color. Some
+    generated green/blue-screen assets have low-frequency background drift that
+    is not subject or shadow, especially in alpha tails. This prepass builds a
+    continuous normalization weight from high-confidence background evidence
+    and near-background screen-colored tail pixels, then blends those pixels
+    toward the measured background color. The field is smooth and applied
+    before trimap construction so sure-BG/unknown borders do not get a hard
+    discontinuity.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("image_srgb must be HxWx3 uint8")
+
+    bg = np.asarray(background_color, dtype=np.uint8)
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3))[0, 0]
+    distance = oklab_distance(lab, bg_lab)
+    thresholds = (
+        _adaptive_known_background_thresholds(distance, image_srgb, bg, bg_threshold, fg_threshold)
+        if adaptive
+        else _fixed_known_background_thresholds(bg_threshold, fg_threshold)
+    )
+    effective_bg_threshold = float(thresholds["bg_threshold_effective"])
+    effective_fg_threshold = float(thresholds["fg_threshold_effective"])
+
+    bg_close = distance <= effective_bg_threshold
+    exterior_bg = _flood_from_border(bg_close)
+    enclosed_bg, enclosed_info = _filter_enclosed_background_components(bg_close & ~exterior_bg)
+    high_conf_bg = (exterior_bg | enclosed_bg) & bg_close
+    if int(high_conf_bg.sum()) < max(32, int(round(float(bg_close.size) * 0.01))):
+        return image_srgb, {
+            "enabled": True,
+            "applied": False,
+            "reason": "insufficient high-confidence background evidence",
+            "high_conf_bg_pixels": int(high_conf_bg.sum()),
+            **thresholds,
+        }
+
+    residual = image_srgb.astype(np.float32) - bg.astype(np.float32).reshape(1, 1, 3)
+    border = _border_mask(distance.shape)
+    drift_probe = high_conf_bg & border
+    if int(drift_probe.sum()) < max(32, int(round(float(bg_close.size) * 0.002))):
+        drift_probe = high_conf_bg
+    bg_residual = residual[drift_probe]
+    residual_abs = np.abs(bg_residual)
+    residual_p95 = float(np.percentile(residual_abs, 95.0))
+    residual_std = float(np.std(bg_residual.astype(np.float32), axis=0).mean())
+    # These are 8-bit drift gates, not shadow thresholds. They are low enough
+    # to catch generator background mottling but leave true flat known screens
+    # like B010 as an exact no-op.
+    if residual_p95 < 2.0 and residual_std < 0.75:
+        return image_srgb, {
+            "enabled": True,
+            "applied": False,
+            "reason": "background already uniform",
+            "high_conf_bg_pixels": int(high_conf_bg.sum()),
+            "drift_probe_pixels": int(drift_probe.sum()),
+            "residual_abs_p95_u8": residual_p95,
+            "residual_std_u8": residual_std,
+            **thresholds,
+        }
+
+    h, w = distance.shape
+    image = image_srgb.astype(np.float32)
+    bgf = bg.astype(np.float32).reshape(3)
+    dominant = int(np.argmax(bgf))
+    others = [idx for idx in range(3) if idx != dominant]
+    screen_like_tail = np.zeros((h, w), dtype=bool)
+    tail_weight = np.zeros((h, w), dtype=np.float32)
+    if float(bgf[dominant]) >= 64.0 and float(bgf[dominant] - np.max(bgf[others])) >= 48.0:
+        other_max = np.max(image[..., others], axis=2)
+        # Tail normalization is intentionally limited to screen-colored pixels:
+        # quiet off-channels and a dominant screen channel. This keeps yellow
+        # ring material, highlights, and dark outlines out of the prepass.
+        screen_like_tail = (
+            (image[..., dominant] > other_max + max(6.0, float(bgf[dominant]) * 0.03))
+            & (other_max <= max(8.0, float(np.max(bgf[others])) + 8.0))
+        )
+        strength = np.clip(1.0 - image[..., dominant] / max(float(bgf[dominant]), 1.0), -0.20, 1.0)
+        tail_max_strength = 0.12
+        strength_gate = np.clip((tail_max_strength - np.maximum(strength, 0.0)) / tail_max_strength, 0.0, 1.0)
+        strength_gate = strength_gate * strength_gate * (3.0 - 2.0 * strength_gate)
+        fg_span = max(effective_fg_threshold - effective_bg_threshold, 1e-6)
+        bg_color_gate = np.clip(1.0 - (distance - effective_bg_threshold) / fg_span, 0.0, 1.0)
+        tail_weight = np.where(screen_like_tail, strength_gate * bg_color_gate, 0.0).astype(np.float32)
+
+        strong_fg = distance >= effective_fg_threshold
+        subject_support, _support_info = _known_background_subject_material_support(
+            image_srgb,
+            bg,
+            strong_fg=strong_fg,
+            screen_dominant_shadow=_screen_dominant_shadow_pixels(image_srgb, bg),
+        )
+        if bool(subject_support.any()):
+            dist_to_subject = cv2.distanceTransform((~subject_support).astype(np.uint8), cv2.DIST_L2, 3)
+            subject_clearance = np.clip((dist_to_subject - 2.0) / 10.0, 0.0, 1.0).astype(np.float32)
+            tail_weight *= subject_clearance
+
+    raw_weight = np.zeros((h, w), dtype=np.float32)
+    raw_weight[high_conf_bg] = 1.0
+    raw_weight = np.maximum(raw_weight, tail_weight)
+    if float(raw_weight.max()) <= 0.0:
+        return image_srgb, {
+            "enabled": True,
+            "applied": False,
+            "reason": "empty normalization support",
+            "high_conf_bg_pixels": int(high_conf_bg.sum()),
+            "drift_probe_pixels": int(drift_probe.sum()),
+            "residual_abs_p95_u8": residual_p95,
+            "residual_std_u8": residual_std,
+            **thresholds,
+        }
+
+    sigma = float(max(2.0, min(8.0, round(float(min(h, w)) * 0.025))))
+    ksize = int(round(sigma * 6.0)) | 1
+    weight = cv2.GaussianBlur(raw_weight, (ksize, ksize), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
+    weight = np.clip(weight, 0.0, 1.0).astype(np.float32)
+    weight[high_conf_bg] = 1.0
+    # Do not let smoothing spill into obvious material. Any residual line here
+    # is less harmful than pre-normalizing real subject color.
+    obvious_material = distance >= max(effective_fg_threshold, effective_bg_threshold + 8.0)
+    weight[obvious_material & ~screen_like_tail] = 0.0
+
+    normalized = image * (1.0 - weight[..., None]) + bgf.reshape(1, 1, 3) * weight[..., None]
+    normalized_u8 = np.clip(normalized + 0.5, 0, 255).astype(np.uint8)
+    changed = np.abs(normalized_u8.astype(np.int16) - image_srgb.astype(np.int16)).mean(axis=2) > 0
+    return normalized_u8, {
+        "enabled": True,
+        "applied": True,
+        "reason": "background drift normalized",
+        "background_color": [int(c) for c in bg],
+        "high_conf_bg_pixels": int(high_conf_bg.sum()),
+        "drift_probe_pixels": int(drift_probe.sum()),
+        "enclosed_bg_pixels": int(enclosed_bg.sum()),
+        "enclosed_bg_component_min_area": int(enclosed_info.get("enclosed_bg_component_min_area", 0)),
+        "residual_abs_p95_u8": residual_p95,
+        "residual_std_u8": residual_std,
+        "screen_like_tail_pixels": int(screen_like_tail.sum()),
+        "tail_weight_pixels": int((tail_weight > 1.0 / 255.0).sum()),
+        "weight_nonzero_pixels": int((weight > 1.0 / 255.0).sum()),
+        "weight_mean": float(weight.mean()),
+        "weight_p95": float(np.percentile(weight, 95.0)),
+        "changed_pixels": int(changed.sum()),
+        "sigma_px": sigma,
+        **thresholds,
+    }
+
+
 def build_known_background_trimap(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int] | np.ndarray,
@@ -55,6 +212,9 @@ def build_known_background_trimap(
     )
     effective_bg_threshold = thresholds["bg_threshold_effective"]
 
+    rgb_distance = np.sqrt(
+        np.sum((image_srgb.astype(np.float32) - bg.astype(np.float32).reshape(1, 1, 3)) ** 2, axis=2)
+    )
     bg_close = d <= effective_bg_threshold
     exterior_bg = _flood_from_border(bg_close)
     enclosed_bg_raw = bg_close & ~exterior_bg
@@ -91,27 +251,64 @@ def build_known_background_trimap(
     )
     effective_boundary_band_px = boundary_info["boundary_band_px_effective"]
     strong_fg = d >= effective_fg_threshold
-    sure_fg = strong_fg & (dist_to_exterior > float(effective_boundary_band_px))
+    screen_dominant_shadow = _screen_dominant_shadow_pixels(image_srgb, bg)
+    subject_support, subject_support_info = _known_background_local_material_core_support(
+        image_srgb,
+        bg,
+        strong_fg=strong_fg,
+        screen_dominant_shadow=screen_dominant_shadow,
+        boundary_info=boundary_info,
+    )
+    if bool(subject_support.any()):
+        sure_fg = subject_support
+        foreground_seed_inset_px = int(round(float(subject_support_info.get("effective_fg_core_inset_px", 0.0))))
+        foreground_seed_inset_info = {
+            "source": "local_material_core_with_extra_fg_inset",
+            "local_core_px": float(subject_support_info.get("local_core_px", 0.0)),
+            "extra_inset_px": float(subject_support_info.get("extra_inset_px", 0.0)),
+            "effective_fg_core_inset_px": float(subject_support_info.get("effective_fg_core_inset_px", 0.0)),
+        }
+    else:
+        foreground_seed_inset_px, foreground_seed_inset_info = _foreground_seed_inset_px(
+            image_srgb.shape[:2],
+            requested_boundary_band_px=boundary_band_px,
+            boundary_info=boundary_info,
+            support_distance=None,
+        )
+        sure_fg = strong_fg & (dist_to_exterior > float(foreground_seed_inset_px))
     # Interior pixels that still match the known background are transparent
     # cutouts, not antialiasing unknowns. Leaving them unknown lets local
     # smoothness solvers propagate surrounding foreground through UI holes.
-    sure_bg = exterior_bg | enclosed_bg
+    if bool(enclosed_bg.any()):
+        clean_bg = bg_close
+        clean_bg_threshold: float | str = "perceptual_bg_close"
+        clean_bg_policy = "hole_aware_preserve_enclosed_background"
+    else:
+        clean_bg_threshold_u8 = max(2.5, min(4.0, float(bg_threshold)))
+        clean_bg = rgb_distance <= clean_bg_threshold_u8
+        clean_bg_threshold = float(clean_bg_threshold_u8)
+        clean_bg_policy = "solid_subject_strict_known_background"
+    dist_to_non_clean = cv2.distanceTransform(clean_bg.astype(np.uint8), cv2.DIST_L2, 3)
+    # Sure background must be boring, unchanged screen. Pixels close to the
+    # subject or to a faint shadow falloff stay unknown so the later
+    # same-background reconstruction can decide their opacity.
+    sure_bg = (exterior_bg & clean_bg & (dist_to_non_clean >= 2.0)) | enclosed_bg
     shadow_bg, shadow_info = _known_background_shadow_like_background_mask(
         image_srgb,
         bg,
         subject_seed=sure_fg,
     )
-    screen_dominant_shadow = _screen_dominant_shadow_pixels(image_srgb, bg)
-    hard_shadow_bg = shadow_bg & (~sure_fg | screen_dominant_shadow)
-    # ShadowPatch is a reconstruction patch, not a trimap ownership oracle.
-    # The grown shadow-like support is useful debug evidence for the later
-    # source-reprojection patch, but it must not freely overturn strong
-    # foreground seeds: connected metal grooves can look like scalar-darkened
-    # screen when attached to a real cast shadow. Only weak/non-seed support, or
-    # strong seeds that still have screen-dominant shadow color, are pinned to
-    # background. Near-black/cross-channel subject grooves stay with PyMatting.
-    sure_bg |= hard_shadow_bg
-    sure_fg &= ~(enclosed_bg | hard_shadow_bg)
+    shadow_unknown = shadow_bg & (~sure_fg | screen_dominant_shadow)
+    # ShadowPatch is the ownership stage for scalar-darkened known background.
+    # The trimap should therefore not pin contact/drop shadows to foreground or
+    # background. This carve-out is especially important for the very faint
+    # outer falloff: those pixels can be close enough to the screen color to
+    # pass the sure-BG threshold, but they are still part of the transferable
+    # shadow and must remain in the repair domain. Screen-neutral dark
+    # material/grooves that already have a strong interior foreground seed stay
+    # foreground-protected.
+    sure_bg &= ~shadow_unknown
+    sure_fg &= ~(enclosed_bg | shadow_unknown)
     unknown = ~(sure_fg | sure_bg)
     labels_count, _, stats, _ = cv2.connectedComponentsWithStats(enclosed_bg.astype(np.uint8), 8)
     enclosed_areas = [int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)]
@@ -128,22 +325,278 @@ def build_known_background_trimap(
         **thresholds,
         "boundary_band_px": int(boundary_band_px),
         **boundary_info,
+        "foreground_seed_inset_px": int(foreground_seed_inset_px),
+        "foreground_seed_inset": foreground_seed_inset_info,
+        "subject_material_support": subject_support_info,
         "sure_fg_pixels": int(sure_fg.sum()),
         "sure_bg_pixels": int(sure_bg.sum()),
         "unknown_pixels": int(unknown.sum()),
         "exterior_bg_pixels": int(exterior_bg.sum()),
         "enclosed_bg_pixels": int(enclosed_bg.sum()),
+        "clean_bg_policy": clean_bg_policy,
+        "clean_bg_threshold": clean_bg_threshold,
+        "clean_exterior_bg_pixels": int((exterior_bg & clean_bg).sum()),
+        "sure_bg_clean_inset_px": 2.0,
         "enclosed_bg_pixels_raw": int(enclosed_bg_raw.sum()),
         **enclosed_info,
         "enclosed_bg_components": int(labels_count - 1),
         "largest_enclosed_bg_component": int(max(enclosed_areas, default=0)),
         "shadow_background": {
             **shadow_info,
-            "hard_ownership_pixels": int(hard_shadow_bg.sum()),
+            "unknown_ownership_pixels": int(shadow_unknown.sum()),
+            "hard_ownership_pixels": 0,
             "screen_dominant_overlap_pixels": int((shadow_bg & sure_fg & screen_dominant_shadow).sum()),
             "protected_foreground_overlap_pixels": int((shadow_bg & sure_fg & ~screen_dominant_shadow).sum()),
         },
     }
+
+
+def _known_background_local_material_core_support(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    strong_fg: np.ndarray,
+    screen_dominant_shadow: np.ndarray,
+    boundary_info: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Find high-confidence material cores without using one global component radius.
+
+    PyMatting should solve edge/AA/shadow transitions, not the interior of hard
+    UI materials. A single support-radius inset works for simple buttons but
+    fails on ornate controls: a large center panel makes thin metal ornaments
+    look too close to a boundary, so they remain unknown and can be solved as
+    semi-transparent. This helper keeps every coherent material island, builds
+    a local core a few pixels inside its own edge, then pulls that core back by
+    an extra 2px. The extra inset preserves the yellow/metal transition pixels
+    that PyMatting needs to keep adjacent green/blue shadow from turning into
+    foreground.
+    """
+    h, w = strong_fg.shape
+    bg = background_color.astype(np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    others = [idx for idx in range(3) if idx != dominant]
+    if float(bg[dominant]) < 64.0 or float(bg[dominant] - np.max(bg[others])) < 48.0:
+        return np.zeros((h, w), dtype=bool), {
+            "used": False,
+            "reason": "background is not a saturated single-channel screen",
+            "candidate_pixels": 0,
+            "support_pixels": 0,
+        }
+
+    img = image_srgb.astype(np.float32)
+    off_energy = np.max(img[..., others], axis=2)
+    material_floor = max(10.0, min(48.0, float(bg[dominant]) * 0.08))
+    candidate = strong_fg & (off_energy >= material_floor) & ~screen_dominant_shadow
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    min_area = int(max(8.0, round(float(h * w) * 0.00003)))
+    material = np.zeros((h, w), dtype=bool)
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        keep = bool(area >= min_area)
+        if keep:
+            material |= labels == label
+        components.append(
+            {
+                "area": area,
+                "keep": keep,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    if not bool(material.any()):
+        return np.zeros((h, w), dtype=bool), {
+            "used": True,
+            "reason": "no material support components",
+            "candidate_pixels": int(candidate.sum()),
+            "support_pixels": 0,
+            "component_min_area": int(min_area),
+            "material_floor_u8": float(material_floor),
+            "screen_dominant_rejected_pixels": int((strong_fg & screen_dominant_shadow).sum()),
+            "components": components[:20],
+            "omitted_components": max(0, len(components) - 20),
+        }
+
+    # This is a local edge clearance, not a sample-specific radius. The boundary
+    # measurement provides a floor, while the cap keeps thin ornaments seeded.
+    local_core_px = float(max(1.5, min(3.0, float(boundary_info["boundary_band_px_effective"]) + 0.5)))
+    material_dist = cv2.distanceTransform(material.astype(np.uint8), cv2.DIST_L2, 3)
+    core = material & (material_dist >= local_core_px)
+
+    labels_count2, labels2, stats2, _ = cv2.connectedComponentsWithStats(material.astype(np.uint8), 8)
+    recovered_pixels = 0
+    for label in range(1, labels_count2):
+        comp = labels2 == label
+        if bool((core & comp).any()):
+            continue
+        values = material_dist[comp]
+        if values.size and float(values.max()) >= 1.8 and int(stats2[label, cv2.CC_STAT_AREA]) >= min_area * 4:
+            add = comp & (material_dist >= min(1.8, float(values.max())))
+            core |= add
+            recovered_pixels += int(add.sum())
+
+    # Keep foreground anchors strong but not edge-touching. The extra guard band
+    # leaves transition pixels in unknown while preserving thin metal anchors.
+    extra_inset_px = 2.0
+    core_dist = cv2.distanceTransform(core.astype(np.uint8), cv2.DIST_L2, 3)
+    support = core & (core_dist > extra_inset_px)
+    released_pixels = int((core & ~support).sum())
+    return support, {
+        "used": True,
+        "reason": "",
+        "policy": "local_material_core_extra_inset",
+        "candidate_pixels": int(candidate.sum()),
+        "material_pixels": int(material.sum()),
+        "support_pixels": int(support.sum()),
+        "component_min_area": int(min_area),
+        "material_floor_u8": float(material_floor),
+        "local_core_px": float(local_core_px),
+        "extra_inset_px": float(extra_inset_px),
+        "effective_fg_core_inset_px": float(local_core_px + extra_inset_px),
+        "core_pixels_before_extra_inset": int(core.sum()),
+        "released_core_pixels": int(released_pixels),
+        "recovered_core_pixels": int(recovered_pixels),
+        "screen_dominant_rejected_pixels": int((strong_fg & screen_dominant_shadow).sum()),
+        "components": components[:20],
+        "omitted_components": max(0, len(components) - 20),
+    }
+
+
+def _known_background_subject_material_support(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    strong_fg: np.ndarray,
+    screen_dominant_shadow: np.ndarray,
+    fill_holes: bool = True,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Find a connected foreground material support without shadow pixels.
+
+    Saturated screen shadows keep the screen channel dominant. Subject material
+    has energy in at least one non-screen channel; using that evidence before
+    the distance-transform inset gives PyMatting a clean interior seed while
+    leaving outline, AA, and shadow falloff unknown.
+    """
+    h, w = strong_fg.shape
+    bg = background_color.astype(np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    others = [idx for idx in range(3) if idx != dominant]
+    if float(bg[dominant]) < 64.0 or float(bg[dominant] - np.max(bg[others])) < 48.0:
+        return np.zeros((h, w), dtype=bool), {
+            "used": False,
+            "reason": "background is not a saturated single-channel screen",
+            "candidate_pixels": 0,
+            "support_pixels": 0,
+        }
+
+    img = image_srgb.astype(np.float32)
+    off_energy = np.max(img[..., others], axis=2)
+    material_floor = max(10.0, min(48.0, float(bg[dominant]) * 0.08))
+    candidate = strong_fg & (off_energy >= material_floor) & ~screen_dominant_shadow
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    if labels_count <= 1:
+        return np.zeros((h, w), dtype=bool), {
+            "used": True,
+            "reason": "no material support components",
+            "candidate_pixels": int(candidate.sum()),
+            "support_pixels": 0,
+            "material_floor_u8": float(material_floor),
+        }
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    label = int(np.argmax(areas) + 1)
+    support = labels == label
+    support = cv2.morphologyEx(support.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8), iterations=1)
+    support = support.astype(bool)
+    if fill_holes:
+        support = _fill_mask_holes(support)
+    return support, {
+        "used": True,
+        "reason": "",
+        "fill_holes": bool(fill_holes),
+        "candidate_pixels": int(candidate.sum()),
+        "support_pixels": int(support.sum()),
+        "largest_component_area": int(areas.max()),
+        "material_floor_u8": float(material_floor),
+        "screen_dominant_rejected_pixels": int((strong_fg & screen_dominant_shadow).sum()),
+    }
+
+
+def _foreground_seed_inset_px(
+    shape: tuple[int, int],
+    *,
+    requested_boundary_band_px: int | float,
+    boundary_info: dict[str, Any],
+    support_distance: np.ndarray | None,
+) -> tuple[int, dict[str, Any]]:
+    """Return a conservative interior-only foreground seed distance.
+
+    The seed is a color anchor, not an ownership mask. Instead of baking in a
+    fixed 10px/11px inset, derive the clearance from two measured signals:
+    the observed source transition width and the material support's own
+    thickness. The transition width keeps AA/outline pixels out of sure-FG; the
+    thickness cap keeps small or thin controls from losing every seed.
+    """
+    h, w = shape
+    floor_px = max(2.0, float(requested_boundary_band_px) + 2.0)
+    transition_p90 = boundary_info.get("boundary_transition_distance_p90")
+    transition_px = float(transition_p90) if transition_p90 is not None else float(
+        boundary_info.get("boundary_band_px_effective", requested_boundary_band_px)
+    )
+    transition_inset = max(floor_px, transition_px + 0.5)
+
+    if support_distance is not None and bool((support_distance > 0.0).any()):
+        support_values = support_distance[support_distance > 0.0].astype(np.float32)
+        support_radius = float(support_values.max())
+        p90_radius = float(np.percentile(support_values, 90.0))
+        # The 0.45 radius fraction keeps seeds comfortably inside rounded
+        # button material without depending on a pixel constant. Blending with
+        # p90 avoids a single very fat lobe forcing an excessive inset on
+        # tapered or beveled UI controls.
+        thickness_cap = max(floor_px, min(support_radius * 0.45, p90_radius * 0.80))
+        measured = min(transition_inset, thickness_cap)
+        source = "transition_width_limited_by_material_thickness"
+    else:
+        support_radius = 0.0
+        p90_radius = 0.0
+        scale_cap = max(floor_px, float(min(h, w)) * 0.12)
+        measured = min(transition_inset, scale_cap)
+        thickness_cap = scale_cap
+        source = "transition_width_limited_by_image_scale"
+
+    inset = int(max(floor_px, round(measured)))
+    return inset, {
+        "source": source,
+        "floor_px": float(floor_px),
+        "transition_inset_px": float(transition_inset),
+        "material_thickness_cap_px": float(thickness_cap),
+        "support_radius_max_px": float(support_radius),
+        "support_radius_p90_px": float(p90_radius),
+    }
+
+
+def _fill_mask_holes(mask: np.ndarray) -> np.ndarray:
+    h, w = mask.shape
+    inv = (~mask).astype(np.uint8)
+    flood = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    work = inv.copy()
+    for x in range(w):
+        if work[0, x]:
+            cv2.floodFill(work, flood, (x, 0), 2)
+        if work[h - 1, x]:
+            cv2.floodFill(work, flood, (x, h - 1), 2)
+    for y in range(h):
+        if work[y, 0]:
+            cv2.floodFill(work, flood, (0, y), 2)
+        if work[y, w - 1]:
+            cv2.floodFill(work, flood, (w - 1, y), 2)
+    holes = work == 1
+    return mask | holes
 
 
 def _filter_enclosed_background_components(enclosed_bg: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
@@ -887,4 +1340,5 @@ __all__ = [
     "estimate_stable_background_color",
     "estimate_alpha_with_pymatting",
     "estimate_known_background_alpha_with_pymatting",
+    "normalize_known_background_field",
 ]

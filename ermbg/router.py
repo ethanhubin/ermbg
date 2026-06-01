@@ -556,7 +556,7 @@ def _pymatting_route_params(
         "pymatting_bg_source": "custom",
         "pymatting_bg_color": tuple(int(c) for c in background_color),
         "pymatting_bg_threshold": 3.5,
-        "pymatting_fg_threshold": 30.0,
+        "pymatting_fg_threshold": 24.0,
         "pymatting_boundary_band_px": 2,
         "pymatting_auto_adapt": True,
         "pymatting_cg_maxiter": 1000,

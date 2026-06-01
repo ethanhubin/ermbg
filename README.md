@@ -90,6 +90,11 @@ ERMBG 输出透明 PNG,并保留独立 alpha、前景 RGB、识别/debug metadat
 | 半透明 / 玻璃按钮                 | `corridorkey-transparent-button` | CorridorKey                     |
 | 角色                              | `corridorkey-character`          | CorridorKey                     |
 
+PyMatting Known-B 的生产路径会先按已知背景证据做背景归一化,再构造 trimap:
+局部材质 core 是 sure foreground,稳定背景是 sure background,抗锯齿、描边、
+孔洞边缘和可疑阴影全部留在 unknown。ShadowPatch 只在这个 unknown 域内做
+同背景重投影修复,高 alpha 主体 alpha 和前景不再被 ShadowPatch 改写。
+
 ## 安装
 
 项目推荐使用 `.venv/` 和 Python 3.12。

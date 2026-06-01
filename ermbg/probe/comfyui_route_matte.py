@@ -186,7 +186,7 @@ class ComfyUIRouteMatteClient:
         pymatting_bg_source: str = "auto",
         pymatting_bg_color: tuple[int, int, int] | None = None,
         pymatting_bg_threshold: float = 3.5,
-        pymatting_fg_threshold: float = 30.0,
+        pymatting_fg_threshold: float = 24.0,
         pymatting_boundary_band_px: int = 2,
         pymatting_auto_adapt: bool = True,
         pymatting_cg_maxiter: int = 1000,

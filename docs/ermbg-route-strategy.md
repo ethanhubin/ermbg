@@ -47,14 +47,17 @@ router 负责识别:
 PyMatting Known-B 路径面向游戏 UI 和稳定的纯背景图形。它的职责是在已知背景
 证据之上做像素级修复:
 
-- 由测得的背景/主体分离动态确定主体锚点;
-- 对硬边、抗锯齿、针孔、细残留、孔洞和接触区域做边缘归属修复;
+- 检测到背景不均匀时,先把已知背景和低 alpha 背景尾部归一化到测得背景色;
+- 用局部材质 core 动态确定 sure foreground,避免固定 10px inset;
+- sure foreground 保持在主体内部,描边、抗锯齿、孔洞边缘和所有疑似阴影都进入 unknown;
 - 对解出的 alpha 做 unmix 物理一致性修复(见下);
-- 对已知背景上经源图证明的标量变暗做 ShadowPatch 重建;
+- 以 trimap unknown 作为唯一 ShadowPatch 修复域,对已知背景上经源图证明的标量变暗做同背景重投影重建;
 - 为导出稳定前景 RGB。
 
 归属决策使用可测量证据,例如颜色距离、连通分量、局部支持度和同背景重投影
-误差。详细证据模型见 `docs/local-ownership.md`。
+误差。执行参数默认 `pymatting_bg_threshold=3.5`,
+`pymatting_fg_threshold=24`, `pymatting_boundary_band_px=2`,
+`pymatting_auto_adapt=true`。详细证据模型见 `docs/local-ownership.md`。
 
 ### Unmix 物理一致性修复
 

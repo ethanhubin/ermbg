@@ -402,7 +402,7 @@ def direct_matte_from_decision(
             bg_source=_route_params(params, "pymatting_bg_source", "custom"),
             bg_color=_route_params(params, "pymatting_bg_color", fallback_bg_color),
             bg_threshold=_route_params(params, "pymatting_bg_threshold", 3.5),
-            fg_threshold=_route_params(params, "pymatting_fg_threshold", 30.0),
+            fg_threshold=_route_params(params, "pymatting_fg_threshold", 24.0),
             boundary_band_px=_route_params(params, "pymatting_boundary_band_px", 2),
             auto_adapt=_route_params(params, "pymatting_auto_adapt", True),
             cg_maxiter=_route_params(params, "pymatting_cg_maxiter", 1000),

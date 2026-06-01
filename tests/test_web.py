@@ -125,7 +125,7 @@ def test_index_serves_upload_ui():
     assert 'name="pymatting_bg_threshold"' in response.text
     assert 'name="pymatting_fg_threshold"' in response.text
     assert 'id="pm-cg-maxiter" name="pymatting_cg_maxiter" type="number" min="100" max="10000" step="100" value="1000"' in response.text
-    assert 'id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="30"' in response.text
+    assert 'id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="24"' in response.text
     assert 'id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"' in response.text
     assert '<span>保留阴影</span><input id="shadow-enabled" name="shadow_enabled" type="checkbox" checked>' in response.text
     assert 'const shadowEnabled = document.getElementById("shadow-enabled");' in response.text

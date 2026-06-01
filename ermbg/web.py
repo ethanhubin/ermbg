@@ -568,7 +568,7 @@ def _matte_page_html() -> str:
               </div>
               <div class="settings-row">
                 <label>背景阈值<input id="pm-bg-threshold" name="pymatting_bg_threshold" type="number" min="0" max="32" step="0.1" value="3.5"></label>
-                <label>前景阈值<input id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="30"></label>
+                <label>前景阈值<input id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="24"></label>
               </div>
               <label>CG rtol<input id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"></label>
             </div>
@@ -2500,7 +2500,7 @@ def matte_endpoint(
     pymatting_bg_source: Annotated[str, Form()] = "auto",
     pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
     pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
-    pymatting_fg_threshold: Annotated[float, Form()] = 30.0,
+    pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
     pymatting_boundary_band_px: Annotated[int, Form()] = 2,
     pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
@@ -2589,7 +2589,7 @@ def matte_candidates_endpoint(
     pymatting_bg_source: Annotated[str, Form()] = "auto",
     pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
     pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
-    pymatting_fg_threshold: Annotated[float, Form()] = 30.0,
+    pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
     pymatting_boundary_band_px: Annotated[int, Form()] = 2,
     pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
