@@ -1,4 +1,3 @@
-# ERMBG Handoff
+# ERMBG 交接说明
 
-The active engineering contract lives in [AGENTS.md](AGENTS.md). Read that file
-before making changes.
+活跃的工程契约位于 [AGENTS.md](AGENTS.md)。改动前请先阅读该文件。

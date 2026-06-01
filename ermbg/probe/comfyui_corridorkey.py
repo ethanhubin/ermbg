@@ -568,7 +568,7 @@ class ComfyUICorridorKeyClient:
         self.timeout = timeout
         self.poll_interval = poll_interval
         path = Path(workflow_path) if workflow_path else _DEFAULT_WORKFLOW
-        self.workflow_template = json.loads(path.read_text())
+        self.workflow_template = json.loads(path.read_text(encoding="utf-8"))
 
     def _post(self, path: str, **kwargs):
         r = requests.post(f"{self.base_url}{path}", timeout=60, **kwargs)

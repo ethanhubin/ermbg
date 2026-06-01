@@ -37,7 +37,7 @@ def _load_object_prompt(json_path: Path) -> str | None:
     if not json_path.exists():
         return None
     try:
-        data = json.loads(json_path.read_text())
+        data = json.loads(json_path.read_text(encoding="utf-8"))
         return data.get("object_prompt")
     except Exception as e:
         logger.warning(f"Could not parse {json_path}: {e}")
@@ -147,7 +147,7 @@ def diagnose(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = input_path.stem
-    (out_dir / f"{stem}.report.json").write_text(json.dumps(report.to_dict(), indent=2))
+    (out_dir / f"{stem}.report.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
     io.save_mask(out_dir / f"{stem}_mask.png", mask)
     if report.risk_map is not None:
         io.save_mask(out_dir / f"{stem}_risk.png", report.risk_map)
@@ -244,7 +244,7 @@ def phase1(
         summary.append(row)
 
     _write_summary(out_dir / "summary.md", summary)
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     logger.info(f"Wrote {out_dir / 'summary.md'}")
 
 
@@ -269,7 +269,7 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
                 tk=f"{r.get('thin_structure_preservation', float('nan')):.2f}" if "thin_structure_preservation" in r else "-",
             )
         )
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

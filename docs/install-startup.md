@@ -1,22 +1,21 @@
-# ERMBG install and startup
+# ERMBG 安装与启动
 
-The default service flow uses Direct Worker. Direct Worker can run on the same
-machine as Web or on a remote server; Web reads its HTTP URL from configuration.
+默认服务流程使用 Direct Worker。Direct Worker 既可以和 Web 跑在同一台机器上,
+也可以跑在远端服务器上;Web 从配置中读取它的 HTTP URL。
 
-## Runtime shape
+## 运行时形态
 
 ```text
-Browser
-  -> local ERMBG Web UI / API :7860
-  -> configured ERMBG Direct Worker URL
-  -> shared router + execution profiles
+浏览器
+  -> 本地 ERMBG Web UI / API :7860
+  -> 配置的 ERMBG Direct Worker URL
+  -> 共享 router + execution profiles
   -> PyMatting Known-B / CorridorKey runner / passthrough
 ```
 
-ComfyUI is an optional adapter. Install `comfy_nodes/` when a Comfy graph needs
-ERMBG nodes.
+ComfyUI 是可选适配器。当某个 Comfy 图需要 ERMBG 节点时,再安装 `comfy_nodes/`。
 
-## Install
+## 安装
 
 ```powershell
 cd <ermbg-root>
@@ -24,12 +23,12 @@ uv venv .venv --python 3.12
 uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 ```
 
-The `torch` extra supports the Direct Worker CorridorKey route. PyMatting-only
-tests can run without it. Game-asset service installs should include `torch`.
+`torch` extra 支持 Direct Worker 的 CorridorKey 路径。只跑 PyMatting 的测试
+可以不装它。游戏素材服务安装应包含 `torch`。
 
-## Configuration
+## 配置
 
-Service endpoints live in `ermbg.config.json`:
+服务端点位于 `ermbg.config.json`:
 
 ```json
 {
@@ -45,19 +44,19 @@ Service endpoints live in `ermbg.config.json`:
 }
 ```
 
-Environment variables `ERMBG_DIRECT_URL`, `COMFY_URL`, `ERMBG_WEB_AUTO_BACKEND`,
-`ERMBG_WEB_AUTO_FALLBACK_BACKEND`, and `ERMBG_ENABLE_COMFY` can override the
-config for one shell session.
+环境变量 `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
+`ERMBG_WEB_AUTO_FALLBACK_BACKEND` 和 `ERMBG_ENABLE_COMFY` 可在单个 shell
+会话内覆盖配置。
 
-## Start Web with local Direct Worker
+## 用本地 Direct Worker 启动 Web
 
-Start both services:
+同时启动两个服务:
 
 ```powershell
 .\scripts\start_local.ps1
 ```
 
-Manual commands:
+手动命令:
 
 ```powershell
 Start-Process -WindowStyle Hidden -WorkingDirectory . `
@@ -69,28 +68,28 @@ Start-Process -WindowStyle Hidden -WorkingDirectory . `
   -ArgumentList "-m uvicorn ermbg.web:app --host 127.0.0.1 --port 7860"
 ```
 
-Open:
+打开:
 
 ```text
 <web-url>
 ```
 
-## Start Web with remote Direct Worker
+## 用远端 Direct Worker 启动 Web
 
-Start the worker on the remote server:
+在远端服务器上启动 worker:
 
 ```powershell
 cd C:\path\to\ermbg
 .\.venv\Scripts\python.exe -m ermbg.direct_worker_server --host 0.0.0.0 --port 7871 --cpu-workers 4
 ```
 
-Start the local Web service and point it at the remote worker:
+启动本地 Web 服务,并指向远端 worker:
 
 ```powershell
 .\scripts\start_local.ps1 -SkipDirectWorker -DirectUrl <services.direct_worker_url>
 ```
 
-Environment form:
+环境变量形式:
 
 ```powershell
 $env:ERMBG_DIRECT_URL = "<services.direct_worker_url>"
@@ -99,14 +98,14 @@ $env:ERMBG_ENABLE_COMFY = "0"
 .\.venv\Scripts\python.exe -m uvicorn ermbg.web:app --host 127.0.0.1 --port 7860
 ```
 
-## Verify
+## 验证
 
 ```powershell
 curl.exe -sS "<services.direct_worker_url>/health"
 curl.exe -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_object_info=false"
 ```
 
-Capability response:
+能力响应:
 
 - `local.status = ok`
 - `direct_worker.status = ok`
@@ -114,21 +113,21 @@ Capability response:
 - `web.enable_comfy = false`
 - `comfy.status = disabled`
 
-## Optional Comfy adapter
+## 可选的 Comfy 适配器
 
-Comfy graph support:
+Comfy 图支持:
 
-1. Install ERMBG into the Comfy Python environment.
-2. Copy `comfy_nodes/` to Comfy's `custom_nodes/ermbg-comfy`.
-3. Restart Comfy because custom nodes are scanned at process start.
-4. Verify `/object_info` contains `ErmbgRouteMatte`, `ErmbgRouteStrategy`,
-   `ErmbgPyMattingKnownB`, and `ErmbgClassify`.
+1. 把 ERMBG 安装到 ComfyUI 的 Python 环境。
+2. 把 `comfy_nodes/` 复制到 Comfy 的 `custom_nodes/ermbg-comfy`。
+3. 重启 Comfy,因为自定义节点是在进程启动时扫描的。
+4. 验证 `/object_info` 中包含 `ErmbgRouteMatte`、`ErmbgRouteStrategy`、
+   `ErmbgPyMattingKnownB` 和 `ErmbgClassify`。
 
-Web-side debugging of explicit Comfy backends:
+Web 侧调试显式 Comfy 后端:
 
 ```text
 ERMBG_ENABLE_COMFY=1
 COMFY_URL=<services.comfy_url>
 ```
 
-Normal Web/API usage leaves `ERMBG_ENABLE_COMFY=0`.
+正常的 Web/API 使用保持 `ERMBG_ENABLE_COMFY=0`。

@@ -1,13 +1,26 @@
 # ERMBG
 
-ERMBG 是面向 AI 生成游戏素材的智能抠图系统。
-系统会分析图片特征、背景颜色、边缘结构、透明材质、阴影和素材语义,自动匹配合适的抠图算法与参数。
-针对游戏 UI 素材,ERMBG 基于 PyMatting Known-B 进行像素级修复,利用已知背景色、边缘证据和重投影误差处理硬边、细边、孔洞、阴影和半透明区域。
-针对复杂绿色/蓝色背景素材,ERMBG 借鉴影视行业多年绿幕抠图经验沉淀,使用 CorridorKey 处理角色、玻璃、发光、烟雾、毛发和软 alpha 边缘。
+ERMBG 是面向 AI 生成游戏素材的智能抠图系统。它的目标只有一个: 在纯色背景上做到
+像素级完美的透明抠图,输出可以直接进入游戏 UI、动效和角色素材生产链路的 RGBA PNG。
 
-设计目标是在纯色背景上达到像素级完美的透明抠图,输出可直接进入游戏 UI、动效和角色素材生产链路的 RGBA PNG。
+通用抠图模型(rembg/RMBG 等)是为照片设计的,追求"语义上像前景"。但游戏素材的痛点
+不在语义,而在边缘: 1px 的硬边、细描边、内部孔洞、接触阴影、玻璃和 glow 的半透明
+过渡——这些地方差几个像素就会在新背景上露馅。ERMBG 因此换了一个出发点。
 
-## Design
+## 核心理念
+
+**确定性优先,模型兜底。** 游戏素材通常生成在已知的纯色/绿幕/蓝幕上,背景色、
+边缘拓扑和阴影都是可测量的强证据。ERMBG 优先用这些证据直接求解,而不是先跑通用
+模型再修它的错;只有证据不足时(照片、发丝、混合背景)才回退到通用 matting。
+
+**先定归属,再算 alpha。** 一块区域是背景、孔洞、半透明主体还是阴影,是不同性质
+的问题,不该用一条阈值一刀切。ERMBG 先判定区域归属,再按归属分别求解,所以玻璃
+不会被当成孔洞、阴影不会被当成主体。
+
+**机制驱动,而非样本驱动。** 不围绕样本 ID、文件名、坐标或固定颜色打补丁。每条
+规则都对应一个可观测信号和一个要保护的失败模式,这样才能泛化到没见过的素材。
+
+## 设计
 
 - **游戏 UI 像素级修复:** 基于 PyMatting Known-B,以已知背景色为强约束,结合颜色距离、边缘证据和重投影误差修复硬边、细边、孔洞和阴影。
 - **图片特征识别:** 自动识别按钮、图标、特效、角色、玻璃/半透明材质、已有 alpha 和未知背景 fallback。
@@ -15,11 +28,11 @@ ERMBG 是面向 AI 生成游戏素材的智能抠图系统。
 - **影视级绿/蓝幕抠图:** 对复杂绿幕/蓝幕素材使用 CorridorKey,处理发丝、毛发、半透明、发光、烟雾和玻璃材质。
 - **批量可验证:** Web run、CLI/API run 和 Game Eval 都写入 `out/` batch/artifact,保留 PNG 输出和机器可读 manifest。
 
-## Game Asset Coverage
+## 游戏素材覆盖范围
 
 ERMBG 已完成面向游戏素材的类型适配:
 
-| Asset type | Coverage |
+| 素材类型 | 覆盖能力 |
 | --- | --- |
 | 硬边按钮 / UI 面板 | 纯色背景检测、硬边 alpha、孔洞归属、阴影保留 |
 | 玻璃 / 半透明按钮 | 绿/蓝幕 CorridorKey、半透明主体保护、颜色保护 |
@@ -29,7 +42,7 @@ ERMBG 已完成面向游戏素材的类型适配:
 | 已有 RGBA | alpha 质量检查和 passthrough |
 | 未知 / 不稳定背景 | PyMatting fallback 和诊断 metadata |
 
-## Technical Path
+## 技术路径
 
 ```text
 Web/API backend=auto
@@ -48,7 +61,7 @@ Web/API backend=auto
 - `ermbg/direct_worker_server.py`: Direct Worker HTTP 服务
 - `ermbg/web.py`: Web UI、Web API、Game Eval 页面
 
-## Output
+## 输出
 
 ERMBG 输出透明 PNG,并保留独立 alpha、前景 RGB、识别/debug metadata 和 artifact manifest。典型输出字段包括:
 
@@ -62,22 +75,22 @@ ERMBG 输出透明 PNG,并保留独立 alpha、前景 RGB、识别/debug metadat
 
 回归样本集位于 `samples/corridorkey_semantic/manifest.json`,覆盖 button、icon/effect 和 character 三类游戏素材。
 
-## Execution Profiles
+## 执行 Profile
 
 图片特征识别会在执行前确定最终 profile。`parameter_profile` 是分析元数据,用于解释系统匹配算法的依据；`execution_profile` 是执行契约,用于控制 hint mode、mask prior、color protection、refiner、despeckle 和 debug metadata。
 
-| Asset / case                      | Execution profile                | Execution path                  |
+| 素材 / 场景                        | Execution profile                | 执行路径                        |
 | --------------------------------- | -------------------------------- | ------------------------------- |
 | clean RGBA                        | passthrough                      | passthrough                     |
-| hard UI / deterministic button    | `pymatting-hard-button`          | PyMatting Known-B               |
-| known-background graphic fallback | `pymatting-known-bg`             | PyMatting Known-B               |
-| unknown / unstable background     | `pymatting-fallback`             | PyMatting fallback              |
+| 硬边 UI / 确定性按钮              | `pymatting-hard-button`          | PyMatting Known-B               |
+| 已知背景图形 fallback             | `pymatting-known-bg`             | PyMatting Known-B               |
+| 未知 / 不稳定背景                 | `pymatting-fallback`             | PyMatting fallback              |
 | shaped icon                       | `corridorkey-shaped-icon`        | CorridorKey                     |
 | effect icon                       | `corridorkey-effect-icon`        | CorridorKey                     |
-| translucent / glass button        | `corridorkey-transparent-button` | CorridorKey                     |
-| character                         | `corridorkey-character`          | CorridorKey                     |
+| 半透明 / 玻璃按钮                 | `corridorkey-transparent-button` | CorridorKey                     |
+| 角色                              | `corridorkey-character`          | CorridorKey                     |
 
-## Install
+## 安装
 
 项目推荐使用 `.venv/` 和 Python 3.12。
 
@@ -90,7 +103,7 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 `torch` extra 用于 Direct Worker 的 CorridorKey 路径。只跑 PyMatting smoke 时
 可以不装,但默认游戏素材主流程建议安装。
 
-## Deploy
+## 部署
 
 ERMBG Web 通过 `ermbg.config.json` 的 `services.direct_worker_url` 连接 Direct Worker。Direct Worker 可以安装在本机,也可以安装在远端服务器。环境变量 `ERMBG_DIRECT_URL` 可用于临时覆盖该配置。
 
@@ -120,7 +133,7 @@ $env:ERMBG_WEB_AUTO_BACKEND = "direct-worker"
 
 默认 Direct Worker 地址写在 `ermbg.config.json` 的 `services.direct_worker_url`。
 
-## Use
+## 使用
 
 ### Web UI
 
@@ -136,7 +149,7 @@ $env:ERMBG_WEB_AUTO_BACKEND = "direct-worker"
 
 Web 里默认选择 `Auto Direct Worker`。
 
-### CLI Matte
+### CLI 抠图
 
 ```bash
 .venv/bin/ermbg matte input.png --backend auto --out-dir out/manual_matte
@@ -201,7 +214,7 @@ print(result.debug)
 
 Direct Worker 还会返回 `debug.direct_worker.execution_backend`,例如 `direct-corridorkey` 或 `direct-pymatting-known-b`。
 
-## Verification
+## 验证
 
 常规本地测试:
 
@@ -217,26 +230,25 @@ Direct Worker HTTP smoke:
   --sample-id B001,I011
 ```
 
-Runtime capability smoke through the local Web server:
+通过本地 Web 服务跑运行时能力 smoke:
 
 ```bash
 curl -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_object_info=false"
 ```
 
-Standard artifact manifest:
+标准 artifact manifest:
 
-- Python API / CLI `output_dir` runs write `manifest.json` beside the existing
-  `*_rgba.png`, `*_alpha.png`, `*_foreground.png`, and `*.report.json` files.
-- Web `/api/matte-candidates` writes each run under
-  `out/web_matte_runs_<YYYYMMDD>/.../` and returns `artifact_manifest`.
-- Game Eval case directories write `manifest.json` and include
-  `artifact_manifest` in each case `summary.json`, including the
-  `direct-worker` path.
-- Manifest schema is `ermbg.run.v1`.
-- Artifact discovery API: `GET /api/artifacts` and
-  `GET /api/artifacts/<artifact_id>`.
+- Python API / CLI 的 `output_dir` run 会在已有的 `*_rgba.png`、
+  `*_alpha.png`、`*_foreground.png` 和 `*.report.json` 旁边写入 `manifest.json`。
+- Web 的 `/api/matte-candidates` 把每次 run 写到
+  `out/web_matte_runs_<YYYYMMDD>/.../` 下,并返回 `artifact_manifest`。
+- Game Eval 的每个 case 目录写入 `manifest.json`,并在各 case 的
+  `summary.json` 中包含 `artifact_manifest`,`direct-worker` 路径也一样。
+- Manifest schema 为 `ermbg.run.v1`。
+- Artifact 发现 API: `GET /api/artifacts` 和
+  `GET /api/artifacts/<artifact_id>`。
 
-Auto 与 Direct 对齐时,重点看:
+对齐 Auto 与 Direct 时,重点看:
 
 - 同一输入的 `parameter_profile` 是否一致;
 - 同一输入的 `execution_profile` 是否一致;
@@ -246,60 +258,60 @@ Auto 与 Direct 对齐时,重点看:
 
 Web/API 变更验证要求目标 Web 服务已运行,并用真实 HTTP 请求跑 `/api/matte-candidates` smoke。
 
-## Project Map
+## 项目地图
 
-| Path                                      | Role                                                  |
+| 路径                                      | 角色                                                  |
 | ----------------------------------------- | ----------------------------------------------------- |
-| `ermbg/router.py`                         | route decision, asset kind, execution profile         |
-| `ermbg/api.py`                            | main matting API and PyMatting Known-B implementation |
-| `ermbg/corridorkey_runner.py`             | shared in-process CorridorKey runner                  |
-| `ermbg/direct_worker.py`                  | direct execution orchestration                        |
-| `ermbg/direct_worker_client.py`           | local HTTP client for Direct Worker                   |
-| `ermbg/direct_worker_server.py`           | remote Direct Worker FastAPI server                   |
-| `ermbg/web.py`                            | Web UI, Web API, Game Eval launcher                   |
-| `scripts/run_corridorkey_game_eval.py`    | manifest-backed batch eval                            |
-| `scripts/benchmark_direct_worker_path.py` | direct path benchmark utilities                       |
-| `scripts/smoke_direct_worker_http.py`     | remote worker smoke                                   |
-| `samples/corridorkey_semantic/`           | B/I/C game asset sample set                           |
-| `out/`                                    | eval batches, summaries, generated debug artifacts    |
+| `ermbg/router.py`                         | route 决策、asset kind、execution profile             |
+| `ermbg/api.py`                            | 主 matting API 和 PyMatting Known-B 实现              |
+| `ermbg/corridorkey_runner.py`             | 共享的进程内 CorridorKey runner                       |
+| `ermbg/direct_worker.py`                  | direct 执行编排                                       |
+| `ermbg/direct_worker_client.py`           | Direct Worker 的本地 HTTP client                      |
+| `ermbg/direct_worker_server.py`           | 远端 Direct Worker FastAPI 服务                       |
+| `ermbg/web.py`                            | Web UI、Web API、Game Eval 启动器                     |
+| `scripts/run_corridorkey_game_eval.py`    | 基于 manifest 的批量 eval                             |
+| `scripts/benchmark_direct_worker_path.py` | direct 路径基准测试工具                               |
+| `scripts/smoke_direct_worker_http.py`     | 远端 worker smoke                                     |
+| `samples/corridorkey_semantic/`           | B/I/C 游戏素材样本集                                  |
+| `out/`                                    | eval batch、summary、生成的 debug 产物                |
 
-## Docs
+## 文档
 
-- `docs/install-startup.md` - default install/start flow.
-- `docs/architecture.md` - core/adapters/runtimes architecture and service boundaries.
-- `docs/ermbg-route-strategy.md` - route/profile/backend contract.
-- `docs/corridorkey-semantic-paths.md` - semantic sample paths and B/I/C set.
-- `docs/corridorkey-game-ui-plan.md` - game UI development plan.
-- `docs/local-ownership.md` - diagnostic ownership scoring, not the main production path.
-- `integrations/openclaw/README.md` - optional independent OpenClaw `ermbg-matte` skill integration.
-- `DEPLOY.md` - deployment notes.
+- `docs/install-startup.md` - 默认安装/启动流程。
+- `docs/architecture.md` - core/adapters/runtimes 架构与服务边界。
+- `docs/ermbg-route-strategy.md` - route/profile/backend 契约。
+- `docs/corridorkey-semantic-paths.md` - 语义样本路径与 B/I/C 集。
+- `docs/corridorkey-game-ui-plan.md` - 游戏 UI 开发计划。
+- `docs/local-ownership.md` - 诊断用归属打分,不是主生产路径。
+- `integrations/openclaw/README.md` - 可选的独立 OpenClaw `ermbg-matte` skill 集成。
+- `DEPLOY.md` - 部署说明。
 
-Documents under `docs/archive/` are reference-only material unless an active doc explicitly points back to them.
+`docs/archive/` 下的文档仅供参考,除非某个活跃文档明确指回它们。
 
-## Development Principles
+## 开发原则
 
-- Algorithm changes should be mechanism-driven, not sample-id-driven.
+- 算法改动应由机制驱动,而非由样本 ID 驱动。
 - 图片识别和 profile 行为应在共享代码中修改,避免分别修改 Web、Direct Worker 或可选适配器。
-- Generated eval artifacts should live in a self-contained batch under `out/`.
-- Web production behavior should keep shadow handling on unless a preview-only speed mode is explicitly requested.
+- 生成的 eval 产物应放在 `out/` 下一个自包含的 batch 中。
+- Web 生产行为应保持阴影处理开启,除非显式要求只用于预览的提速模式。
 
-## Extension Support
+## 扩展支持
 
-### ComfyUI Nodes
+### ComfyUI 节点
 
-`comfy_nodes/` provides ERMBG nodes for custom ComfyUI graphs:
+`comfy_nodes/` 为自定义 ComfyUI 图提供 ERMBG 节点:
 
 - `ERMBG Route Matte`
 - `ERMBG Route Strategy`
 - `ERMBG PyMatting Known-B`
 - `ERMBG Classify`
 
-Install the node package into ComfyUI only when Comfy graphs need ERMBG nodes.
-See `comfy_nodes/README.md` and `DEPLOY.md`.
+仅当 Comfy 图需要 ERMBG 节点时,才把节点包安装进 ComfyUI。
+参见 `comfy_nodes/README.md` 和 `DEPLOY.md`。
 
-### OpenClaw Adapter
+### OpenClaw 适配器
 
-OpenClaw support is an optional independent `ermbg-matte` adapter.
+OpenClaw 支持是一个可选的独立 `ermbg-matte` 适配器。
 
 ```bash
 scripts/install_openclaw_ermbg_skill.sh
@@ -308,4 +320,4 @@ python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
   --image /path/to/input.png
 ```
 
-Adapters should call the maintained ERMBG service/API and avoid duplicating image feature matching logic.
+适配器应调用维护中的 ERMBG 服务/API,避免重复实现图片特征匹配逻辑。

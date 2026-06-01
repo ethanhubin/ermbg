@@ -66,7 +66,7 @@ class ComfyUIProbeGenerator(ProbeGenerator):
         self.timeout = timeout
         self.poll_interval = poll_interval
         path = Path(workflow_path) if workflow_path else _DEFAULT_WORKFLOW
-        self.workflow_template = json.loads(path.read_text())
+        self.workflow_template = json.loads(path.read_text(encoding="utf-8"))
 
     # --- HTTP helpers ------------------------------------------------------
 

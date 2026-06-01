@@ -2,9 +2,9 @@
 
 ERMBG 在 OpenClaw 里是独立 skill: `ermbg-matte`。
 
-OpenClaw 不是 ERMBG 主线。当前主线是 Web/API/CLI 调远端 ComfyUI
-`ErmbgRouteMatte`,Direct Worker 作为验证和加速路径。这里保留的是一个可选
-外围适配器,用于需要 OpenClaw 调用时复用同一条 RouteMatte 合约。
+OpenClaw 不是 ERMBG 主线。当前主线是 Web/API/CLI 走 Direct Worker,远端 ComfyUI
+`ErmbgRouteMatte` 是可选执行路径。这里保留的是一个可选外围适配器,用于需要
+OpenClaw 调用时复用同一条 RouteMatte 合约。
 
 它不是 `comfyui-rmbg` 的子模式,也不复用 RMBG/rembg 的意图入口。这样做的
 目标是让 agent 明确区分:

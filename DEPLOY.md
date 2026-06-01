@@ -1,9 +1,9 @@
-# Optional ComfyUI Node Deployment
+# 可选的 ComfyUI 节点部署
 
-ERMBG Web/API uses Direct Worker by default. This document covers installation
-of the optional ERMBG nodes into a ComfyUI environment.
+ERMBG Web/API 默认使用 Direct Worker。本文档介绍如何把可选的 ERMBG 节点
+安装到 ComfyUI 环境中。
 
-Service endpoints are configured in `ermbg.config.json`:
+服务端点在 `ermbg.config.json` 中配置:
 
 ```json
 {
@@ -13,51 +13,48 @@ Service endpoints are configured in `ermbg.config.json`:
 }
 ```
 
-Environment variable `COMFY_URL` can override `services.comfy_url` for one shell
-session.
+环境变量 `COMFY_URL` 可在单个 shell 会话内覆盖 `services.comfy_url`。
 
-## Nodes
+## 节点
 
-The optional Comfy package exposes:
+可选的 Comfy 包提供:
 
 - `ERMBG Route Matte`
 - `ERMBG Route Strategy`
 - `ERMBG PyMatting Known-B`
 - `ERMBG Classify`
 
-## Install
+## 安装
 
-1. Install ERMBG into the Python environment used by ComfyUI:
+1. 把 ERMBG 安装到 ComfyUI 使用的 Python 环境:
 
    ```powershell
    <comfy-python> -m pip install -e <ermbg-root>
    ```
 
-2. Copy or link the node package into ComfyUI `custom_nodes`:
+2. 把节点包复制或链接到 ComfyUI 的 `custom_nodes`:
 
    ```powershell
    Copy-Item -Recurse -Force <ermbg-root>\comfy_nodes <comfy-custom-nodes>\ermbg-comfy
    ```
 
-   The custom node directory must not be named `ermbg`, because that conflicts
-   with the Python package import.
+   自定义节点目录不能命名为 `ermbg`,因为这会与 Python 包导入冲突。
 
-3. Restart ComfyUI. Custom nodes are loaded at process startup.
+3. 重启 ComfyUI。自定义节点是在进程启动时加载的。
 
-4. Verify node registration from the configured `services.comfy_url`:
+4. 从配置的 `services.comfy_url` 验证节点注册情况:
 
    ```bash
    curl -s "<services.comfy_url>/object_info" | python -c "import json,sys; d=json.load(sys.stdin); print([k for k in d if k.startswith('Ermbg')])"
    ```
 
-   Expected keys include `ErmbgRouteMatte`, `ErmbgRouteStrategy`,
-   `ErmbgPyMattingKnownB`, and `ErmbgClassify`.
+   预期的 key 包括 `ErmbgRouteMatte`、`ErmbgRouteStrategy`、
+   `ErmbgPyMattingKnownB` 和 `ErmbgClassify`。
 
-## Update
+## 更新
 
-- Changes under `ermbg/` require the Comfy Python environment to import the
-  updated ERMBG package. Editable installs make this simple.
-- Changes under `comfy_nodes/` require copying/linking the node package again
-  and restarting ComfyUI.
-- Keep Comfy wrappers thin. Route/profile decisions and CorridorKey execution
-  belong in shared ERMBG code, not in Comfy-only branches.
+- `ermbg/` 下的改动需要让 Comfy 的 Python 环境导入更新后的 ERMBG 包。
+  使用 editable 安装可以简化这一步。
+- `comfy_nodes/` 下的改动需要重新复制/链接节点包并重启 ComfyUI。
+- Comfy 包装层要保持轻薄。route/profile 决策和 CorridorKey 执行应放在共享的
+  ERMBG 代码中,而不是放在 Comfy 专属分支里。

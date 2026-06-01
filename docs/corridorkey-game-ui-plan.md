@@ -1,108 +1,99 @@
-# CorridorKey Game UI Workflow Plan
+# 游戏 UI 工作流计划
 
-This is the current development plan for game UI assets. The mainline has moved
-to ERMBG-owned routing with profile-specific execution: ERMBG decides the final
-path and parameters, then ComfyUI executes PyMatting Known-B, CorridorKey,
-passthrough, or PyMatting fallback inside the remote process.
+这是游戏 UI 素材的当前开发计划。主线已转向由 ERMBG 拥有 routing、并按 profile
+做执行: ERMBG 决定最终路径和参数,然后由执行后端运行 PyMatting Known-B、
+CorridorKey、passthrough 或 PyMatting fallback。生产环境的默认执行后端是
+Direct Worker;远端 ComfyUI `ErmbgRouteMatte` 节点是可选的执行路径。
 
-## Summary
+## 概要
 
-- Route game UI assets through ERMBG strategy first and emit a final
-  `execution_profile` before matting.
-- Remove the old `comfy-ermbg`/AutoMatte full-matting backend from active routes.
-- Route unknown backgrounds to PyMatting fallback; auto no longer invokes RMBG.
-- Run route analysis, parameter selection, CorridorKey/PyMatting execution,
-  ShadowPatch, and metadata generation in the remote `ErmbgRouteMatte` node.
-- Use CorridorKey for green/blue known-screen icon, character, glass, and
-  translucent button profiles.
-- Use PyMatting Known-B for deterministic hard buttons and unknown/unstable
-  fallback.
+- 游戏 UI 素材先经过 ERMBG strategy 路由,并在 matting 前产出最终的
+  `execution_profile`。
+- 从活跃 route 中移除旧的 `comfy-ermbg`/AutoMatte 全程 matting 后端。
+- 未知背景路由到 PyMatting fallback;auto 不再调用 RMBG。
+- route 分析、参数选择、CorridorKey/PyMatting 执行、ShadowPatch 和元数据生成,
+  都在执行后端内完成（默认 Direct Worker,可选远端 `ErmbgRouteMatte` 节点）。
+- 对绿/蓝已知幕布的图标、角色、玻璃和半透明按钮 profile 使用 CorridorKey。
+- 对确定性硬边按钮以及未知/不稳定 fallback 使用 PyMatting Known-B。
 
-## Mainline Architecture
+## 主线架构
 
 ```text
-uploaded image
-  -> remote ErmbgRouteMatte
-      -> screen/color analysis
-      -> final execution_profile + parameters
-      -> PyMatting Known-B, CorridorKey, passthrough, or PyMatting fallback
-      -> ShadowPatch / QA / route metadata
-      -> RGBA game UI asset
+上传图片
+  -> ERMBG route（Direct Worker，默认；或远端 ErmbgRouteMatte，可选）
+      -> 幕布/颜色分析
+      -> 最终 execution_profile + 参数
+      -> PyMatting Known-B、CorridorKey、passthrough 或 PyMatting fallback
+      -> ShadowPatch / QA / route 元数据
+      -> RGBA 游戏 UI 素材
 ```
 
-The Mac side should only upload the image, submit the workflow, poll ComfyUI,
-and download the result images and metadata. It should not duplicate route
-analysis or perform post-matting repair for the production auto path.
+调用端（Web/API/CLI）只负责上传图片、提交请求、轮询并下载结果图和元数据。
+对生产 auto 路径,它不应重复 route 分析,也不应做 matting 后的修复。
 
-## Screen And Color Analysis
+## 幕布与颜色分析
 
-The route analyzer returns:
+route 分析器返回:
 
-- `screen_mode`: `green`, `blue`, or `unknown`.
-- `background_color`: measured sRGB key color.
-- `background_confidence`: confidence that the image is a known screen asset.
-- `purity_sigma`: how stable the background is across trusted regions.
-- `subject_key_color_risk`: whether subject material is close to the key color.
-- `execution_profile`: final execution profile, for example
-  `corridorkey-transparent-button`, `corridorkey-character`, or
-  `pymatting-hard-button`.
-- `recommended_settings`: CorridorKey/PyMatting gamma, thresholds, despill,
-  refiner, despeckle, hint, color-protection, and ShadowPatch settings.
+- `screen_mode`: `green`、`blue` 或 `unknown`。
+- `background_color`: 测得的 sRGB key 色。
+- `background_confidence`: 该图片是已知幕布素材的置信度。
+- `purity_sigma`: 背景在可信区域上的稳定程度。
+- `subject_key_color_risk`: 主体材质是否接近 key 色。
+- `execution_profile`: 最终 execution profile,例如
+  `corridorkey-transparent-button`、`corridorkey-character` 或
+  `pymatting-hard-button`。
+- `recommended_settings`: CorridorKey/PyMatting 的 gamma、阈值、despill、
+  refiner、despeckle、hint、颜色保护和 ShadowPatch 设置。
 
-The analysis should use observable signals rather than sample-specific rules:
+分析应使用可观测信号,而非样本专属规则:
 
-- trusted corners and border bands for background candidates;
-- OKLab distance to compare green and blue screen hypotheses;
-- background variance/purity to decide whether auto mode is safe;
-- subject/key-color overlap risk to avoid erasing green or blue subject details;
-- connected-component scale to avoid despeckle removing small UI ornaments.
+- 用可信角和边界带作为背景候选;
+- 用 OKLab 距离比较绿幕和蓝幕假设;
+- 用背景方差/纯度决定 auto 模式是否安全;
+- 用主体/key 色重叠风险来避免抹掉绿色或蓝色主体细节;
+- 用连通分量尺度来避免 despeckle 移除小的 UI 装饰。
 
-## Execution Profiles
+## 执行 Profile
 
-The execution profile is the production contract. CorridorKey semantic profiles
-can inform routing, but execution must not re-infer the asset family after the
-router has made the decision.
+execution profile 是生产契约。CorridorKey 语义 profile 可以参与 routing,
+但在 router 做出决策之后,执行不得重新推断 asset family。
 
-| Execution profile | Path | Notes |
+| Execution profile | 路径 | 说明 |
 |---|---|---|
-| `corridorkey-character` | CorridorKey | full-frame character control, color protection off |
-| `corridorkey-transparent-button` | CorridorKey | full-frame glass control, color protection off |
-| `corridorkey-effect-icon` | CorridorKey | full-frame effect control for additive or soft-alpha icons |
-| `corridorkey-shaped-icon` | CorridorKey | shaped hint for icon material that still needs protection |
-| `pymatting-hard-button` | PyMatting Known-B | deterministic hard UI and button families |
-| `pymatting-known-bg` | PyMatting Known-B | stable known-background graphic fallback |
-| `pymatting-fallback` | PyMatting Known-B | unknown or unstable background fallback |
+| `corridorkey-character` | CorridorKey | 全幅角色控制,颜色保护关闭 |
+| `corridorkey-transparent-button` | CorridorKey | 全幅玻璃控制,颜色保护关闭 |
+| `corridorkey-effect-icon` | CorridorKey | 针对加法或软 alpha 图标的全幅特效控制 |
+| `corridorkey-shaped-icon` | CorridorKey | 针对仍需保护的图标材质的 shaped hint |
+| `pymatting-hard-button` | PyMatting Known-B | 确定性硬边 UI 和按钮族 |
+| `pymatting-known-bg` | PyMatting Known-B | 稳定已知背景图形 fallback |
+| `pymatting-fallback` | PyMatting Known-B | 未知或不稳定背景 fallback |
 
-## Parameter Adaptation
+## 参数自适应
 
-Recommended defaults:
+推荐默认值:
 
-- Pure green screen, low subject key-color risk: standard CorridorKey settings.
-- Subject contains green/blue-like materials: reduce aggressive despill/refiner
-  behavior and rely more on color protection.
-- Small icons, slots, sparkles, or thin UI decorations: lower `despeckle_size` or
-  disable auto despeckle.
-- Glass, glow, transparency, or soft gradients: preserve soft hints and avoid
-  hard ownership masks.
+- 纯绿幕、主体 key 色风险低: 标准 CorridorKey 设置。
+- 主体含绿/蓝类材质: 降低激进的 despill/refiner 行为,更多依赖颜色保护。
+- 小图标、卡槽、闪光或细 UI 装饰: 降低 `despeckle_size` 或关闭自动 despeckle。
+- 玻璃、glow、透明或软渐变: 保留软 hint,避免硬归属掩码。
 
-The report should record both the selected values and why they were selected,
-so Web results and batch summaries are debuggable.
+报告应同时记录选中的值和选择原因,以便 Web 结果和批量 summary 可调试。
 
-## ShadowPatch Layer
+## ShadowPatch 层
 
-`ShadowPatch` is the accepted shadow strategy for the CorridorKey game UI path.
-It is not an ERMBG fallback and it does not edit the CorridorKey subject layer.
-It only runs for green/blue known-screen assets that have already routed to
-CorridorKey; unknown backgrounds skip this path and go to PyMatting fallback.
-The layer stack is:
+`ShadowPatch` 是 CorridorKey 游戏 UI 路径所采用的阴影策略。它不是 ERMBG
+fallback,也不编辑 CorridorKey 主体层。它只在已经路由到 CorridorKey 的
+绿/蓝已知幕布素材上运行;未知背景跳过该路径,转入 PyMatting fallback。
+层叠结构为:
 
 ```text
-shadow layer     measured from known-background scalar darkening
-subject layer    remote CorridorKey RGBA/alpha, kept as the owner of hard edges
+shadow layer     由已知背景标量变暗测得
+subject layer    CorridorKey 的 RGBA/alpha,保持为硬边的所有者
 ```
 
-The exported `rgba.png` is the flattened result of compositing the shadow layer
-below the CorridorKey subject layer. Debug outputs keep the layers separate:
+导出的 `rgba.png` 是把 shadow layer 合成到 CorridorKey 主体层之下的扁平化
+结果。Debug 输出保持各层分离:
 
 - `corridorkey_subject_rgba.png`
 - `corridorkey_subject_alpha.png`
@@ -110,138 +101,121 @@ below the CorridorKey subject layer. Debug outputs keep the layers separate:
 - `shadow.png`
 - `shadow_physical.png`
 
-The trigger is intentionally conservative:
+触发条件刻意保守:
 
-- first detect a coherent known-background shadow candidate from
-  `C_linear ~= scale * B_linear`;
-- require high-confidence shadow evidence: enough visible support, accepted
-  connected components, and non-trivial measured display opacity;
-- require that CorridorKey did not already preserve the same shadow region as
-  alpha. If CorridorKey alpha is already comparable to the measured shadow
-  support, the patch is skipped to avoid double-darkening.
+- 先从 `C_linear ~= scale * B_linear` 检测连贯的已知背景阴影候选;
+- 要求高置信度阴影证据: 足够的可见支持、被接受的连通分量,以及非平凡的
+  测得显示不透明度;
+- 要求 CorridorKey 尚未把同一阴影区域保留为 alpha。如果 CorridorKey alpha
+  已经与测得的阴影支持相当,则跳过该 patch,以避免双重变暗。
 
-Once the trigger passes, extraction is intentionally broader than the generic
-shadow path. The purpose is to cover the whole soft tail and contact region;
-any overlap with the subject is harmless because final compositing places the
-unchanged CorridorKey subject above the shadow layer.
+一旦触发通过,提取范围会刻意比通用阴影路径更广。目的是覆盖整条软尾和接触
+区域;与主体的任何重叠都是无害的,因为最终合成会把未改动的 CorridorKey 主体
+放在阴影层之上。
 
-Do not use color protection or hint masks to recover shadows. Color protection
-is for protecting near-key subject material and can easily misclassify shadows,
-while hint masks introduce subject-shadow contact artifacts. ShadowPatch should
-remain a measured known-background post-process with explicit debug metrics in
-`report["shadow"]["patch_gate"]`.
+不要用颜色保护或 hint 掩码来恢复阴影。颜色保护用于保护接近 key 色的主体
+材质,很容易把阴影误分类,而 hint 掩码会引入主体-阴影接触伪影。ShadowPatch
+应保持为一个测量驱动的已知背景后处理,并在 `report["shadow"]["patch_gate"]`
+中带显式的 debug 指标。
 
-## Blue-Screen Support
+## 蓝幕支持
 
-Do not treat blue support as merely changing `bg_color`. The current
-`comfy-corridorkey` wrapper now passes explicit `screen_mode` through the Comfy
-workflow and blue samples are part of the active full eval, but blue-screen
-semantics should stay scoped to problems green screen cannot cover.
+不要把蓝幕支持仅仅当作修改 `bg_color`。当前的 `comfy-corridorkey` 包装层现在
+会通过 Comfy workflow 传入显式的 `screen_mode`,蓝幕样本也是活跃完整 eval 的
+一部分,但蓝幕语义应限定在绿幕无法覆盖的问题上。
 
-The B016-B030 blue button block was changed on 2026-05-31 from yellow buttons to
-green buttons on blue screen. Rationale: yellow/orange UI can be evaluated and
-fixed on green screen; blue screen should add coverage for green subject
-material, which is exactly the family green screen cannot separate cleanly.
+B016-B030 蓝色按钮块在 2026-05-31 从黄色按钮改为蓝幕上的绿色按钮。理由:
+黄色/橙色 UI 可以在绿幕上评估和修复;蓝幕应补充绿色主体材质的覆盖,而这正是
+绿幕无法干净分离的样本族。
 
-The yellow-on-blue investigation is still useful as a diagnosis of CorridorKey's
-limits: on unoutlined yellow buttons over blue, CorridorKey can decompose blue
-background darkening into dirty yellow foreground plus partial alpha. That is a
-model decomposition weakness, not a core ShadowPatch failure, and those samples
-are no longer active B016-B030 targets.
+黄底蓝幕的研究仍可作为对 CorridorKey 局限的诊断: 在蓝幕上的无描边黄色按钮上,
+CorridorKey 可能把蓝色背景变暗分解为脏黄前景加部分 alpha。这是模型分解的弱点,
+而非 ShadowPatch 的核心失败,这些样本不再是活跃的 B016-B030 目标。
 
-Historical direct CorridorKey blue/green baseline:
+历史的 direct CorridorKey 蓝/绿基线:
 
 ```text
 out/corridorkey_full_blue_green_baseline_20260531/summary.json
 ```
 
-Result: 83/83 completed successfully. This predates the final 85-sample
-RouteMatte auto contract, but remains useful as a direct CorridorKey reference.
-B016-B030 all ran successfully as blue-screen green-button samples.
+结果: 83/83 全部成功完成。这早于最终的 85 样本 RouteMatte auto 契约,但作为
+direct CorridorKey 参考仍然有用。B016-B030 全部作为蓝幕绿色按钮样本成功运行。
 
-Latest full RouteMatte baseline:
+最新的完整 RouteMatte 基线:
 
 ```text
 out/auto_routematte_routefix_20260531/summary.json
 out/auto_routematte_routefix_20260531/timing_report.md
 ```
 
-Result: 85/85 completed successfully through Web/API `backend=auto`, which
-submits the remote `ErmbgRouteMatte` node. The active set is 56 buttons, 20
-icon/effect samples, and 9 character samples. Route distribution was 37
-PyMatting Known-B cases and 48 CorridorKey cases.
+结果: 85/85 全部通过 Web/API `backend=auto` 成功完成,该基线运行提交远端
+`ErmbgRouteMatte` 节点。活跃集为 56 个按钮、20 个 icon/effect 样本和 9 个角色
+样本。route 分布为 37 个 PyMatting Known-B case 和 48 个 CorridorKey case。
 
-The targeted execution-profile verification is:
+针对性的 execution-profile 验证:
 
 ```text
 out/verify_route_profiles_character_glass_icon_20260531/summary.json
 ```
 
-It verifies B046-B049 as `corridorkey-transparent-button`, I011-I012 as
-`corridorkey-effect-icon`, I019-I020 as `corridorkey-shaped-icon`, and
-C001-C009 as `corridorkey-character`.
+它验证 B046-B049 为 `corridorkey-transparent-button`、I011-I012 为
+`corridorkey-effect-icon`、I019-I020 为 `corridorkey-shaped-icon`、
+C001-C009 为 `corridorkey-character`。
 
-## Web UI And Debug Controls
+## Web UI 与 Debug 控件
 
-The Web UI should surface the route decision rather than force users to reason
-about raw backends:
+Web UI 应呈现 route 决策,而不是强迫用户去推理原始后端:
 
-- Default backend for game UI work: `auto`, which submits `ErmbgRouteMatte`.
-- Show `requested_backend`, selected backend, route, asset kind,
-  `execution_profile`, parameter profile, measured background, confidence,
-  server elapsed time, and route reasons.
-- Manual/debug controls may still target `comfy-corridorkey` or
-  `comfy-pymatting-known-b`, but production quality audits should start with
-  `backend=auto`.
-- Mask editing remains a debug/operator aid. It should feed a coarse hint or
-  protection signal, not replace the final detail alpha directly.
+- 游戏 UI 工作的默认后端: `auto`。
+- 显示 `requested_backend`、选中后端、route、asset kind、`execution_profile`、
+  parameter profile、测得背景、置信度、server elapsed time 和 route 原因。
+- 手动/debug 控件仍可指向 `comfy-corridorkey` 或 `comfy-pymatting-known-b`,
+  但生产质量审计应从 `backend=auto` 开始。
+- 掩码编辑仍是 debug/操作员辅助。它应提供粗略的 hint 或保护信号,而不是直接
+  替换最终的细节 alpha。
 
-## Testing And Verification
+## 测试与验证
 
-Offline tests:
+离线测试:
 
-- green, blue, and unknown background classification;
-- subject key-color risk changes recommended parameters;
-- small UI components do not get removed by default despeckle settings;
-- blue-screen metadata never reports green-only strategy names;
-- mask inputs validate shape, empty masks, full masks, and edited masks.
+- 绿、蓝和未知背景分类;
+- 主体 key 色风险会改变推荐参数;
+- 默认 despeckle 设置不会移除小 UI 组件;
+- 蓝幕元数据绝不报告仅绿幕的策略名;
+- mask 输入校验 shape、空 mask、满 mask 和编辑过的 mask。
 
-Batch tests:
+批量测试:
 
-- existing game UI green samples;
-- approved green/blue screen samples from the current manifest;
-- subject materials near green/blue;
-- glass, glow, transparent gradients, thin outlines, and small ornaments.
-- ShadowPatch hit scan across all game-eval samples; inspect
-  `shadowpatch_hits.json` and final Web results for every applied case.
+- 已有的游戏 UI 绿幕样本;
+- 当前 manifest 中已批准的绿/蓝幕样本;
+- 接近绿/蓝的主体材质;
+- 玻璃、glow、透明渐变、细描边和小装饰。
+- 对全部 game-eval 样本做 ShadowPatch 命中扫描;检查 `shadowpatch_hits.json`
+  和每个应用 case 的最终 Web 结果。
 
-Remote/Web verification:
+远端/Web 验证:
 
-- run direct `ErmbgRouteMatte` smoke through ComfyUI;
-- for `direct-worker`, verify parity against `backend=auto` on the same
-  manifest subset before using the timing numbers. `selected_backend`,
-  `parameter_profile`, `execution_profile`, and hint source should match; large
-  alpha/RGBA differences mean the execution layer diverged and must be fixed in
-  shared code, not tuned as a separate backend.
-- run focused direct `comfy-corridorkey` and `comfy-pymatting-known-b` smokes
-  when a profile-specific backend is changed;
-- run real HTTP `/api/matte-candidates` smoke through `127.0.0.1:7860`;
-- save batch summaries under `out/` with selected backend, route,
-  `execution_profile`, settings, timing, and quality metrics.
+- 通过 ComfyUI 跑 direct `ErmbgRouteMatte` smoke;
+- 对 `direct-worker`,在使用其耗时数据前,先在同一 manifest 子集上验证它与
+  `backend=auto` 的 parity。`selected_backend`、`parameter_profile`、
+  `execution_profile` 和 hint source 应一致;大幅的 alpha/RGBA 差异意味着执行层
+  发生了分叉,必须在共享代码中修复,而不是作为独立后端去调参。
+- 当某个 profile 专属后端被改动时,跑针对性的 direct `comfy-corridorkey` 和
+  `comfy-pymatting-known-b` smoke;
+- 通过 `127.0.0.1:7860` 跑真实 HTTP `/api/matte-candidates` smoke;
+- 把批量 summary 保存到 `out/` 下,含选中后端、route、`execution_profile`、
+  设置、耗时和质量指标。
 
-## Relationship To Existing ERMBG Work
+## 与既有 ERMBG 工作的关系
 
-The previous solid-background/local-ownership work remains useful as fallback
-and QA infrastructure, but it is no longer the primary detail-matting roadmap
-for game UI assets. ERMBG should focus on the orchestration layer around
-CorridorKey and PyMatting: input analysis, profile selection, parameter
-adaptation, mask hints, ShadowPatch, diagnostics, batch evaluation, and Web
-controls. Unknown-background fallback is PyMatting Known-B with a configured
-fallback background, not RMBG.
+之前的纯背景/本地归属工作作为 fallback 和 QA 基础设施仍然有用,但它不再是
+游戏 UI 素材的主要细节 matting 路线图。ERMBG 应聚焦于围绕 CorridorKey 和
+PyMatting 的编排层: 输入分析、profile 选择、参数自适应、mask hint、ShadowPatch、
+诊断、批量评估和 Web 控件。未知背景 fallback 是带配置 fallback 背景的
+PyMatting Known-B,而不是 RMBG。
 
-The Direct Worker path is a queue-bypass validation backend for this same
-roadmap. It may report `direct-corridorkey` or `direct-pymatting-known-b` as
-the execution backend, but it must not fork CorridorKey behavior. All
-in-process CorridorKey execution belongs in
-`ermbg.corridorkey_runner.LocalCorridorKeyClient`, which is used by both the
-Comfy custom node wrapper and Direct Worker.
+Direct Worker 路径是这同一路线图的生产执行后端（绕过队列）。它可能把
+`direct-corridorkey` 或 `direct-pymatting-known-b` 报告为执行后端,但它绝不能
+分叉 CorridorKey 行为。所有进程内 CorridorKey 执行都属于
+`ermbg.corridorkey_runner.LocalCorridorKeyClient`,它被 Comfy 自定义节点包装层
+和 Direct Worker 共同使用。

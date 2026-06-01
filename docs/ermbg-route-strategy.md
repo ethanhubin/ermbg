@@ -1,108 +1,100 @@
-# ERMBG Route Strategy
+# ERMBG Route 策略
 
-This document defines the route/profile/backend contract used by Web, API,
-Direct Worker, Game Eval, and optional adapters.
+本文档定义 Web、API、Direct Worker、Game Eval 和可选适配器共用的
+route/profile/backend 契约。
 
-Web `backend="auto"` submits images to the configured Direct Worker service.
-The worker runs `ermbg.router.classify_route()`, selects an execution profile,
-and dispatches to the maintained matting path. Optional ComfyUI nodes use the
-same route contract for custom graphs.
+Web `backend="auto"` 把图片提交给配置的 Direct Worker 服务。worker 运行
+`ermbg.router.classify_route()`,选择一个 execution profile,并分发到维护中的
+matting 路径。可选的 ComfyUI 节点对自定义图使用同一套 route 契约。
 
-Route selection must finish before matting starts. Execution code consumes
-`RouteDecision.params.execution_profile` and related parameters directly.
-Profile-specific tuning belongs in the shared route/execution code, so Web,
-Direct Worker, and optional adapters stay aligned.
+route 选择必须在 matting 开始前完成。执行代码直接消费
+`RouteDecision.params.execution_profile` 及相关参数。profile 专属的调参应放在
+共享的 route/执行代码中,以保持 Web、Direct Worker 和可选适配器对齐。
 
-## Execution Profiles
+## 执行 Profile
 
-`execution_profile` is the public contract between image analysis and matting.
-`parameter_profile` is analysis metadata that explains why the route was chosen.
+`execution_profile` 是图片分析与 matting 之间的公开契约。
+`parameter_profile` 是分析元数据,用于解释为何选择该 route。
 
-| Execution profile | Execution path | Asset kind | Intent |
+| Execution profile | 执行路径 | Asset kind | 意图 |
 |---|---|---|---|
-| `corridorkey-character` | CorridorKey | `character` | Character assets with hair, fur, glow, translucent material, and hard edges. |
-| `corridorkey-transparent-button` | CorridorKey | `button` | Glass or translucent buttons on green/blue screen. |
-| `corridorkey-effect-icon` | CorridorKey | `icon` | Additive or soft-alpha effect icons solved as one effect layer. |
-| `corridorkey-shaped-icon` | CorridorKey | `icon` | Icons with shaped hints and key-color material protection. |
-| `pymatting-hard-button` | PyMatting Known-B | `button` | Hard UI/buttons with stable solid-color background evidence. |
-| `pymatting-known-bg` | PyMatting Known-B | `known_bg_graphic` | Stable known-background graphic outside the button/icon/character classes. |
-| `pymatting-fallback` | PyMatting fallback | `unknown_fallback` | Unknown or unstable background fallback. |
+| `corridorkey-character` | CorridorKey | `character` | 带发丝、毛发、glow、半透明材质和硬边的角色素材。 |
+| `corridorkey-transparent-button` | CorridorKey | `button` | 绿/蓝幕上的玻璃或半透明按钮。 |
+| `corridorkey-effect-icon` | CorridorKey | `icon` | 作为单一特效层求解的加法或软 alpha 特效图标。 |
+| `corridorkey-shaped-icon` | CorridorKey | `icon` | 带 shaped hint 和 key-color 材质保护的图标。 |
+| `pymatting-hard-button` | PyMatting Known-B | `button` | 有稳定纯色背景证据的硬边 UI/按钮。 |
+| `pymatting-known-bg` | PyMatting Known-B | `known_bg_graphic` | button/icon/character 类之外的稳定已知背景图形。 |
+| `pymatting-fallback` | PyMatting fallback | `unknown_fallback` | 未知或不稳定背景的 fallback。 |
 
-Clean RGBA inputs may use passthrough when alpha quality is already usable.
+当 alpha 质量已经可用时,clean RGBA 输入可以走 passthrough。
 
-## Route Responsibilities
+## Route 职责
 
-The router identifies:
+router 负责识别:
 
-- existing alpha quality and passthrough eligibility;
-- background color and stability;
-- solid green/blue screen evidence;
-- hard UI, icon, effect, character, glass, and translucent-material signals;
-- final execution profile and backend parameters;
-- fallback background color for unstable or unknown backgrounds.
+- 已有 alpha 的质量以及是否符合 passthrough 条件;
+- 背景颜色与稳定性;
+- 纯绿/蓝幕证据;
+- 硬边 UI、图标、特效、角色、玻璃和半透明材质信号;
+- 最终的 execution profile 和后端参数;
+- 不稳定或未知背景的 fallback 背景色。
 
-Execution code must preserve these decisions. It should not re-classify an asset
-kind from local semantic hints after the router has selected the execution
-profile.
+执行代码必须保留这些决策。在 router 已经选定 execution profile 之后,它不应
+再根据本地语义 hint 去重新分类 asset kind。
 
-## Known-B Path
+## Known-B 路径
 
-The PyMatting Known-B path targets game UI and stable solid-background graphics.
-Its job is pixel-level repair on top of known background evidence:
+PyMatting Known-B 路径面向游戏 UI 和稳定的纯背景图形。它的职责是在已知背景
+证据之上做像素级修复:
 
-- dynamic subject anchors from measured background/subject separation;
-- edge ownership repair for hard edges, antialiasing, pinholes, thin residue,
-  holes, and contact regions;
-- ShadowPatch reconstruction for source-proved scalar darkening on the known
-  background;
-- foreground RGB stabilization for export.
+- 由测得的背景/主体分离动态确定主体锚点;
+- 对硬边、抗锯齿、针孔、细残留、孔洞和接触区域做边缘归属修复;
+- 对已知背景上经源图证明的标量变暗做 ShadowPatch 重建;
+- 为导出稳定前景 RGB。
 
-Ownership decisions use measurable evidence such as color distance, connected
-components, local support, and same-background reprojection error. See
-`docs/local-ownership.md` for the detailed evidence model.
+归属决策使用可测量证据,例如颜色距离、连通分量、局部支持度和同背景重投影
+误差。详细证据模型见 `docs/local-ownership.md`。
 
-## CorridorKey Path
+## CorridorKey 路径
 
-CorridorKey handles complex green/blue-screen assets that benefit from
-film-style keying practice:
+CorridorKey 处理复杂的绿幕/蓝幕素材,这些素材受益于影视风格的抠像实践:
 
-- characters with hair, fur, glow, and soft alpha;
-- translucent/glass buttons;
-- shaped icons with key-color material protection;
-- effect icons with additive or smoke-like soft edges.
+- 带发丝、毛发、glow 和软 alpha 的角色;
+- 半透明/玻璃按钮;
+- 带 key-color 材质保护的 shaped 图标;
+- 带加法或烟雾状软边的特效图标。
 
-`ermbg.corridorkey_runner.LocalCorridorKeyClient` is the shared in-process
-adapter. Direct Worker and optional Comfy nodes call the same runner so hint
-conversion, color protection, model invocation, and debug metadata stay aligned.
+`ermbg.corridorkey_runner.LocalCorridorKeyClient` 是共享的进程内适配器。
+Direct Worker 和可选 Comfy 节点都调用同一个 runner,以保持 hint 转换、
+颜色保护、模型调用和 debug 元数据对齐。
 
-## Direct Worker Backend
+## Direct Worker 后端
 
-`backend="direct-worker"` is the Web/API and Game Eval service backend. The
-service URL comes from `services.direct_worker_url` in `ermbg.config.json`, with
-`ERMBG_DIRECT_URL` available as an environment override.
+`backend="direct-worker"` 是 Web/API 和 Game Eval 的服务后端。服务 URL 来自
+`ermbg.config.json` 的 `services.direct_worker_url`,并可用 `ERMBG_DIRECT_URL`
+作为环境覆盖。
 
-Direct Worker reports two layers of backend metadata:
+Direct Worker 报告两层后端元数据:
 
-- `selected_backend`: logical route backend selected by the router;
-- `debug.direct_worker.execution_backend`: concrete direct execution path, such
-  as `direct-corridorkey` or `direct-pymatting-known-b`.
+- `selected_backend`: router 选择的逻辑 route 后端;
+- `debug.direct_worker.execution_backend`: 具体的 direct 执行路径,例如
+  `direct-corridorkey` 或 `direct-pymatting-known-b`。
 
-For the same input, Web auto and Direct Worker runs should keep
-`parameter_profile` and `execution_profile` stable. Expected output differences
-between adapters should stay at floating-point or 8-bit rounding level.
+对同一输入,Web auto 和 Direct Worker run 应保持 `parameter_profile` 和
+`execution_profile` 稳定。适配器之间预期的输出差异应停留在浮点或 8-bit
+rounding 级别。
 
-## Optional Comfy Nodes
+## 可选的 Comfy 节点
 
-ComfyUI support lives in `comfy_nodes/` for custom Comfy graphs. It uses the
-same route/profile contract and is configured through `services.comfy_url` or
-`COMFY_URL`. Web default configuration uses Direct Worker.
+ComfyUI 支持位于 `comfy_nodes/`,用于自定义 Comfy 图。它使用同一套
+route/profile 契约,并通过 `services.comfy_url` 或 `COMFY_URL` 配置。Web 默认
+配置使用 Direct Worker。
 
-Node details and install steps are documented in `comfy_nodes/README.md` and
-`DEPLOY.md`.
+节点细节和安装步骤见 `comfy_nodes/README.md` 和 `DEPLOY.md`。
 
-## Verification
+## 验证
 
-Use focused samples that cover each profile:
+使用覆盖各个 profile 的针对性样本:
 
 - hard button -> `pymatting-hard-button`
 - blue/green glass button -> `corridorkey-transparent-button`
@@ -111,7 +103,7 @@ Use focused samples that cover each profile:
 - character -> `corridorkey-character`
 - random/unknown background -> `pymatting-fallback`
 
-Useful commands:
+常用命令:
 
 ```bash
 .venv/bin/python scripts/run_corridorkey_game_eval.py --backend auto --sample-id I003,I019,I008,B010 --out-dir out/auto_parity_<date>
@@ -119,17 +111,15 @@ Useful commands:
 .venv/bin/python scripts/smoke_direct_worker_http.py --base-url <services.direct_worker_url> --sample-id B001,I011
 ```
 
-After Web-facing route changes:
+在 Web 侧 route 改动之后:
 
-1. Restart the local Web service.
-2. Verify the index contains `Auto Direct Worker` and `direct-worker`.
-3. Post real samples to `/api/matte-candidates` with `backend=auto`.
-4. Confirm `requested_backend`, `backend`, `debug.auto_route.selected_backend`,
-   `debug.auto_route.route`, `execution_profile`, and `server_elapsed_sec`.
-5. For Direct Worker changes, also post a CorridorKey sample with
-   `backend=direct-worker` and confirm
-   `debug.direct_worker.execution_backend`.
+1. 重启本地 Web 服务。
+2. 验证首页包含 `Auto Direct Worker` 和 `direct-worker`。
+3. 用 `backend=auto` 向 `/api/matte-candidates` 提交真实样本。
+4. 确认 `requested_backend`、`backend`、`debug.auto_route.selected_backend`、
+   `debug.auto_route.route`、`execution_profile` 和 `server_elapsed_sec`。
+5. 对 Direct Worker 改动,还要用 `backend=direct-worker` 提交一个 CorridorKey
+   样本,并确认 `debug.direct_worker.execution_backend`。
 
-Algorithm changes should be mechanism-driven. Tests should capture the failure
-class with synthetic coverage when possible, plus real sample batch coverage for
-user-facing regressions.
+算法改动应由机制驱动。测试应尽量用合成覆盖捕捉失败类别,并对用户可见的回归
+补充真实样本批量覆盖。

@@ -204,8 +204,8 @@ def run(
         "extraction_info": extraction_info,
         "regions": region_summary,
     }
-    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    bundle_path.write_text(json.dumps(bundle.to_dict(), indent=2, ensure_ascii=False))
+    json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    bundle_path.write_text(json.dumps(bundle.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     return {
         **payload,
         "overlay": str(out_path),

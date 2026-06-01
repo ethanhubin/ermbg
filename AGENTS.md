@@ -1,73 +1,68 @@
-# ERMBG · Agent Contract
+# ERMBG · Agent 契约
 
-This file is the bootstrap contract. Load deeper docs only when the task touches
-that area.
+本文件是引导性契约。只有当任务涉及某一领域时，才去加载该领域的深入文档。
 
-## Runtime Defaults
+## 运行时默认值
 
-- Web/API `backend=auto` uses Direct Worker.
-- Service endpoints and Web defaults live in `ermbg.config.json`.
-- Environment overrides are allowed for one shell session:
-  `ERMBG_DIRECT_URL`, `COMFY_URL`, `ERMBG_WEB_AUTO_BACKEND`,
-  `ERMBG_WEB_AUTO_FALLBACK_BACKEND`, `ERMBG_ENABLE_COMFY`.
-- Normal Web startup and runtime capability checks use Direct Worker.
-- ComfyUI is optional extension support for custom Comfy graphs or explicit
-  `comfy-*` backend debugging.
+- Web/API 的 `backend=auto` 使用 Direct Worker。
+- 服务端点与 Web 默认值都写在 `ermbg.config.json` 中。
+- 允许用环境变量在单个 shell 会话内临时覆盖：
+  `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
+  `ERMBG_WEB_AUTO_FALLBACK_BACKEND`、`ERMBG_ENABLE_COMFY`。
+- 正常的 Web 启动和运行时能力检查都走 Direct Worker。
+- ComfyUI 是可选的扩展支持，仅用于自定义 Comfy 图，或显式
+  `comfy-*` 后端调试。
 
-## Where To Look
+## 去哪里查
 
-- Product overview and install/startup: `README.md`, `docs/install-startup.md`.
-- Architecture and profile contract: `docs/architecture.md`,
-  `docs/ermbg-route-strategy.md`.
-- Local ownership details: `docs/local-ownership.md`.
-- Optional Comfy node work: `comfy_nodes/README.md`, `DEPLOY.md`.
-- Historical material: `docs/archive/`; do not treat archived plans as active.
+- 产品概览与安装/启动：`README.md`、`docs/install-startup.md`。
+- 架构与 profile 契约：`docs/architecture.md`、
+  `docs/ermbg-route-strategy.md`。
+- 本地归属细节：`docs/local-ownership.md`。
+- 可选的 Comfy 节点工作：`comfy_nodes/README.md`、`DEPLOY.md`。
+- 历史材料：`docs/archive/`；不要把已归档的计划当作活跃内容。
 
-## Development Basics
+## 开发基础
 
-- Python venv is `.venv/` with Python 3.12.
-- On Windows, use `.venv\Scripts\python.exe` and `.venv\Scripts\pytest.exe`.
-- Keep tests passing. For Web/runtime changes, include `tests/test_web.py` and
-  `tests/test_runtime_capabilities.py`.
-- Generated eval/debug artifacts must go under a self-contained batch directory
-  in `out/`, with a machine-readable summary.
+- Python 虚拟环境为 `.venv/`，Python 版本 3.12。
+- 在 Windows 上使用 `.venv\Scripts\python.exe` 和 `.venv\Scripts\pytest.exe`。
+- 保持测试通过。涉及 Web/运行时的改动，需要包含 `tests/test_web.py` 和
+  `tests/test_runtime_capabilities.py`。
+- 生成的 eval/debug 产物必须放在 `out/` 下一个自包含的 batch 目录中，
+  并附带一份机器可读的 summary。
 
-## Algorithm Rules
+## 算法规则
 
-- Design target: pixel-perfect transparent matting on solid-color backgrounds.
-- Game UI assets use PyMatting Known-B plus pixel-level repair from measurable
-  known-background evidence.
-- Complex green/blue-screen assets use CorridorKey.
-- Image feature classification chooses algorithm and parameters before
-  execution. Execution consumes `execution_profile`; it must not re-infer asset
-  classes.
-- Algorithm fixes must be mechanism-driven. Do not tune around sample IDs,
-  filenames, coordinates, icon sizes, or one observed color unless Ethan asks
-  for a one-off workaround.
-- Heuristic thresholds, confidence gates, falloff widths, area ratios, and
-  remapping constants need nearby comments explaining intent, observable signal,
-  and protected failure mode.
-- Web matting must preserve shadow handling unless Ethan explicitly asks for a
-  preview-only speed mode.
+- 设计目标：在纯色背景上达到像素级完美的透明抠图。
+- 游戏 UI 素材使用 PyMatting Known-B，再基于可测量的已知背景证据
+  做像素级修复。
+- 复杂的绿幕/蓝幕素材使用 CorridorKey。
+- 图片特征分类在执行前决定算法和参数。执行阶段消费
+  `execution_profile`；它不得重新推断素材类别。
+- 算法修复必须由机制驱动。不要围绕样本 ID、文件名、坐标、图标尺寸或单一
+  观测到的颜色去调参，除非 Ethan 要求做一次性的特例处理。
+- 启发式阈值、置信度门限、过渡带宽度、面积比和重映射常数，都需要在附近写
+  注释，说明意图、可观测信号以及要保护的失败模式。
+- Web 抠图必须保留阴影处理，除非 Ethan 明确要求只用于预览的提速模式。
 
-## Web Verification
+## Web 验证
 
-After changes to `ermbg/web.py`, Web UI/API behavior, or a Web-facing backend:
+在改动 `ermbg/web.py`、Web UI/API 行为或某个 Web 侧后端之后：
 
-1. Restart local services with `scripts\start_local.ps1` or equivalent.
-2. Confirm port `7860` is owned by the expected `uvicorn ermbg.web:app` process.
-3. Confirm the index contains the changed marker, such as `Auto Direct Worker`
-   or the relevant UI text.
-4. Run a real HTTP smoke through `/api/matte-candidates` with `backend=auto`;
-   confirm HTTP 200, route/profile metadata, and `server_elapsed_sec`.
-5. If Web reports a Direct Worker connection error, check
-   `<services.direct_worker_url>/health` before changing algorithm code.
+1. 用 `scripts\start_local.ps1` 或等价方式重启本地服务。
+2. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
+3. 确认首页包含改动后的标记，例如 `Auto Direct Worker`
+   或相关 UI 文案。
+4. 用 `backend=auto` 对 `/api/matte-candidates` 跑一次真实 HTTP smoke，
+   确认 HTTP 200、route/profile 元数据以及 `server_elapsed_sec`。
+5. 如果 Web 报告 Direct Worker 连接错误，先检查
+   `<services.direct_worker_url>/health`，再去改算法代码。
 
-Final Web status should state the `7860` PID, how Web was started, Direct Worker
-health, and the real HTTP smoke result.
+最终的 Web 状态报告应说明 `7860` 的 PID、Web 是如何启动的、Direct Worker
+的健康状态，以及真实 HTTP smoke 的结果。
 
-## Optional Comfy Work
+## 可选的 Comfy 工作
 
-- Use Comfy only for custom graph support or explicit `comfy-*` backend work.
-- If `comfy_nodes/` changes, reinstall/sync the custom node and restart ComfyUI.
-- Keep Comfy wrappers thin over the shared ERMBG API and CorridorKey runner.
+- 仅在需要自定义图支持或显式 `comfy-*` 后端工作时才使用 Comfy。
+- 如果 `comfy_nodes/` 有改动，需重新安装/同步自定义节点并重启 ComfyUI。
+- Comfy 包装层要保持轻薄，覆盖在共享的 ERMBG API 和 CorridorKey runner 之上。

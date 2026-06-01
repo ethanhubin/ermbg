@@ -1,80 +1,78 @@
-# ERMBG Architecture
+# ERMBG 架构
 
-ERMBG is a shared matting core with multiple adapters and runtime backends. The
-production default is local Web/API orchestration calling the ERMBG Direct
-Worker service. ComfyUI provides optional custom nodes for Comfy graphs.
+ERMBG 是一个共享的抠图 core,搭配多个适配器和运行时后端。生产环境的默认形态
+是本地 Web/API 编排,调用 ERMBG Direct Worker 服务。ComfyUI 为 Comfy 图提供
+可选的自定义节点。
 
-## Shape
+## 整体形态
 
 ```text
-Entry points
+入口
   Web UI / Web API
   CLI / Python API
-  ComfyUI custom nodes
+  ComfyUI 自定义节点
         |
         v
-ERMBG core contract
-  input normalization
+ERMBG core 契约
+  输入归一化
   route strategy
   parameter_profile
   execution_profile
-  shared matting / shadow / metadata code
+  共享的 matting / shadow / metadata 代码
         |
         v
-Runtime backends
-  Direct Worker HTTP service
-  local lightweight Python/CV paths
-  optional ComfyUI custom nodes
+运行时后端
+  Direct Worker HTTP 服务
+  本地轻量 Python/CV 路径
+  可选的 ComfyUI 自定义节点
 ```
 
-Entry points express user intent and pass image data. Asset classification
-belongs to the shared route/profile contract.
+入口负责表达用户意图并传入图片数据。素材分类归属于共享的 route/profile 契约。
 
-## Layers
+## 分层
 
 ### Core
 
-The core is the code under `ermbg/` that defines the production behavior:
+Core 是 `ermbg/` 下定义生产行为的代码:
 
-- `router.py`: route decision, asset kind, `parameter_profile`, and
-  `execution_profile`.
-- `api.py`: high-level `matte_image()` contract and maintained local execution
-  helpers, including PyMatting Known-B.
-- `corridorkey_runner.py`: shared in-process CorridorKey adapter used by the
-  Comfy node wrapper and Direct Worker.
-- `shadow.py`, `ownership.py`, `known_bg_hard_ui.py`, `pymatting_refine.py`,
-  and related modules: reusable matting mechanisms.
+- `router.py`: route 决策、asset kind、`parameter_profile` 和
+  `execution_profile`。
+- `api.py`: 高层 `matte_image()` 契约和维护中的本地执行辅助函数,
+  包括 PyMatting Known-B。
+- `corridorkey_runner.py`: 共享的进程内 CorridorKey 适配器,被 Comfy 节点
+  包装层和 Direct Worker 共同使用。
+- `shadow.py`、`ownership.py`、`known_bg_hard_ui.py`、`pymatting_refine.py`
+  及相关模块: 可复用的 matting 机制。
 
-The core owns output semantics: foreground RGB, alpha, RGBA RGB layer, route
-metadata, debug metadata, and timing metadata.
+Core 拥有输出语义: 前景 RGB、alpha、RGBA RGB 层、route 元数据、debug 元数据
+和耗时元数据。
 
-### Adapters
+### 适配器
 
-Adapters translate an external caller into the core contract:
+适配器把外部调用方翻译成 core 契约:
 
-- `ermbg.web`: local FastAPI Web UI, Web API, and Game Eval launcher.
-- CLI/Python API: direct local integration for scripts and tests.
-- `comfy_nodes/ermbg_nodes.py`: optional ComfyUI custom node wrapper.
-- `integrations/openclaw`: optional independent OpenClaw `ermbg-matte` skill
-  integration.
+- `ermbg.web`: 本地 FastAPI Web UI、Web API 和 Game Eval 启动器。
+- CLI/Python API: 供脚本和测试使用的本地直连集成。
+- `comfy_nodes/ermbg_nodes.py`: 可选的 ComfyUI 自定义节点包装层。
+- `integrations/openclaw`: 可选的独立 OpenClaw `ermbg-matte` skill 集成。
 
-Adapters stay thin. They expose UI controls, choose a requested backend, and
-pass the request into shared route logic.
+适配器保持轻薄。它们暴露 UI 控件、选择一个请求后端,并把请求传入共享的
+route 逻辑。
 
-### Runtimes
+### 运行时
 
-Runtime backends decide where execution happens:
+运行时后端决定执行发生在哪里:
 
-- **Direct Worker runtime**: default Web/API runtime for `backend=auto`. It is
-  an HTTP worker around the shared router/profile and execution code.
-- **Local runtime**: lightweight deterministic work such as PyMatting,
-  OpenCV/numpy utilities, route debugging, diagnostics, and tests.
-- **Comfy runtime**: optional graph/node adapter over the shared route/profile
-  and execution code.
+- **Direct Worker 运行时**: `backend=auto` 时 Web/API 的默认运行时。它是
+  围绕共享 router/profile 和执行代码的一个 HTTP worker。
+- **本地运行时**: 轻量的确定性工作,例如 PyMatting、OpenCV/numpy 工具、
+  route 调试、诊断和测试。
+- **Comfy 运行时**: 覆盖在共享 route/profile 和执行代码之上的可选图/节点
+  适配器。
 
-## Production Contract
+## 生产契约
 
-Web `backend=auto` means:
+Web `backend=auto` 意味着:
 
 ```text
 local Web/API/CLI
@@ -84,67 +82,63 @@ local Web/API/CLI
   -> foreground + alpha + rgba_rgb + metadata
 ```
 
-`backend=direct-worker` means the same service is requested explicitly:
+`backend=direct-worker` 意味着显式请求同一个服务:
 
 ```text
 local Web/API/eval client
   -> ermbg.direct_worker_server
-  -> shared route/profile contract
-  -> direct-corridorkey or direct-pymatting-known-b execution
+  -> 共享 route/profile 契约
+  -> direct-corridorkey 或 direct-pymatting-known-b 执行
 ```
 
-Direct Worker consumes the shared route metadata and execution profile.
+Direct Worker 消费共享的 route 元数据和 execution profile。
 
-## ComfyUI Node Contract
+## ComfyUI 节点契约
 
-The maintained Comfy node surface is:
+维护中的 Comfy 节点表面是:
 
-- `ERMBG Route Matte`: optional Comfy graph auto route and matte node.
-- `ERMBG Route Strategy`: route-only debug/branching node.
-- `ERMBG PyMatting Known-B`: deterministic known-background node for hard UI
-  and stable known-background graphics.
-- `ERMBG Classify (preview)`: lightweight diagnostic node.
-- `Convert Masks to Images`: utility node.
+- `ERMBG Route Matte`: 可选的 Comfy 图 auto route 和抠图节点。
+- `ERMBG Route Strategy`: 仅做 route 的调试/分支节点。
+- `ERMBG PyMatting Known-B`: 用于硬边 UI 和稳定已知背景图形的确定性
+  已知背景节点。
+- `ERMBG Classify (preview)`: 轻量诊断节点。
+- `Convert Masks to Images`: 工具节点。
 
-Custom Comfy graphs may use `ERMBG Route Strategy` for branching. Web/API
-production uses Direct Worker for `backend=auto`; explicit Comfy paths are
-debug/extension paths.
+自定义 Comfy 图可以用 `ERMBG Route Strategy` 做分支。Web/API 生产环境对
+`backend=auto` 使用 Direct Worker;显式 Comfy 路径属于调试/扩展路径。
 
-## Optional OpenClaw Adapter
+## 可选的 OpenClaw 适配器
 
-OpenClaw integration is an optional independent `ermbg-matte` skill:
+OpenClaw 集成是一个可选的独立 `ermbg-matte` skill:
 
 ```bash
 python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
   --image /path/to/input.png
 ```
 
-This path should call the maintained ERMBG service/API and archive `output.png`,
-`manifest.json`, and runtime metadata. Keep ERMBG route logic in the shared
-core.
+该路径应调用维护中的 ERMBG 服务/API,并归档 `output.png`、`manifest.json`
+和运行时元数据。要把 ERMBG 的 route 逻辑保留在共享 core 中。
 
-OpenClaw-specific features should remain a thin adapter over the same
-route/matte contract.
+OpenClaw 专属功能应保持为覆盖在同一 route/matte 契约之上的轻薄适配器。
 
-## Operating Rules
+## 运行规则
 
-1. `router.py` is the source of truth for asset family,
-   `parameter_profile`, and `execution_profile`.
-2. Adapters stay thin. Web, CLI, Direct Worker, Comfy nodes, and optional
-   integrations pass data into the shared contract.
-3. Direct Worker is the Web/API service boundary.
-4. ComfyUI is an optional graph host for custom Comfy workflows.
-5. Every adapter should write browsable artifacts with output PNGs, route
-   metadata, timing metadata, and an `ermbg.run.v1` manifest where applicable.
+1. `router.py` 是 asset family、`parameter_profile` 和
+   `execution_profile` 的唯一真相来源。
+2. 适配器保持轻薄。Web、CLI、Direct Worker、Comfy 节点和可选集成都把数据
+   传入共享契约。
+3. Direct Worker 是 Web/API 的服务边界。
+4. ComfyUI 是用于自定义 Comfy workflow 的可选图宿主。
+5. 每个适配器都应写出可浏览的产物,包含输出 PNG、route 元数据、耗时元数据,
+   以及适用情况下的 `ermbg.run.v1` manifest。
 
-## Anti-Patterns
+## 反模式
 
-- Duplicating route heuristics in Web JavaScript, optional adapter code, Comfy
-  wrapper code, or Direct Worker glue.
-- Adding a new backend that implies a new profile contract.
-- Fixing a sample by branching on sample IDs, filenames, one-off dimensions, or
-  fixed coordinates.
-- Running heavy generation or VLM models in the local Web process.
-- Making normal Web startup fail because ComfyUI is unavailable.
-- Treating a local source change as deployed before the relevant Direct Worker
-  or optional Comfy adapter has been restarted and smoke-tested.
+- 在 Web JavaScript、可选适配器代码、Comfy 包装代码或 Direct Worker 胶水
+  代码里重复实现 route 启发式。
+- 新增一个会引入新 profile 契约的后端。
+- 通过对样本 ID、文件名、一次性尺寸或固定坐标分支来修一个样本。
+- 在本地 Web 进程内运行重型生成模型或 VLM 模型。
+- 因为 ComfyUI 不可用就让正常的 Web 启动失败。
+- 在相关 Direct Worker 或可选 Comfy 适配器尚未重启并 smoke 验证前,就把本地
+  源码改动当作已部署。

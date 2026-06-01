@@ -1,353 +1,271 @@
-# Solid Background Graphic Main Path
+# 纯背景图形主路径
 
-## Why This Is Next
+## 为什么这是下一步
 
-Most near-term ERMBG inputs are expected to be known solid-background graphics:
-small UI icons, generated game assets, product-like buttons, badges, panels, and
-other crisp foreground objects on a flat green/white/black/gray screen.
+ERMBG 近期的大部分输入,预计都是已知纯背景图形: 小 UI 图标、生成的游戏素材、
+类产品按钮、徽章、面板,以及其他位于平坦绿/白/黑/灰幕布上的清晰前景对象。
 
-For this workload, the current production path is inverted. It runs a general
-matting model first, then repairs the model with known-background keying,
-shadow cleanup, foreground stabilization, and display-alpha filtering. That is
-appropriate as a fallback for photographs, hair, fur, smoke, or unknown
-backgrounds, but it overcomplicates the common case where the strongest signal
-is already deterministic: known background color plus exterior topology.
+对这类工作负载,当前生产路径是反过来的。它先跑一个通用 matting 模型,然后用
+已知背景抠像、阴影清理、前景稳定和显示 alpha 过滤来修复模型结果。对照片、
+发丝、毛发、烟雾或未知背景而言,作为 fallback 是合适的;但对常见情形——最强信号
+本身就是确定性的(已知背景色加外部拓扑)——它把问题复杂化了。
 
-The next development phase should promote `solid_bg_graphic` to the primary
-path for high-confidence solid-background graphics. BiRefNet/full matting should
-be the fallback, not the first authority.
+下一个开发阶段应把 `solid_bg_graphic` 提升为高置信度纯背景图形的主路径。
+BiRefNet/全程 matting 应作为 fallback,而非第一权威。
 
-## Design Principle
+## 设计原则
 
-Decide ownership before alpha.
+先定归属,再定 alpha。
 
-The path should classify connected regions into semantic ownership roles, then
-compute alpha/foreground per role:
+该路径应把连通区域分类为语义归属角色,然后按角色计算 alpha/前景:
 
-- `external_background`: flood-filled known background reachable from the image
-  border.
-- `opaque_subject`: non-background material connected to the subject core.
-- `subject_hole`: known-background-colored regions enclosed by subject topology.
-- `soft_subject_layer`: glow, antialiasing, translucent material, or glass owned
-  by the subject.
-- `shadow_layer`: exterior scalar darkening where `C_linear ~= scale * B_linear`.
-- `unknown_fallback`: regions whose ownership cannot be proved analytically.
+- `external_background`: 从图像边界可达、经泛洪填充的已知背景。
+- `opaque_subject`: 连接到主体核心的非背景材质。
+- `subject_hole`: 被主体拓扑包围的已知背景色区域。
+- `soft_subject_layer`: 主体拥有的 glow、抗锯齿、半透明材质或玻璃。
+- `shadow_layer`: 满足 `C_linear ~= scale * B_linear` 的外部标量变暗。
+- `unknown_fallback`: 无法解析证明其归属的区域。
 
-This avoids forcing one alpha rule to cover subject material, holes, shadows,
-and transparent effects.
+这避免了用一条 alpha 规则去同时覆盖主体材质、孔洞、阴影和透明特效。
 
-## Proposed Analytic Path
+## 拟议的解析路径
 
-1. Confirm solid background.
-   - Measure corners and exterior samples.
-   - Require stable known `B` and a dominant exterior background component.
-   - Reject or fallback if the background is unstable, textured, or gradients
-     cannot be explained by scalar darkening.
+1. 确认纯背景。
+   - 测量角点和外部采样。
+   - 要求稳定的已知 `B` 和一个占主导的外部背景分量。
+   - 如果背景不稳定、有纹理,或渐变无法用标量变暗解释,则拒绝或 fallback。
 
-2. Build exterior background topology.
-   - Flood fill from image borders through pixels close to known `B`.
-   - Include exterior scalar darkening as background-side evidence when it
-     matches `C_linear ~= scale * B_linear`.
-   - Do not classify enclosed known-background-colored areas as exterior simply
-     because their color matches `B`.
+2. 构建外部背景拓扑。
+   - 从图像边界出发,通过接近已知 `B` 的像素做泛洪填充。
+   - 当外部标量变暗满足 `C_linear ~= scale * B_linear` 时,把它作为背景侧证据
+     纳入。
+   - 不要仅因为颜色匹配 `B`,就把被包围的已知背景色区域分类为外部。
 
-3. Build subject ownership.
-   - Subject core is non-background material not reachable from exterior.
-   - Subject interior should be opaque unless classified as a soft subject layer
-     or transparent hole.
-   - Subject components should be connected/topologically anchored, not chosen
-     by isolated pixel thresholds.
+3. 构建主体归属。
+   - 主体核心是从外部不可达的非背景材质。
+   - 主体内部应为不透明,除非被分类为软主体层或透明孔洞。
+   - 主体分量应是连通/拓扑锚定的,而非由孤立像素阈值挑出。
 
-4. Resolve holes.
-   - A known-background-colored region enclosed by subject topology is a
-     candidate hole.
-   - Transparent holes remain alpha `0` only when topology proves they are
-     enclosed openings, not when they are same-colored decoration/highlight.
-   - Internal subject material that resembles background color must remain
-     subject unless it is connected to exterior background or classified as a
-     true hole.
-   - Interior regions may be proved by exact `B` or by strict background-color
-     family darkening. The exact-`B` part is transparent hole; the darkened
-     same-family part is hole-side neutral shadow. Exterior-reachable
-     background-family darkening is excluded before this proof so outer shadow
-     does not masquerade as an internal hole.
-   - Once an interior hole is proved, it becomes a local background seed. Its
-     edge, antialiasing, residual background color, and scalar darkening should
-     use the same known-background evidence model as the outer edge. This is the
-     inner-hole rule: hole-side darkening is neutral shadow, not green
-     foreground.
-   - This must be separated from connected internal background-colored material:
-     such material stays subject-owned unless topology proves a true opening or
-     the candidate-selection flow exposes an alternate translucent
-     interpretation.
+4. 解析孔洞。
+   - 被主体拓扑包围的已知背景色区域是候选孔洞。
+   - 只有当拓扑证明它们是被包围的开口时,透明孔洞才保持 alpha `0`;而不是当它们
+     是同色装饰/高光时。
+   - 类似背景色的主体内部材质必须保持为主体,除非它连接到外部背景,或被分类为
+     真正的孔洞。
+   - 内部区域可由精确 `B` 或严格背景色族变暗来证明。精确 `B` 部分是透明孔洞;
+     变暗的同族部分是孔洞侧中性阴影。在此证明之前,要先排除外部可达的背景族
+     变暗,以免外部阴影伪装成内部孔洞。
+   - 一旦内部孔洞被证明,它就成为局部背景种子。它的边缘、抗锯齿、残留背景色和
+     标量变暗应使用与外边缘相同的已知背景证据模型。这就是内孔规则: 孔洞侧变暗
+     是中性阴影,而非绿色前景。
+   - 这必须与连通的内部背景色材质区分开: 此类材质保持为主体所有,除非拓扑证明
+     存在真正的开口,或候选选择流程暴露出另一种半透明解释。
 
-5. Resolve soft subject layers.
-   - Antialiasing, glow, and translucent material belong to subject when they
-     are connected to or constrained by subject topology and do not match the
-     scalar-background shadow model.
-   - Estimate alpha from known `B` only inside narrow ownership-supported
-     boundary/soft-layer regions.
-   - Low-alpha soft pixels that are still near-pure background color family are
-     background leaks, not translucent subject material. Drop their alpha rather
-     than exporting green wisps on dark/new backgrounds.
-   - Stabilize foreground color from subject material; do not trust raw
-     inverse-composited RGB where background contribution dominates.
+5. 解析软主体层。
+   - 抗锯齿、glow 和半透明材质,当它们连接到或受主体拓扑约束、且不匹配标量背景
+     阴影模型时,归属于主体。
+   - 仅在归属支持的窄边界/软层区域内,才由已知 `B` 估计 alpha。
+   - 仍接近纯背景色族的低 alpha 软像素是背景泄漏,而非半透明主体材质。应丢弃它们
+     的 alpha,而不是在深色/新背景上导出绿色丝缕。
+   - 从主体材质稳定前景颜色;不要信任背景贡献占主导处的原始逆合成 RGB。
 
-6. Resolve glass/translucent buttons.
-   - Opaque frame, icon, text, and highlights are subject material.
-   - Glass body is a `soft_subject_layer`, not a background hole.
-   - Background-colored pixels inside the button are transparent only if
-     topology proves an opening; otherwise they remain subject material with
-     lower alpha or recovered foreground color.
+6. 解析玻璃/半透明按钮。
+   - 不透明框架、图标、文字和高光是主体材质。
+   - 玻璃主体是 `soft_subject_layer`,而非背景孔洞。
+   - 按钮内的背景色像素,只有在拓扑证明存在开口时才透明;否则它们保持为主体材质,
+     带较低 alpha 或恢复的前景色。
 
-7. Resolve shadows separately.
-   - Shadow is an exterior scalar-darkening layer, not subject alpha.
-   - Shadow must be coherent as a connected low-frequency field; detached
-     display-visible islands should be rejected by area/topology evidence.
-   - Keep clean foreground RGB separate from the RGB companion used for final
-     shadow-preserving RGBA.
-   - Visual rule: compositing the exported RGBA shadow layer back over the
-     original known background should preserve source luminance, not source
-     chroma. Exact RGB reconstruction over saturated green can encode green
-     into the shadow layer; reusable RGBA should prefer neutral darkening with
-     brightness consistency.
+7. 单独解析阴影。
+   - 阴影是外部标量变暗层,而非主体 alpha。
+   - 阴影必须作为连通的低频场保持连贯;脱离的、显示可见的孤岛应被面积/拓扑证据
+     拒绝。
+   - 把干净的前景 RGB,与用于最终保阴影 RGBA 的 RGB companion 分开保存。
+   - 视觉规则: 把导出的 RGBA 阴影层重新合成到原始已知背景上,应保留源亮度,而非
+     源色度。在饱和绿上做精确 RGB 重建会把绿色编码进阴影层;可复用的 RGBA 应优先
+     用带亮度一致性的中性变暗。
 
-8. Fallback only when the analytic path cannot prove ownership.
-   - Examples: photographic subject, hair/fur, smoke, complex transparency,
-     unknown/mixed background, or insufficient color separation.
-   - Fallback should be explicit in debug output so regressions can reveal
-     whether the router chose the wrong path or the analytic path failed.
+8. 仅当解析路径无法证明归属时才 fallback。
+   - 例如: 照片主体、发丝/毛发、烟雾、复杂透明、未知/混合背景,或颜色分离不足。
+   - fallback 应在 debug 输出中显式标出,以便回归能揭示究竟是 router 选错了路径,
+     还是解析路径本身失败。
 
-## Required Outputs
+## 必需输出
 
-The API and Comfy path should preserve separate output semantics:
+API 和 Comfy 路径应保留各自独立的输出语义:
 
-- `foreground`: clean subject-color layer for inspection/decontamination.
-- `alpha`: final display alpha.
-- `rgba`: final transparent result, allowed to include shadow compositing.
-- `rgba_rgb` internally/for Comfy: RGB companion paired with `alpha` to preserve
-  shadows in the final RGBA.
-- debug ownership masks: at least exterior background, opaque subject, hole,
-  soft subject, shadow, and fallback/unknown.
+- `foreground`: 用于检查/去污的干净主体色层。
+- `alpha`: 最终显示 alpha。
+- `rgba`: 最终透明结果,允许包含阴影合成。
+- `rgba_rgb`(内部/供 Comfy): 与 `alpha` 配对的 RGB companion,用于在最终 RGBA 中
+  保留阴影。
+- debug 归属掩码: 至少包含外部背景、不透明主体、孔洞、软主体、阴影,以及
+  fallback/未知。
 
-## Candidate Selection TODO
+## 候选选择 TODO
 
-When multiple ownership/color interpretations are all inside their confidence
-range, the system should not make a one-way cut. It should choose the
-highest-confidence interpretation as the default, but keep the other plausible
-interpretations as explicit candidates for user selection.
+当多种归属/颜色解释都落在各自置信度范围内时,系统不应做一次性的单向切割。它应
+选择最高置信度的解释作为默认,但把其他可信解释保留为显式候选供用户选择。
 
-This is required for cases such as internal background-colored material where
-both of these explanations may be valid:
+这对如下情形是必需的,例如内部背景色材质,以下两种解释都可能成立:
 
-- protect the whole connected region as subject material;
-- solve the whole connected region as a smooth translucent known-background
-  layer.
+- 把整个连通区域保护为主体材质;
+- 把整个连通区域求解为一个平滑的半透明已知背景层。
 
-Implementation requirements:
+实现要求:
 
-1. Move ambiguous solid-graphic decisions from pixel-local gates to
-   component/region-level hypotheses.
-2. Rank hypotheses by local evidence and confidence; use the highest score as
-   the default output.
-3. Preserve alternate high-confidence hypotheses as named candidates with
-   debug reasons, masks, and output RGBA/alpha/foreground artifacts.
-4. Extend the Web/API flow so these candidates are returned and selectable
-   instead of being hidden in one final matte.
-5. Add eval coverage where the same sample exposes at least two plausible
-   interpretations, and ensure the UI can compare them side by side.
+1. 把有歧义的纯图形决策,从像素级局部门限上移到分量/区域级假设。
+2. 按局部证据和置信度对假设排序;用最高分作为默认输出。
+3. 把其他高置信度假设保留为命名候选,带 debug 原因、掩码,以及输出的
+   RGBA/alpha/前景产物。
+4. 扩展 Web/API 流程,让这些候选可返回、可选择,而不是被藏在一个最终 matte 里。
+5. 增加 eval 覆盖: 同一样本暴露至少两种可信解释,并确保 UI 能并排比较它们。
 
-## Perceptual Local-Diffusion TODO
+## 感知局部扩散 TODO
 
-Known background color is the physical anchor for solving `C = aF + (1-a)B`,
-but it is not enough as the only execution threshold. Glass/translucent samples
-show the failure mode: tiny hue/luma changes that are almost invisible on the
-original green screen can become obvious purple/black/grey speckles after
-inverse compositing.
+已知背景色是求解 `C = aF + (1-a)B` 的物理锚点,但作为唯一执行阈值并不够。
+玻璃/半透明样本展示了这种失败模式: 在原始绿幕上几乎不可见的微小色相/亮度变化,
+在逆合成后会变成明显的紫/黑/灰斑点。
 
-For soft glass, glow, antialiasing, holes, and shadows, thresholds should be
-anchored to human-visible local continuity:
+对软玻璃、glow、抗锯齿、孔洞和阴影,阈值应锚定到人眼可见的局部连续性:
 
-- Keep the known background color as the global proof that a region is
-  background-family and physically solvable.
-- Diffuse tolerance from nearby high-confidence background-family pixels inside
-  the same soft/hole context, using perceptual OKLab distance rather than raw
-  RGB absolute difference.
-- Allow the local threshold to be wider than the global background threshold
-  only when local continuity, ownership context, and background-family channel
-  direction all agree.
-- Do not let gradual subject color changes make unrelated purple/blue material
-  transparent; candidate pixels still need the known-background-family channel
-  evidence and local soft/hole context.
+- 保留已知背景色,作为某区域属于背景族、物理可解的全局证明。
+- 在同一软/孔洞上下文内,从邻近的高置信度背景族像素扩散容差,使用感知 OKLab
+  距离而非原始 RGB 绝对差。
+- 仅当局部连续性、归属上下文和背景族通道方向三者都一致时,才允许局部阈值宽于
+  全局背景阈值。
+- 不要让渐变的主体颜色变化使无关的紫/蓝材质变透明;候选像素仍需具备已知背景族
+  通道证据和局部软/孔洞上下文。
 
-Current implementation status:
+当前实现状态:
 
-- `solid_graphic` now has a local OKLab continuity gate for background-family
-  glass speckles. It catches pixels that are not quite close enough to the flat
-  screen color globally, but are perceptually continuous with neighboring
-  screen-colored glass pixels.
-- Regression coverage includes a false-hue guard so inverse solving cannot turn
-  near-background source pixels into exported purple foreground.
+- `solid_graphic` 现在对背景族玻璃斑点有一个局部 OKLab 连续性门限。它能捕捉那些
+  全局上还不够接近平坦幕布色、但与相邻幕布色玻璃像素感知连续的像素。
+- 回归覆盖包含一个 false-hue 守卫,确保逆求解不会把接近背景的源像素变成导出的
+  紫色前景。
 
-Conversation summary, 2026-05-28:
+对话总结,2026-05-28:
 
-- The problem is not that the source pixels have no mathematical difference;
-  the problem is that the difference is below practical human visibility on the
-  original green background, then becomes visible because inverse compositing
-  amplifies it into exported foreground.
-- A pure global "distance to background green" threshold is insufficient. The
-  eye reads local continuity, so the algorithm must consider nearby pixels in
-  the same soft/hole/glass context.
-- The correct rule is two-stage:
-  1. known background color proves the physical equation and background-family
-     channel direction;
-  2. local perceptual continuity decides whether a slightly wider threshold is
-     allowed.
-- This applies to:
-  - glass interiors with lifted green/cyan scatter that should not become
-    grey/black dirt;
-  - low-alpha soft layers where the solved foreground flips to purple/blue even
-    though the source pixel is visually continuous with the screen color;
-  - internal holes or hole-adjacent soft regions, because a hole is local
-    background and should use the same evidence model as the outer edge;
-  - inner-hole shadows, where darkened background-family pixels inside a proved
-    hole should export as neutral luminance shadow rather than subject-owned
-    green/grey foreground;
-  - soft shadows/glow only when ownership already proves the region belongs to
-    background-family evidence rather than subject color.
-- This must not apply to:
-  - real subject-owned green material such as connected internal UI material;
-  - broad true color gradients where green transitions into blue or magenta
-    subject material;
-  - colored glow unless local ownership and background-family channel direction
-    both support removing a specific residual.
+- 问题不在于源像素没有数学差异;问题在于该差异在原始绿背景上低于实际人眼可见度,
+  随后因逆合成把它放大进导出前景而变得可见。
+- 纯全局的"到背景绿的距离"阈值不够。人眼读取的是局部连续性,所以算法必须考虑同一
+  软/孔洞/玻璃上下文内的邻近像素。
+- 正确的规则分两阶段:
+  1. 已知背景色证明物理方程和背景族通道方向;
+  2. 局部感知连续性决定是否允许略宽的阈值。
+- 这适用于:
+  - 内部带上扬绿/青散射的玻璃,不应变成灰/黑脏点;
+  - 低 alpha 软层,其中求解出的前景翻成紫/蓝,尽管源像素与幕布色视觉连续;
+  - 内部孔洞或孔洞邻近软区域,因为孔洞是局部背景,应使用与外边缘相同的证据模型;
+  - 内孔阴影,其中已证明孔洞内变暗的背景族像素应导出为中性亮度阴影,而非主体所有
+    的绿/灰前景;
+  - 软阴影/glow,仅当归属已证明该区域属于背景族证据而非主体色时。
+- 这不得适用于:
+  - 真正主体所有的绿色材质,例如连通的内部 UI 材质;
+  - 大范围真实颜色渐变,其中绿色过渡到蓝色或品红主体材质;
+  - 彩色 glow,除非局部归属和背景族通道方向都支持移除某个特定残留。
 
-Implementation notes:
+实现说明:
 
-- Local diffusion uses OKLab, not raw RGB, because the threshold is about
-  visibility rather than arithmetic channel difference.
-- Seed pixels remain globally close to the known background. Neighbor pixels
-  can only inherit tolerance from those seeds inside a matching soft/hole
-  context.
-- Hole seeds are topology-gated, not color-gated. Exact-B pixels and strict
-  background-family darkening only become hole evidence after the basin is
-  enclosed by subject topology and not reachable from the exterior.
-- The local gate still requires background-family channel direction, so it
-  cannot diffuse through a smooth subject gradient and make purple material
-  transparent.
-- Inverse-solved foreground is treated as a suspect signal when it invents hue:
-  a source pixel that is visually background-family should not be exported as
-  purple/blue/black just because the algebra is under-constrained at low alpha.
+- 局部扩散用 OKLab,而非原始 RGB,因为阈值关乎可见度而非算术通道差。
+- 种子像素仍全局接近已知背景。邻居像素只能在匹配的软/孔洞上下文内,从这些种子
+  继承容差。
+- 孔洞种子是拓扑门控的,而非颜色门控。精确 `B` 像素和严格背景族变暗,只有在 basin
+  被主体拓扑包围且从外部不可达之后,才成为孔洞证据。
+- 局部门限仍要求背景族通道方向,因此它无法穿过平滑主体渐变去让紫色材质变透明。
+- 逆求解前景被当作可疑信号,当它凭空造出色相时: 一个视觉上属于背景族的源像素,
+  不应仅因为低 alpha 处代数欠约束就被导出为紫/蓝/黑。
 
-Open follow-up:
+后续待办:
 
-- Promote ambiguous component decisions into explicit candidates. When both
-  "protect as subject material" and "solve as smooth translucent layer" are
-  plausible, use the highest-confidence interpretation by default but expose
-  the alternate result in Web/API instead of hard-coding one final matte.
-- Add Web/API candidate support for ambiguous internal same-screen-color
-  regions: default to the highest-confidence ownership, but expose "protect as
-  subject material" versus "solve as smooth translucent known-background layer"
-  when both fit the evidence.
+- 把有歧义的分量决策提升为显式候选。当"保护为主体材质"和"求解为平滑半透明层"
+  都可信时,默认用最高置信度解释,但在 Web/API 中暴露另一种结果,而非硬编码一个
+  最终 matte。
+- 为有歧义的内部同幕布色区域增加 Web/API 候选支持: 默认采用最高置信度归属,但当
+  两者都符合证据时,暴露"保护为主体材质"与"求解为平滑半透明已知背景层"两种选项。
 
-## Tests To Add First
+## 应先添加的测试
 
-Add synthetic mechanism tests before replacing production routing:
+在替换生产 routing 之前,先增加合成机制测试:
 
-- Crisp icon on green with subject touching borders.
-- White/black/green/gray solid backgrounds.
-- Enclosed transparent hole on known background.
-- Scalar darkening inside an enclosed hole that must become neutral shadow, not
-  subject-owned green foreground.
-- Dark same-background-family interior holes even when no exact-`B` seed exists.
-- Same-color internal decoration that must not become a hole.
-- Exterior soft shadow that must stay out of subject alpha.
-- Known-background shadow RGBA whose neutral shadow layer preserves source
-  luminance over the original background after 8-bit export.
-- Detached scalar-darkening specks that must be rejected.
-- Semi-transparent glow around subject that must remain subject-owned.
-- Low-alpha background-green leaks inside a soft layer that must be removed
-  without touching high-alpha same-hue subject material.
-- Glass button where the interior is translucent subject material, not a hole.
-- Photo or hair-like sample that must fallback to the existing matting path.
+- 主体接触边界的清晰图标(绿背景上)。
+- 白/黑/绿/灰纯背景。
+- 已知背景上被包围的透明孔洞。
+- 被包围孔洞内的标量变暗,必须变成中性阴影,而非主体所有的绿色前景。
+- 即使没有精确 `B` 种子,也存在的深色同背景族内部孔洞。
+- 不得变成孔洞的同色内部装饰。
+- 必须保持在主体 alpha 之外的外部软阴影。
+- 已知背景阴影 RGBA,其中性阴影层在 8-bit 导出后,合成回原始背景能保留源亮度。
+- 必须被拒绝的脱离标量变暗斑点。
+- 必须保持主体所有的主体周围半透明 glow。
+- 软层内必须被移除的低 alpha 背景绿泄漏,且不触碰高 alpha 同色相主体材质。
+- 内部为半透明主体材质(而非孔洞)的玻璃按钮。
+- 必须 fallback 到既有 matting 路径的照片或发丝类样本。
 
-Use the current `samples/corridorkey_semantic/manifest.json` cases as the
-default production regression surface. Add real user failures under
-`samples/regression/<case_id>/` only when they introduce a mechanism not already
-covered by the semantic set, and do not tune the analytic path around any single
-file.
+把当前的 `samples/corridorkey_semantic/manifest.json` case 作为默认的生产回归面。
+仅当某个真实用户失败引入了语义集尚未覆盖的机制时,才把它加到
+`samples/regression/<case_id>/` 下,并且不要围绕任何单个文件去调解析路径。
 
-## Migration Plan
+## 迁移计划
 
-1. Implement `ermbg/solid_graphic.py` as an isolated analytic engine returning
-   alpha, foreground, ownership masks, and a confidence/fallback reason.
-2. Add focused synthetic tests for ownership roles before wiring it into Web.
-3. Teach the router to choose `solid_bg_graphic` only for high-confidence
-   stable solid backgrounds and graphic-like assets.
-4. This older local prepass is superseded by ERMBG route strategy plus
-   PyMatting Known-B for deterministic hard UI.
-5. Keep the mechanism tests as isolated ownership/analysis guards.
-6. Run local tests, auto-route manifest audit, and real Web HTTP smoke.
+1. 把 `ermbg/solid_graphic.py` 实现为一个隔离的解析引擎,返回 alpha、前景、
+   归属掩码,以及一个置信度/fallback 原因。
+2. 在接入 Web 之前,为各归属角色添加针对性的合成测试。
+3. 教会 router 仅对高置信度、稳定纯背景和类图形素材选择 `solid_bg_graphic`。
+4. 这个较老的本地前置处理已被 ERMBG route strategy 加上用于确定性硬边 UI 的
+   PyMatting Known-B 取代。
+5. 把机制测试保留为隔离的归属/分析守卫。
+6. 跑本地测试、auto-route manifest 审计,以及真实 Web HTTP smoke。
 
-## Pixel-Patch Cleanup TODO
+## 像素 Patch 清理 TODO
 
-The current BiRefNet-first production path contains many pixel-level repair
-rules that were added to compensate for the model being the first authority on
-known solid-background graphics. These rules should not be carried forward as
-the main design. They should be converted into a cleanup ledger and retired
-only after the analytic path proves the corresponding failure mechanism.
+当前 BiRefNet-first 生产路径包含许多像素级修复规则,它们是为了弥补"模型作为
+已知纯背景图形第一权威"而加的。这些规则不应作为主设计延续下去。它们应被转成
+一份清理台账,只有在解析路径证明了对应失败机制之后才退役。
 
-Track each old repair with this table shape:
+按如下表格形态跟踪每条旧修复:
 
 ```text
-old repair -> failure mechanism -> solid_graphic ownership role -> tests/eval coverage -> delete condition
+旧修复 -> 失败机制 -> solid_graphic 归属角色 -> 测试/eval 覆盖 -> 删除条件
 ```
 
-Repairs that should migrate into `solid_bg_graphic` ownership semantics:
+应迁入 `solid_bg_graphic` 归属语义的修复:
 
-- Saturated known-background low-alpha interior repair.
-- Saturated opaque-interior alpha snap.
-- Saturated hard-edge key resolve / alpha raise-lower.
-- White/black known-background hole repair for hard graphics.
-- Exterior scalar-darkening reclassification.
-- Same-background-color hole vs same-color subject decoration.
-- Glow/glass/translucent subject material protection.
+- 饱和已知背景低 alpha 内部修复。
+- 饱和不透明内部 alpha snap。
+- 饱和硬边 key resolve / alpha 升降。
+- 硬图形的白/黑已知背景孔洞修复。
+- 外部标量变暗重分类。
+- 同背景色孔洞 vs 同色主体装饰。
+- glow/玻璃/半透明主体材质保护。
 
-Current cleanup status:
+当前清理状态:
 
-- Saturated hard-edge key resolve / alpha raise-lower: main-path coverage added.
-  `solid_graphic` now treats scalar-looking green-screen contour pixels that are
-  glued to strong subject material as `soft_subject_layer`, not `shadow_layer`.
-  The old `saturated_hard_edge_key_resolve` remains only for fallback/injected
-  segmenter flows until real batch coverage confirms it can be narrowed further
-  or removed.
+- 饱和硬边 key resolve / alpha 升降: 主路径覆盖已添加。`solid_graphic` 现在把
+  那些看似标量、又紧贴强主体材质的绿幕轮廓像素当作 `soft_subject_layer`,而非
+  `shadow_layer`。旧的 `saturated_hard_edge_key_resolve` 仅在 fallback/注入式
+  分割器流程中保留,直到真实批量覆盖确认它可以进一步收窄或移除。
 
-Repairs that should remain temporarily in the fallback path:
+应暂时保留在 fallback 路径的修复:
 
-- Photographic, hair, fur, smoke, and ambiguous soft-matte handling.
-- Generic foreground export stabilization for weak alpha regions.
-- Generic shadow estimation for non-analytic fallback results.
-- Source-alpha hygiene and dirty-RGBA rematting.
-- Semantic-prior subject/material/shadow protection.
+- 照片、发丝、毛发、烟雾,以及有歧义的软 matte 处理。
+- 弱 alpha 区域的通用前景导出稳定。
+- 非解析 fallback 结果的通用阴影估计。
+- 源 alpha 卫生和脏 RGBA 重抠。
+- 语义先验的主体/材质/阴影保护。
 
-Deletion order:
+删除顺序:
 
-1. Add a focused synthetic test for the failure mechanism in `solid_graphic`.
-2. Add or rerun a real regression/eval batch when the failure came from a user
-   sample.
-3. Confirm high-confidence solid-background graphics choose `solid_bg_graphic`
-   and ambiguous/photo cases still fallback.
-4. Remove or narrow the old pixel-level repair from the BiRefNet path.
-5. Keep a fallback regression proving the removed repair was not still needed
-   for photographic/ambiguous inputs.
+1. 在 `solid_graphic` 中为该失败机制添加针对性合成测试。
+2. 当失败来自用户样本时,添加或重跑一个真实回归/eval 批次。
+3. 确认高置信度纯背景图形会选择 `solid_bg_graphic`,而有歧义/照片 case 仍 fallback。
+4. 从 BiRefNet 路径移除或收窄旧的像素级修复。
+5. 保留一个 fallback 回归,证明被移除的修复对照片/有歧义输入确实不再需要。
 
-Do not delete all old repair code in one sweep. Retire one mechanism at a time,
-with tests proving the new ownership role has replaced the old patch.
+不要一次性删掉所有旧修复代码。一次退役一个机制,并用测试证明新归属角色已取代
+旧 patch。
 
-## Non-Goals
+## 非目标
 
-- Do not add sample-id or coordinate-specific rules.
-- Do not continue piling display cleanup rules onto the fallback path for cases
-  that should be solved analytically.
-- Do not remove the current BiRefNet path; it remains necessary for genuinely
-  photographic or ambiguous images.
+- 不要添加样本 ID 或坐标专属规则。
+- 不要继续往 fallback 路径上堆显示清理规则,去处理那些本应解析求解的 case。
+- 不要移除当前 BiRefNet 路径;它对真正的照片或有歧义图像仍然必要。

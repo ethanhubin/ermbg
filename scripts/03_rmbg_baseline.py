@@ -63,12 +63,12 @@ def main() -> None:
             background_color=diag.background_color,
             out_dir=case / "qa",
         )
-        (case / "qa" / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (case / "qa" / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         (case / "report.json").write_text(json.dumps({
             "tool": "comfyui-rembg-isnet-general-use",
             "background_color": list(diag.background_color),
             "qa": qa_metrics,
-        }, indent=2))
+        }, indent=2), encoding="utf-8")
 
         h = qa_metrics["edge_halo_score_per_bg"]
         summary.append({

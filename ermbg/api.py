@@ -513,7 +513,7 @@ def _matte_image_passthrough(
         ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", a)
         ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", rgb)
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -581,9 +581,9 @@ def _write_common_outputs(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -852,9 +852,9 @@ def _matte_image_pymatting_known_b(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -1073,9 +1073,9 @@ def _matte_image_comfy_pymatting_known_b(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -1191,9 +1191,9 @@ def _matte_image_comfy_rmbg(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -3599,9 +3599,9 @@ def _matte_image_known_bg_hard_ui_shadow(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,
@@ -3959,9 +3959,9 @@ def _matte_image_comfy_corridorkey(
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
         report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         _write_output_manifest(
             out_dir=out_dir,
             stem=stem,

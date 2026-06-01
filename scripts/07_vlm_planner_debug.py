@@ -149,8 +149,8 @@ def _write_request(request: VLMPlannerRequest, out_dir: Path) -> list[dict[str, 
             }
         )
 
-    (out_dir / "vlm_request.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    (out_dir / "attachments_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    (out_dir / "vlm_request.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "attachments_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -190,11 +190,11 @@ def _execute_fixture(
         )
 
     (out_dir / "candidate_plans.json").write_text(
-        json.dumps([result.plan.to_dict() for result in results], indent=2, ensure_ascii=False)
-    )
+        json.dumps([result.plan.to_dict() for result in results], indent=2, ensure_ascii=False),
+        encoding="utf-8")
     (out_dir / "candidate_results.json").write_text(
-        json.dumps(candidate_payloads, indent=2, ensure_ascii=False)
-    )
+        json.dumps(candidate_payloads, indent=2, ensure_ascii=False),
+        encoding="utf-8")
     return candidate_payloads
 
 
@@ -351,7 +351,7 @@ def run(
     elif provider != "none":
         raise ValueError(f"unknown provider: {provider}")
 
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
 
 

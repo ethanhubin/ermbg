@@ -1,18 +1,23 @@
-# CorridorKey Full Test Samples v1
+# CorridorKey 完整测试样本 v1
 
-This directory is the canonical full test sample set for CorridorKey / ERMBG after phase 1 sample construction.
+本目录是 phase 1 样本构建之后,CorridorKey / ERMBG 的规范完整测试样本集。
 
-Phase 1 status: complete. The approved set contains 83 samples:
+Phase 1 状态: 已完成。已批准的样本集包含 85 个样本:
 
-- Button: 54 cases, including outlined/unoutlined/translucent shadow matrices, white-outline buttons, and real glass buttons.
-- Icon/effect: 20 cases, including hard boundaries, soft boundaries, translucent icons, particles, and smooth glow.
-- Character: 9 cases at 1024x1024, each intentionally combining hair/fur detail, hard opaque edges, translucent material, and/or glow.
+- Button: 56 个 case,包含有/无描边/半透明阴影矩阵、白描边按钮、真实玻璃按钮,
+  以及 known-B 孔洞回归。
+- Icon/effect: 20 个 case,包含硬边界、软边界、半透明图标、粒子和平滑 glow。
+- Character: 9 个 1024x1024 的 case,每个都刻意组合发丝/毛发细节、硬不透明边、
+  半透明材质和/或 glow。
 
-Background convention:
+幕布约定:
 
-- Green screen: RGB(0, 200, 0)
-- Blue screen: RGB(0, 0, 200)
+- 绿幕: RGB(0, 200, 0)
+- 蓝幕: RGB(0, 0, 200)
 
-Use `manifest.json` as the machine-readable entry point. Each case has exactly the screen screen that was approved for it, exposed through either the `green` or `blue` key. Test runners should count only screens present in a case instead of multiplying every case by every possible background.
+把 `manifest.json` 作为机器可读的入口。每个 case 通过 `green` 或 `blue` key 暴露
+其被批准的那个幕布。测试运行器应只统计 case 中存在的幕布,而不是把每个 case 乘以
+所有可能的背景。
 
-Next phase: run full recognition/matting evaluation over this confirmed set, inspect failures by family, then tune CorridorKey route selection and per-route parameters.
+下一阶段: 在这个确认集上跑完整的识别/matting 评估,按样本族检查失败,然后调优
+CorridorKey 的 route 选择和按 route 的参数。

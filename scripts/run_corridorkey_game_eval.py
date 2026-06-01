@@ -116,10 +116,12 @@ def _timing_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _rel(path: Path) -> str:
+    # Emit POSIX separators so manifest path fields stay portable across OSes
+    # (Windows str(Path) would otherwise leak backslashes into summary.json).
     try:
-        return str(path.resolve().relative_to(PROJECT_ROOT))
+        return path.resolve().relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
