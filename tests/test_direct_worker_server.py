@@ -79,6 +79,21 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert payload["server_elapsed_sec"] >= 0.0
 
 
+def test_direct_worker_server_health_reports_capabilities():
+    client = TestClient(server.app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["backend"] == "direct-worker"
+    assert payload["version"]
+    assert payload["capabilities"]["route_profile_contract"] is True
+    assert payload["capabilities"]["direct_pymatting_known_b"] is True
+    assert payload["capabilities"]["direct_corridorkey"] is True
+    assert payload["capabilities"]["batch_matte"] is True
+
+
 def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     decisions = [

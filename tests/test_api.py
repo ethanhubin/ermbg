@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
@@ -1055,6 +1056,43 @@ def test_pymatting_shadow_patch_does_not_invent_background_colored_endpoint_spec
     assert shadow_alpha[shadow & ~source_background_holes].mean() > 0.25
 
 
+def test_shadow_field_regularizer_projects_edge_residuals_to_transferable_field():
+    import ermbg.api as api
+
+    subject = np.zeros((128, 128), dtype=np.float32)
+    subject[34:70, 44:84] = 1.0
+    shadow = np.zeros((128, 128), dtype=np.float32)
+    broad_shadow = np.zeros((128, 128), dtype=bool)
+    broad_shadow[78:94, 48:88] = True
+    contact_shadow = np.zeros((128, 128), dtype=bool)
+    contact_shadow[70:73, 50:78] = True
+    attached_tip = np.zeros((128, 128), dtype=bool)
+    attached_tip[71, 49] = True
+    specks = np.zeros((128, 128), dtype=bool)
+    specks[58, 43] = True
+    specks[60, 84] = True
+
+    shadow[broad_shadow] = 0.28
+    shadow[contact_shadow] = 0.22
+    shadow[attached_tip] = 0.45
+    shadow[specks] = 0.26
+
+    repaired, info = api._regularize_transferable_shadow_field(
+        shadow,
+        subject_alpha=subject,
+    )
+
+    # Mechanism: same-B reprojection can explain isolated or contour-hugging
+    # dark pixels, but a portable shadow must agree with the component's
+    # low-frequency illumination field. Edge residuals are projected onto that
+    # field; continuous contact/broad shadow support remains.
+    assert info["regularized_pixels"] >= int(specks.sum())
+    assert repaired[specks].max() < shadow[specks].max()
+    assert repaired[attached_tip].max() <= shadow[attached_tip].max()
+    assert repaired[contact_shadow].mean() == pytest.approx(0.22, abs=1e-6)
+    assert repaired[broad_shadow].mean() == pytest.approx(0.28, abs=1e-6)
+
+
 def test_pymatting_foreground_stabilization_does_not_recolor_opaqueish_ui_interior():
     import ermbg.api as api
 
@@ -2008,6 +2046,12 @@ def test_matte_image_writes_files_when_output_dir_given(tmp_path):
     assert (out / "in_shadow.png").exists()
     assert (out / "in_foreground.png").exists()
     assert (out / "in.report.json").exists()
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema"] == "ermbg.run.v1"
+    assert manifest["outputs"]["rgba"] == "in_rgba.png"
+    assert manifest["outputs"]["alpha"] == "in_alpha.png"
+    assert manifest["request"]["backend"] == "pymatting-known-b"
+    assert manifest["report"] == "in.report.json"
 
 
 def test_matte_image_qa_adds_metrics_to_report(tmp_path):

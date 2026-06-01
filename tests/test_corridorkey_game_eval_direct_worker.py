@@ -88,6 +88,7 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
 
     case_dir = out_dir / "B001_case_green_green"
     assert summary["ok_count"] == 1
+    assert summary["artifact_manifest"] == "out/direct_worker/manifest.json"
     assert summary["runs"][0]["backend"] == "direct-worker"
     assert summary["runs"][0]["timings"]["server_elapsed_sec"] == 0.42
     assert summary["timing_summary"]["overall"]["timings"]["server_elapsed_sec"]["avg"] == 0.42
@@ -99,4 +100,22 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     assert (case_dir / "alpha.png").exists()
     assert (case_dir / "foreground.png").exists()
     assert (case_dir / "contact_sheet.png").exists()
-    assert json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))["status"] == "ok"
+    case_summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
+    assert case_summary["status"] == "ok"
+    assert case_summary["artifact_manifest"] == "out/direct_worker/B001_case_green_green/manifest.json"
+    case_manifest = json.loads((case_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert case_manifest["schema"] == "ermbg.run.v1"
+    assert case_manifest["request"]["backend"] == "direct-worker"
+    assert case_manifest["request"]["effective_backend"] == "direct-worker"
+    assert case_manifest["outputs"]["rgba"] == "rgba.png"
+    assert case_manifest["outputs"]["alpha"] == "alpha.png"
+    assert case_manifest["outputs"]["foreground"] == "foreground.png"
+    assert case_manifest["runtime"]["backend"] == "direct-worker"
+    batch_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert batch_manifest["schema"] == "ermbg.run.v1"
+    assert batch_manifest["runtime"]["kind"] == "game-eval"
+    assert batch_manifest["request"]["backend"] == "direct-worker"
+    assert batch_manifest["outputs"]["summary"] == "summary.json"
+    assert batch_manifest["extra"]["case_manifests"] == [
+        "out/direct_worker/B001_case_green_green/manifest.json"
+    ]

@@ -1,56 +1,74 @@
-# openclaw 集成
+# OpenClaw 集成
 
-ERMBG 不是独立 skill,而是合并进 [openclaw](https://github.com/anthropics/openclaw) 已有的 `comfyui-rmbg` skill,作为 `--mode ermbg` 子模式存在。这样:
+ERMBG 在 OpenClaw 里是独立 skill: `ermbg-matte`。
 
-- 用户说"抠图 / 去背景 / remove background" → 走 `comfyui-rmbg` 的标准 RMBG 路径(快、够用)。
-- 用户说"**智能抠图 / AI生图抠图 / smart matte / ERMBG**" → 走 `--mode ermbg`,触发 ERMBG RouteMatte 单节点管线。
-- 用户说"magic wand / 只去同色边缘" → 走 `--mode edge-wand`(原有)。
+OpenClaw 不是 ERMBG 主线。当前主线是 Web/API/CLI 调远端 ComfyUI
+`ErmbgRouteMatte`,Direct Worker 作为验证和加速路径。这里保留的是一个可选
+外围适配器,用于需要 OpenClaw 调用时复用同一条 RouteMatte 合约。
 
-一个 skill,多个触发词,意图精准命中。
+它不是 `comfyui-rmbg` 的子模式,也不复用 RMBG/rembg 的意图入口。这样做的
+目标是让 agent 明确区分:
+
+- 普通 RMBG/rembg: 通用语义去背景。
+- ERMBG: 面向 AI 生成游戏素材的 route-aware 智能抠图。
+
+## 安装
+
+```bash
+scripts/install_openclaw_ermbg_skill.sh
+```
+
+默认安装到:
+
+```text
+~/.openclaw/workspace/skills/ermbg-matte/
+```
 
 ## 调用
 
 ```bash
-# AI 生图抠图(智能路由)
-python3 ~/.openclaw/workspace/skills/comfyui-rmbg/scripts/comfyui_rmbg.py \
-    --mode ermbg --image /path/to/in.png
-
-# 等价的简写
-python3 ~/.openclaw/workspace/skills/comfyui-rmbg/scripts/comfyui_rmbg.py \
-    --smart --image /path/to/in.png
+python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
+    --image /path/to/in.png
 ```
 
-输出归档到 `~/.openclaw/media/openclaw-production/images/rmbg/<时间戳-uuid>/`,包含 `output.png` / `workflow.json` / `manifest.json` / `history_outputs.json`。`manifest.json` 里的 `mode: "ermbg"` 字段标识这次走的智能路径,`options` 里记录了路由参数。
+输出归档到:
+
+```text
+~/.openclaw/media/openclaw-production/images/ermbg/<日期>/<时间戳-输入名>/
+```
+
+每次运行包含:
+
+- `output.png`: 最终透明 PNG
+- `foreground.png`: 前景 RGB
+- `alpha.png`: 最终 alpha 图
+- `rgba_rgb.png`: 与 alpha 组合的 RGB 层
+- `aux.png`: 辅助预览
+- `metadata.json`: ERMBG route/result metadata
+- `workflow.json`: 提交给 ComfyUI 的 API workflow
+- `history_outputs.json`: Comfy history outputs
+- `manifest.json`: 本地运行 manifest
 
 ## 服务器侧依赖
 
-ComfyUI 服务器要先按 [DEPLOY.md](../../DEPLOY.md) 装好 ERMBG 节点。`--mode ermbg` 应提交 `ErmbgRouteMatte`;该节点在 Comfy 进程内完成 route、参数选择、CorridorKey / PyMatting Known-B / PyMatting fallback / passthrough 和 ShadowPatch。Auto 不再调用 RMBG fallback。
+ComfyUI 服务器要先按 [DEPLOY.md](../../DEPLOY.md) 装好 ERMBG 节点。
+`ermbg-matte` 提交的是 `ErmbgRouteMatte`;该节点在 Comfy 进程内完成 route、
+参数选择、CorridorKey / PyMatting Known-B / PyMatting fallback / passthrough
+和 ShadowPatch。
 
 ## 内部工作流
 
-旧的 `ErmbgAutoMatte` 单节点工作流已移除。`--mode ermbg` 的工作流应是:
-
-```
-LoadImage → ERMBG Route Matte → foreground / alpha / rgba_rgb / metadata
+```text
+LoadImage -> ERMBG Route Matte -> foreground / alpha / rgba_rgb / aux / metadata
 ```
 
-## ermbg-matte 子模式选项
-
-所有都是 `--mode ermbg` 才生效;默认全 `auto`,让 `ErmbgRouteMatte` 决策。
-
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `--despill` | `auto` | `auto / unmix / chroma_cap / local_borrow / closed_form / none` |
-| `--use-keyer` | `auto` | `auto / on / off` |
-| `--bg-color` | `0,200,0` | R,G,B,重抠脏 RGBA 时的合成底色 |
-| `--matting-model` | `ZhengPeng7/BiRefNet-matting` | HF 模型 ID |
+OpenClaw skill 只负责上传输入、提交 workflow、下载输出和写归档。它不应该
+复制 ERMBG router 的判断逻辑。
 
 ## 自定义 ComfyUI 服务器
 
 ```bash
-COMFY_URL=http://10.0.0.5:8188 python3 ... --mode ermbg --image ...
+COMFY_URL=http://10.0.0.5:8188 \
+python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
+    --image /path/to/in.png
 ```
-
-## 历史
-
-最早是独立的 `ermbg-matte` skill。后来发现和 `comfyui-rmbg` 触发词冲突(都包含"抠图""去背景"),LLM 选谁不可控。合并后变成一个 skill 三个 mode,意图区分清楚。

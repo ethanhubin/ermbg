@@ -220,6 +220,25 @@ Direct Worker HTTP smoke:
   --sample-id B001,I011
 ```
 
+Runtime capability smoke through the local Web server:
+
+```bash
+curl -sS "http://127.0.0.1:7860/api/runtime-capabilities?include_object_info=false"
+```
+
+Standard artifact manifest:
+
+- Python API / CLI `output_dir` runs now write `manifest.json` beside the existing
+  `*_rgba.png`, `*_alpha.png`, `*_foreground.png`, and `*.report.json` files.
+- Web `/api/matte-candidates` writes each run under
+  `out/web_matte_runs_<YYYYMMDD>/.../` and returns `artifact_manifest`.
+- Game Eval case directories write `manifest.json` and include
+  `artifact_manifest` in each case `summary.json`, including the
+  `direct-worker` path.
+- Manifest schema is `ermbg.run.v1`.
+- Artifact discovery API: `GET /api/artifacts` and
+  `GET /api/artifacts/<artifact_id>`.
+
 Auto 与 Direct 对齐时,重点看:
 
 - 同一输入的 `parameter_profile` 是否一致;
@@ -250,27 +269,34 @@ Web/API 改动后,必须确认 `127.0.0.1:7860` 正在运行更新后的 server,
 
 ## Docs
 
+- `docs/architecture.md` - current core/adapters/runtimes architecture and recommended boundaries.
 - `docs/ermbg-route-strategy.md` - current route/profile/backend contract.
 - `docs/corridorkey-semantic-paths.md` - semantic sample paths and B/I/C set.
 - `docs/corridorkey-game-ui-plan.md` - game UI development plan.
 - `docs/local-ownership.md` - diagnostic ownership scoring, not the main production path.
 - `comfy_nodes/README.md` - ComfyUI node usage.
-- `integrations/openclaw/README.md` - OpenClaw `comfyui-rmbg --mode ermbg` integration.
+- `integrations/openclaw/README.md` - optional independent OpenClaw `ermbg-matte` skill integration.
 - `DEPLOY.md` - deployment notes.
 
 Documents under `docs/archive/` are historical reference unless a current doc explicitly points back to them.
 
-## OpenClaw
+## Optional OpenClaw Adapter
 
-ERMBG is integrated into OpenClaw through the existing `comfyui-rmbg` skill as `--mode ermbg` / `--smart`.
+OpenClaw is not the main ERMBG path. The maintained production loop is
+Web/API/CLI -> remote ComfyUI `ErmbgRouteMatte`, with Direct Worker as the
+validation/speed path. OpenClaw is kept only as an optional independent
+`ermbg-matte` adapter.
+
+It is not a `comfyui-rmbg` mode and does not share RMBG/rembg intent routing.
 
 ```bash
-python3 ~/.openclaw/workspace/skills/comfyui-rmbg/scripts/comfyui_rmbg.py \
-  --mode ermbg \
+scripts/install_openclaw_ermbg_skill.sh
+
+python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
   --image /path/to/input.png
 ```
 
-This submits the remote `ErmbgRouteMatte` workflow and stores `output.png`, `workflow.json`, `manifest.json`, and Comfy history metadata in the OpenClaw media directory.
+This submits the remote `ErmbgRouteMatte` workflow and stores `output.png`, `foreground.png`, `alpha.png`, `rgba_rgb.png`, `metadata.json`, `workflow.json`, `manifest.json`, and Comfy history metadata in the OpenClaw media directory.
 
 ## Development Principles
 

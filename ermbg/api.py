@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .artifacts import build_run_manifest, write_run_manifest
 from . import io as ermbg_io
 from .comfy import DEFAULT_COMFY_URL
 from .qa import run_qa
@@ -117,6 +118,59 @@ def _to_mask(mask: MaskLike | None, shape: tuple[int, int], name: str) -> np.nda
     if arr.shape != shape:
         raise ValueError(f"{name} must have shape {shape}, got {arr.shape}")
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
+def _manifest_route_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    auto_route = report.get("auto_route")
+    if isinstance(auto_route, dict):
+        return {
+            "selected_backend": auto_route.get("selected_backend") or auto_route.get("backend"),
+            "route": auto_route.get("route"),
+            "asset_kind": auto_route.get("asset_kind"),
+            "parameter_profile": auto_route.get("parameter_profile"),
+            "execution_profile": auto_route.get("execution_profile"),
+            "confidence": auto_route.get("confidence"),
+            "reasons": auto_route.get("reasons"),
+        }
+    strategy = report.get("strategy") if isinstance(report.get("strategy"), dict) else {}
+    return {
+        "selected_backend": report.get("backend"),
+        "route": strategy.get("bg_type"),
+        "asset_kind": strategy.get("image_type"),
+        "parameter_profile": None,
+        "execution_profile": None,
+    }
+
+
+def _write_output_manifest(
+    *,
+    out_dir: Path,
+    stem: str,
+    src_path: str | None,
+    report: dict[str, Any],
+    outputs: dict[str, Path],
+    report_path: Path,
+    requested_backend: str | None = None,
+) -> None:
+    strategy = report.get("strategy") if isinstance(report.get("strategy"), dict) else {}
+    debug = report.get("debug") if isinstance(report.get("debug"), dict) else {}
+    runtime = {
+        "requested_backend": requested_backend,
+        "backend": report.get("backend") or debug.get("backend"),
+        "strategy": strategy.get("name"),
+        "server_elapsed_sec": debug.get("server_elapsed_sec") or report.get("server_elapsed_sec"),
+    }
+    manifest = build_run_manifest(
+        run_dir=out_dir,
+        input_path=src_path,
+        outputs=outputs,
+        request={"backend": requested_backend},
+        route=_manifest_route_from_report(report),
+        runtime=runtime,
+        report_path=report_path,
+        extra={"stem": stem},
+    )
+    write_run_manifest(out_dir / "manifest.json", manifest)
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +512,21 @@ def _matte_image_passthrough(
         ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
         ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", a)
         ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", rgb)
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+            },
+            report_path=report_path,
+            requested_backend="passthrough",
+        )
     elif qa:
         # Passthrough has no known observed background, so QA composites are not
         # meaningful. Keep the flag accepted for compatibility and report why.
@@ -493,6 +561,7 @@ def _write_common_outputs(
     output_dir: str | Path | None,
     qa: bool,
     background_color: tuple[int, int, int],
+    requested_backend: str | None = None,
 ) -> Path | None:
     out_dir: Path | None = None
     if output_dir is not None:
@@ -513,7 +582,21 @@ def _write_common_outputs(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+            },
+            report_path=report_path,
+            requested_backend=requested_backend,
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
@@ -583,6 +666,7 @@ def _matte_image_comfy_route_matte(
         output_dir=output_dir,
         qa=qa,
         background_color=remote.background_color,
+        requested_backend="auto",
     )
     debug = dict(remote.debug)
     debug.setdefault("soft_mask", remote.alpha)
@@ -769,7 +853,24 @@ def _matte_image_pymatting_known_b(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+                "rgba_rgb": out_dir / f"{stem}_rgba_rgb.png",
+                "trimap": out_dir / f"{stem}_trimap.png",
+                "shadow": out_dir / f"{stem}_shadow.png",
+            },
+            report_path=report_path,
+            requested_backend="pymatting-known-b",
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
@@ -973,7 +1074,24 @@ def _matte_image_comfy_pymatting_known_b(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+                "rgba_rgb": out_dir / f"{stem}_rgba_rgb.png",
+                "trimap": out_dir / f"{stem}_trimap.png",
+                "shadow": out_dir / f"{stem}_shadow.png",
+            },
+            report_path=report_path,
+            requested_backend="comfy-pymatting-known-b",
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
@@ -1074,7 +1192,21 @@ def _matte_image_comfy_rmbg(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+            },
+            report_path=report_path,
+            requested_backend="comfy-rmbg",
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
@@ -1494,6 +1626,10 @@ def _pymatting_known_b_objective_shadow_from_source(
     completed_fill = completed_support & ~write & (solved_shadow >= support_alpha_min)
     if bool(completed_fill.any()) and bool(write.any()):
         shadow[completed_fill] = np.maximum(shadow[completed_fill], solved_shadow[completed_fill])
+    shadow, portability_info = _regularize_transferable_shadow_field(
+        shadow,
+        subject_alpha=subject,
+    )
     values = shadow[shadow > 0.0]
     return shadow, {
         "enabled": True,
@@ -1516,6 +1652,7 @@ def _pymatting_known_b_objective_shadow_from_source(
         "raw_source_pixels": int(write.sum()),
         "completed_support_pixels": int(completed_support.sum()),
         "completed_fill_pixels": int(completed_fill.sum()),
+        "edge_shadow_portability": portability_info,
         "pixels": int((shadow > 0.0).sum()),
         "mean_alpha": float(values.mean()) if values.size else 0.0,
         "p95_alpha": float(np.percentile(values, 95.0)) if values.size else 0.0,
@@ -1524,6 +1661,136 @@ def _pymatting_known_b_objective_shadow_from_source(
         "components": components[:12],
         "support_components": anchored_support_components[:12],
         "omitted_support_components": max(0, len(anchored_support_components) - 12),
+        "omitted_components": max(0, len(components) - 12),
+    }
+
+
+def _regularize_transferable_shadow_field(
+    shadow_alpha: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Project source residual shadow onto a transferable low-frequency field.
+
+    Same-B reprojection proves a residual can explain the original source, but
+    a reusable RGBA shadow must also look like a low-frequency illumination
+    field on a different background. For each connected shadow component, build
+    a normalized Gaussian field from the component itself. Positive residuals
+    that sit on the subject boundary and rise above that field are edge noise,
+    not portable shadow; broad/contact shadow structure remains because it is
+    already explained by the field.
+    """
+    shadow = np.clip(shadow_alpha.astype(np.float32), 0.0, 1.0).copy()
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    if shadow.shape != subject.shape:
+        raise ValueError("shadow_alpha and subject_alpha must share HxW")
+    h, w = shadow.shape
+    if not bool((shadow > 0.0).any()):
+        return shadow, {
+            "used": True,
+            "candidate_pixels": 0,
+            "regularized_pixels": 0,
+            "reason": "no shadow pixels",
+        }
+
+    subject_core = subject >= 0.50
+    if not bool(subject_core.any()):
+        return shadow, {
+            "used": True,
+            "candidate_pixels": 0,
+            "regularized_pixels": 0,
+            "reason": "no subject core",
+        }
+
+    dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats((shadow > 0.0).astype(np.uint8), 8)
+    if labels_count <= 1:
+        return shadow, {
+            "used": True,
+            "candidate_pixels": 0,
+            "regularized_pixels": 0,
+            "reason": "no connected shadow component",
+        }
+
+    regularized = np.zeros(shadow.shape, dtype=bool)
+    components: list[dict[str, Any]] = []
+    min_field_area = int(max(8.0, float(h * w) * 0.00005))
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        if area < min_field_area:
+            shadow[comp] = 0.0
+            regularized |= comp
+            components.append(
+                {
+                    "area": area,
+                    "bbox_xyxy": [
+                        int(stats[label, cv2.CC_STAT_LEFT]),
+                        int(stats[label, cv2.CC_STAT_TOP]),
+                        int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                        int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                    ],
+                    "sigma_px": 0.0,
+                    "edge_influence_px": 0.0,
+                    "positive_residual_gate": 0.0,
+                    "candidate_pixels": area,
+                    "reason": "component too small to define transferable field",
+                }
+            )
+            continue
+        radius = float(np.sqrt(float(area) / np.pi))
+        # Scale follows the component itself, not a fixed pixel strip. The
+        # blur estimates the transferable illumination field; source residual
+        # above that field is treated as non-portable high-frequency edge dirt.
+        sigma = float(max(1.0, min(12.0, radius * 0.12)))
+        comp_float = comp.astype(np.float32)
+        numerator = cv2.GaussianBlur((shadow * comp_float).astype(np.float32), (0, 0), sigma)
+        denominator = cv2.GaussianBlur(comp_float, (0, 0), sigma)
+        field = np.divide(numerator, np.maximum(denominator, 1e-6)).astype(np.float32)
+        positive_residual = shadow - field
+        comp_positive = positive_residual[comp & (positive_residual > 0.0)]
+        if comp_positive.size:
+            # Use the component's own residual distribution so sharp but broad
+            # contact shadows survive, while contour-hugging outliers are
+            # projected back onto the low-frequency field.
+            residual_gate = float(np.percentile(comp_positive, 90.0))
+        else:
+            residual_gate = 1.0
+        edge_influence_px = float(max(2.0, min(10.0, radius * 0.10)))
+        candidate = (
+            comp
+            & (subject < 0.995)
+            & (dist_to_core <= edge_influence_px)
+            & (positive_residual > residual_gate)
+        )
+        if bool(candidate.any()):
+            shadow[candidate] = np.minimum(shadow[candidate], field[candidate])
+            regularized |= candidate
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "sigma_px": sigma,
+                "edge_influence_px": edge_influence_px,
+                "positive_residual_gate": residual_gate,
+                "candidate_pixels": int(candidate.sum()),
+            }
+        )
+
+    components.sort(key=lambda item: item["candidate_pixels"], reverse=True)
+    return shadow, {
+        "used": True,
+        "candidate_pixels": int(regularized.sum()),
+        "regularized_pixels": int(regularized.sum()),
+        "min_field_area": int(min_field_area),
+        "components": components[:12],
         "omitted_components": max(0, len(components) - 12),
     }
 
@@ -3333,7 +3600,25 @@ def _matte_image_known_bg_hard_ui_shadow(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+                "corridorkey_subject_rgba": out_dir / f"{stem}_corridorkey_subject_rgba.png",
+                "corridorkey_hint": out_dir / f"{stem}_corridorkey_hint.png",
+                "corridorkey_raw_alpha": out_dir / f"{stem}_corridorkey_raw_alpha.png",
+                "shadow": out_dir / f"{stem}_shadow.png",
+            },
+            report_path=report_path,
+            requested_backend="comfy-corridorkey",
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
@@ -3675,7 +3960,25 @@ def _matte_image_comfy_corridorkey(
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2))
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+                "corridorkey_subject_rgba": out_dir / f"{stem}_corridorkey_subject_rgba.png",
+                "corridorkey_hint": out_dir / f"{stem}_corridorkey_hint.png",
+                "corridorkey_raw_alpha": out_dir / f"{stem}_corridorkey_raw_alpha.png",
+                "shadow": out_dir / f"{stem}_shadow.png",
+            },
+            report_path=report_path,
+            requested_backend="comfy-corridorkey",
+        )
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,

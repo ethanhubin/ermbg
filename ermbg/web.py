@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Annotated, Any
 from urllib.parse import quote
+from urllib.parse import unquote
 
 import numpy as np
 import cv2
@@ -33,10 +34,13 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
+from . import io as ermbg_io
 from .api import MatteResponse, matte_image
+from .artifacts import build_run_manifest, route_from_response, runtime_from_response, write_run_manifest
 from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
+from .runtime_capabilities import collect_runtime_capabilities
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
 ALLOWED_BACKENDS = {
@@ -65,6 +69,7 @@ AUTO_EVAL_PREFIX = "auto_"
 CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
 RMBG_EVAL_PREFIX = "rmbg_"
 DIRECT_WORKER_EVAL_PREFIX = "direct_worker_"
+WEB_MATTE_RUN_PREFIX = "web_matte_runs_"
 GAME_EVAL_RUN_PREFIXES = (
     LOCAL_OWNERSHIP_EVAL_PREFIX,
     SOLID_GRAPHIC_EVAL_PREFIX,
@@ -170,6 +175,181 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/runtime-capabilities")
+def runtime_capabilities(
+    include_object_info: bool = Query(
+        True,
+        description="When true, query Comfy /object_info to verify ERMBG custom node availability.",
+    ),
+    timeout: float = Query(3.0, ge=0.1, le=30.0),
+) -> dict[str, Any]:
+    return collect_runtime_capabilities(
+        timeout=timeout,
+        include_object_info=include_object_info,
+    )
+
+
+@app.get("/api/artifacts")
+def artifacts_index(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
+    items = _list_artifacts(limit=limit)
+    return {
+        "schema": "ermbg.artifacts.index.v1",
+        "count": len(items),
+        "items": items,
+    }
+
+
+@app.get("/api/artifacts/{artifact_id:path}")
+def artifact_detail(artifact_id: str) -> dict[str, Any]:
+    path = _artifact_path_from_id(artifact_id)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    manifest = _load_json(path)
+    if not isinstance(manifest, dict) or manifest.get("schema") != "ermbg.run.v1":
+        raise HTTPException(status_code=404, detail="Artifact manifest is not an ERMBG run manifest.")
+    summary = _artifact_summary(path)
+    return {
+        "summary": summary,
+        "manifest": manifest,
+    }
+
+
+@app.get("/artifacts", response_class=HTMLResponse)
+def artifacts_page() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERMBG Artifacts</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #18211d; background: #f5f7f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    h1 { margin: 0; font-size: 18px; letter-spacing: 0; }
+    nav { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    nav a { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    main { width: min(1240px, 100%); margin: 0 auto; padding: 18px 24px 28px; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: #5a665f; font-size: 13px; }
+    .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button { min-height: 34px; padding: 0 12px; border: 0; border-radius: 6px; background: #196f5a; color: #ffffff; font: inherit; font-weight: 800; cursor: pointer; }
+    .table-wrap { overflow: auto; border: 1px solid #d8e0d5; border-radius: 8px; background: #ffffff; }
+    table { width: 100%; min-width: 1040px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+    th, td { border-bottom: 1px solid #e3e9e0; padding: 10px; vertical-align: top; text-align: left; }
+    th { position: sticky; top: 0; z-index: 1; background: #fbfcfa; color: #53615a; font-size: 12px; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    .type-col { width: 132px; }
+    .backend-col { width: 174px; }
+    .route-col { width: 190px; }
+    .outputs-col { width: 260px; }
+    .manifest-col { width: 280px; }
+    .pill { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 999px; background: #edf4ef; color: #245f53; font-size: 12px; font-weight: 900; white-space: nowrap; }
+    .muted { color: #68746e; font-size: 12px; line-height: 1.35; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .links { display: flex; flex-wrap: wrap; gap: 6px; }
+    .links a, .manifest-link { color: #196f5a; font-size: 12px; font-weight: 800; text-decoration: none; }
+    .empty { min-height: 220px; display: grid; place-items: center; color: #68746e; background: #ffffff; border: 1px dashed #cfd8cc; border-radius: 8px; }
+    @media (max-width: 760px) { header { align-items: flex-start; flex-direction: column; padding: 12px 16px; } main { padding: 14px 12px 24px; } .toolbar { align-items: flex-start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ERMBG Artifacts</h1>
+    <nav>
+      <a href="/">上传页</a>
+      <a href="/eval/game">Game Eval</a>
+    </nav>
+  </header>
+  <main>
+    <div class="toolbar">
+      <span class="status" id="status">读取 artifacts</span>
+      <button type="button" id="refresh">刷新</button>
+    </div>
+    <div class="table-wrap" id="table-wrap" hidden>
+      <table aria-label="artifact list">
+        <thead>
+          <tr>
+            <th class="type-col">类型</th>
+            <th class="backend-col">后端</th>
+            <th class="route-col">Route</th>
+            <th class="outputs-col">输出</th>
+            <th class="manifest-col">Manifest</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>没有发现 ermbg.run.v1 artifact</div>
+  </main>
+  <script>
+    const rows = document.getElementById("rows");
+    const statusEl = document.getElementById("status");
+    const tableWrap = document.getElementById("table-wrap");
+    const empty = document.getElementById("empty");
+    const refreshButton = document.getElementById("refresh");
+
+    function text(value) {
+      return value === null || value === undefined || value === "" ? "—" : String(value);
+    }
+
+    function shortPath(value) {
+      const raw = text(value);
+      return raw.length > 84 ? "…" + raw.slice(-83) : raw;
+    }
+
+    function renderOutputs(item) {
+      const urls = item.urls && typeof item.urls === "object" ? item.urls : {};
+      const entries = Object.entries(urls).filter(([, url]) => typeof url === "string" && url);
+      if (!entries.length) return '<span class="muted">—</span>';
+      return '<span class="links">' + entries.map(([key, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${key}</a>`).join("") + '</span>';
+    }
+
+    function render(items) {
+      rows.innerHTML = "";
+      tableWrap.hidden = items.length === 0;
+      empty.hidden = items.length !== 0;
+      items.forEach((item) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><span class="pill">${text(item.type)}</span><div class="muted">${new Date((Number(item.mtime) || 0) * 1000).toLocaleString()}</div></td>
+          <td><div>${text(item.backend)}</div><div class="muted">${text(item.requested_backend)}</div></td>
+          <td><div>${text(item.route)}</div><div class="muted">${text(item.execution_profile)}</div></td>
+          <td>${renderOutputs(item)}</td>
+          <td><a class="manifest-link mono" href="/api/artifacts/${item.id}" target="_blank" rel="noreferrer">${shortPath(item.manifest)}</a></td>
+        `;
+        rows.appendChild(tr);
+      });
+    }
+
+    async function loadArtifacts() {
+      statusEl.textContent = "读取 artifacts";
+      refreshButton.disabled = true;
+      try {
+        const response = await fetch("/api/artifacts?limit=200");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        render(items);
+        statusEl.textContent = `${items.length} artifacts`;
+      } catch (error) {
+        rows.innerHTML = "";
+        tableWrap.hidden = true;
+        empty.hidden = false;
+        empty.textContent = "读取 artifacts 失败";
+        statusEl.textContent = error.message;
+      } finally {
+        refreshButton.disabled = false;
+      }
+    }
+
+    refreshButton.addEventListener("click", loadArtifacts);
+    loadArtifacts();
+  </script>
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _matte_page_html()
@@ -190,6 +370,12 @@ def _matte_page_html() -> str:
     h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
     .header-actions { min-width: 0; display: flex; align-items: center; gap: 14px; }
     .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .runtime-status { min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; }
+    .runtime-pill { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid #d2dad0; border-radius: 999px; background: #f7faf6; color: #5d6862; font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .runtime-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #9aa59e; }
+    .runtime-pill.is-ok::before { background: #23855f; }
+    .runtime-pill.is-error::before { background: #b94a42; }
+    .runtime-pill.is-warn::before { background: #b57b18; }
     main { width: min(1120px, 100%); height: calc(100vh - 56px); min-height: 0; margin: 0 auto; padding: 16px 24px; display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: stretch; overflow: hidden; }
     form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
     form { min-width: 0; min-height: 0; max-height: 100%; padding: 16px; display: grid; gap: 12px; align-content: start; overflow-y: auto; }
@@ -287,6 +473,12 @@ def _matte_page_html() -> str:
     <div class="header-actions">
       <a class="nav-link" href="/slice">切图</a>
       <a class="nav-link" href="/eval/game">Game Eval</a>
+      <a class="nav-link" href="/artifacts">Artifacts</a>
+      <span class="runtime-status" id="runtime-status" aria-live="polite">
+        <span class="runtime-pill" data-runtime="local">Local</span>
+        <span class="runtime-pill" data-runtime="comfy">Comfy</span>
+        <span class="runtime-pill" data-runtime="direct">Direct</span>
+      </span>
       <span class="status" id="strategy">就绪</span>
     </div>
   </header>
@@ -405,6 +597,7 @@ def _matte_page_html() -> str:
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
+    const runtimeStatus = document.getElementById("runtime-status");
     const previewPanel = document.getElementById("preview-panel");
     const canvas = document.getElementById("canvas");
     const previewStage = document.getElementById("preview-stage");
@@ -457,6 +650,8 @@ def _matte_page_html() -> str:
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
+    function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
+    async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const comfyOk = payload.comfy && payload.comfy.status === "ok"; setRuntimePill("comfy", "Comfy", comfyOk ? "ok" : "error", comfyOk ? payload.comfy.url : (payload.comfy && payload.comfy.error) || "Comfy unavailable"); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("comfy", "Comfy", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
     function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
@@ -512,6 +707,7 @@ def _matte_page_html() -> str:
     syncBackendSettings();
     syncAutoMaskControls();
     syncPreviewMode();
+    refreshRuntimeStatus();
     loadPendingSlice();
   </script>
 </body>
@@ -2049,6 +2245,74 @@ def _route_metadata(result: MatteResponse) -> dict[str, Any]:
     }
 
 
+def _web_matte_batch_root() -> Path:
+    return PROJECT_ROOT / "out" / f"{WEB_MATTE_RUN_PREFIX}{datetime.now().strftime('%Y%m%d')}"
+
+
+def _write_web_matte_artifacts(
+    *,
+    image_rgb: np.ndarray,
+    selected_rgba: np.ndarray,
+    result: MatteResponse,
+    filename: str,
+    requested_backend: str,
+    effective_backend: str,
+    shadow_mode: str,
+    server_elapsed_sec: float,
+) -> Path:
+    stem = Path(filename or "ermbg").stem or "ermbg"
+    digest = hashlib.sha256(image_rgb.tobytes()).hexdigest()[:10]
+    run_id = f"{datetime.now().strftime('%H%M%S_%f')}_{digest}"
+    run_dir = _web_matte_batch_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    input_path = run_dir / "input.png"
+    output_path = run_dir / "output.png"
+    alpha_path = run_dir / "alpha.png"
+    foreground_path = run_dir / "foreground.png"
+    report_path = run_dir / "summary.json"
+
+    ermbg_io.save_rgb(input_path, image_rgb)
+    ermbg_io.save_rgba(output_path, selected_rgba)
+    ermbg_io.save_mask(alpha_path, selected_rgba[..., 3].astype(np.float32) / 255.0)
+    ermbg_io.save_rgb(foreground_path, result.foreground_srgb)
+    summary = {
+        "status": "ok",
+        "filename": filename,
+        "backend": effective_backend,
+        "requested_backend": requested_backend,
+        "strategy": result.strategy_name,
+        "background": list(result.background_color),
+        "server_elapsed_sec": server_elapsed_sec,
+        **_route_metadata(result),
+    }
+    report_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest = build_run_manifest(
+        run_dir=run_dir,
+        input_path=input_path,
+        outputs={
+            "rgba": output_path,
+            "alpha": alpha_path,
+            "foreground": foreground_path,
+        },
+        request={
+            "backend": requested_backend,
+            "effective_backend": effective_backend,
+            "shadow_mode": shadow_mode,
+            "filename": filename,
+        },
+        route=route_from_response(result),
+        runtime={
+            **runtime_from_response(result, requested_backend=requested_backend),
+            "backend": effective_backend,
+            "server_elapsed_sec": server_elapsed_sec,
+        },
+        report_path=report_path,
+        result=result,
+        extra={"stem": stem},
+    )
+    return write_run_manifest(run_dir / "manifest.json", manifest)
+
+
 def _run_web_backend(
     image: Image.Image,
     *,
@@ -2362,13 +2626,25 @@ def matte_candidates_endpoint(
         for candidate in candidates:
             candidate.selected = False
         candidates.append(local_candidate)
+    server_elapsed_sec = time.perf_counter() - server_started_at
+    artifact_manifest = _write_web_matte_artifacts(
+        image_rgb=image_rgb,
+        selected_rgba=next((candidate.rgba for candidate in candidates if candidate.selected), result.rgba),
+        result=result,
+        filename=file.filename or "ermbg.png",
+        requested_backend=backend,
+        effective_backend=effective_backend,
+        shadow_mode=shadow_mode,
+        server_elapsed_sec=server_elapsed_sec,
+    )
     return {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
         "backend": effective_backend,
         "requested_backend": backend,
         **_route_metadata(result),
-        "server_elapsed_sec": time.perf_counter() - server_started_at,
+        "server_elapsed_sec": server_elapsed_sec,
+        "artifact_manifest": str(artifact_manifest.relative_to(PROJECT_ROOT)) if _is_relative_to(artifact_manifest, PROJECT_ROOT) else str(artifact_manifest),
         "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
     }
@@ -2474,6 +2750,98 @@ def _image_url(path_value: str | Path | None) -> str | None:
         return None
     rel = path.relative_to(PROJECT_ROOT).as_posix()
     return f"/eval/game/file/{quote(rel, safe='/')}"
+
+
+def _artifact_id(path: Path) -> str:
+    rel = path.resolve().relative_to(PROJECT_ROOT).as_posix()
+    return quote(rel, safe="")
+
+
+def _artifact_path_from_id(artifact_id: str) -> Path:
+    rel = unquote(artifact_id)
+    path = (PROJECT_ROOT / rel).resolve()
+    out_root = (PROJECT_ROOT / "out").resolve()
+    if not _is_relative_to(path, out_root):
+        raise HTTPException(status_code=404, detail="Artifact is outside output root.")
+    if path.name != "manifest.json":
+        raise HTTPException(status_code=404, detail="Artifact id must point to manifest.json.")
+    return path
+
+
+def _artifact_type(path: Path, manifest: dict[str, Any]) -> str:
+    runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+    if runtime.get("kind") == "game-eval":
+        return "game-eval-batch"
+    parent = path.parent
+    if parent.parent.name.startswith(WEB_MATTE_RUN_PREFIX):
+        return "web-matte"
+    request = manifest.get("request") if isinstance(manifest.get("request"), dict) else {}
+    extra = manifest.get("extra") if isinstance(manifest.get("extra"), dict) else {}
+    if request.get("source_input") or extra.get("case_metadata"):
+        return "game-eval-case"
+    return "run"
+
+
+def _artifact_file_url(path_value: str | Path | None, manifest_path: Path) -> str | None:
+    if path_value is None:
+        return None
+    candidate = Path(path_value)
+    if not candidate.is_absolute():
+        candidate = manifest_path.parent / candidate
+    candidate = candidate.resolve()
+    if not _is_relative_to(candidate, (PROJECT_ROOT / "out").resolve()):
+        return None
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    rel = candidate.relative_to(PROJECT_ROOT).as_posix()
+    if candidate.suffix.lower() in SERVABLE_IMAGE_SUFFIXES:
+        return f"/eval/game/file/{quote(rel, safe='/')}"
+    return None
+
+
+def _artifact_summary(manifest_path: Path) -> dict[str, Any] | None:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(manifest, dict) or manifest.get("schema") != "ermbg.run.v1":
+        return None
+    request = manifest.get("request") if isinstance(manifest.get("request"), dict) else {}
+    runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+    route = manifest.get("route") if isinstance(manifest.get("route"), dict) else {}
+    outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), dict) else {}
+    return {
+        "id": _artifact_id(manifest_path),
+        "type": _artifact_type(manifest_path, manifest),
+        "manifest": manifest_path.relative_to(PROJECT_ROOT).as_posix(),
+        "mtime": manifest_path.stat().st_mtime,
+        "backend": request.get("effective_backend") or runtime.get("backend") or request.get("backend"),
+        "requested_backend": request.get("backend") or runtime.get("requested_backend"),
+        "strategy": runtime.get("strategy"),
+        "route": route.get("route"),
+        "execution_profile": route.get("execution_profile"),
+        "input": manifest.get("input"),
+        "report": manifest.get("report"),
+        "outputs": outputs,
+        "urls": {
+            key: _artifact_file_url(value, manifest_path)
+            for key, value in outputs.items()
+            if isinstance(key, str)
+        },
+    }
+
+
+def _list_artifacts(limit: int = 200) -> list[dict[str, Any]]:
+    out_root = PROJECT_ROOT / "out"
+    if not out_root.exists():
+        return []
+    items = [
+        item
+        for path in out_root.glob("**/manifest.json")
+        if (item := _artifact_summary(path)) is not None
+    ]
+    items.sort(key=lambda item: float(item.get("mtime", 0.0)), reverse=True)
+    return items[:limit]
 
 
 def _candidate_result_items(path: Path) -> list[dict[str, object]]:
@@ -3981,6 +4349,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     h1 {{ flex: 0 0 auto; margin: 0; font-size: 18px; letter-spacing: 0; white-space: nowrap; }}
     nav {{ min-width: 0; display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 10px; font-size: 13px; color: #53615a; }}
     nav a {{ color: #196f5a; font-weight: 700; text-decoration: none; white-space: nowrap; }}
+    .runtime-status {{ min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; }}
+    .runtime-pill {{ display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid #d1d9cf; border-radius: 999px; background: #ffffff; color: #53615a; font-size: 12px; font-weight: 900; white-space: nowrap; }}
+    .runtime-pill::before {{ content: ""; width: 7px; height: 7px; border-radius: 50%; background: #9aa59e; }}
+    .runtime-pill.is-ok::before {{ background: #23855f; }}
+    .runtime-pill.is-error::before {{ background: #b94a42; }}
+    .runtime-pill.is-warn::before {{ background: #b57b18; }}
     #run-id {{
       min-width: 0;
       flex: 1 1 260px;
@@ -4618,6 +4992,12 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <div class="run-progress-bar" id="batch-progress"></div>
       </div>
       <span class="run-status" id="batch-status" aria-live="polite"></span>
+      <span class="runtime-status" id="runtime-status" aria-live="polite">
+        <span class="runtime-pill" data-runtime="local">Local</span>
+        <span class="runtime-pill" data-runtime="comfy">Comfy</span>
+        <span class="runtime-pill" data-runtime="direct">Direct</span>
+      </span>
+      <a href="/artifacts">Artifacts</a>
       <a href="/">上传页</a>
     </nav>
   </header>
@@ -4748,6 +5128,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const batchProgress = document.getElementById("batch-progress");
     const batchProgressRoot = batchProgress.parentElement;
     const batchStatusEl = document.getElementById("batch-status");
+    const runtimeStatus = document.getElementById("runtime-status");
     const evalPanel = document.getElementById("eval-panel");
     const sampleList = document.getElementById("sample-list");
     const testPathSelect = document.getElementById("eval-test-path");
@@ -5015,6 +5396,32 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return `${{completed}}/${{total}} · ok ${{ok}} · error ${{errors}}`;
     }}
 
+    function setRuntimePill(kind, label, state, title) {{
+      const pill = runtimeStatus.querySelector(`[data-runtime="${{kind}}"]`);
+      if (!pill) return;
+      pill.textContent = label;
+      pill.classList.remove("is-ok", "is-error", "is-warn");
+      if (state) pill.classList.add(`is-${{state}}`);
+      pill.title = title || label;
+    }}
+
+    async function refreshRuntimeStatus() {{
+      try {{
+        const response = await fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5");
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const payload = await response.json();
+        setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${{payload.local && payload.local.version ? payload.local.version : ""}}`);
+        const comfyOk = payload.comfy && payload.comfy.status === "ok";
+        setRuntimePill("comfy", "Comfy", comfyOk ? "ok" : "error", comfyOk ? payload.comfy.url : (payload.comfy && payload.comfy.error) || "Comfy unavailable");
+        const directOk = payload.direct_worker && payload.direct_worker.status === "ok";
+        setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable");
+      }} catch (error) {{
+        setRuntimePill("local", "Local", "warn", "capability check failed");
+        setRuntimePill("comfy", "Comfy", "warn", "capability check failed");
+        setRuntimePill("direct", "Direct", "warn", "capability check failed");
+      }}
+    }}
+
     async function pollBatchStatus() {{
       if (!activeBatchStatusUrl) return;
       try {{
@@ -5270,6 +5677,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }});
 
     renderRows();
+    refreshRuntimeStatus();
   </script>
 </body>
 </html>"""

@@ -7,14 +7,22 @@ import json
 import os
 import zipfile
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import ermbg.web as web
 from ermbg.api import MatteResponse
 from ermbg.candidates import MatteCandidate
 from ermbg.web import app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_web_matte_artifacts(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "_web_matte_batch_root", lambda: tmp_path / "web_matte_runs_test")
 
 
 def _png_bytes() -> bytes:
@@ -59,8 +67,14 @@ def test_index_serves_upload_ui():
     assert response.text.index('id="preview-panel"') < response.text.index('id="source-preview"')
     assert 'id="source-preview"' not in response.text.split('<label class="inline-label">后端')[0]
     assert 'href="/slice">切图</a>' in response.text
+    assert 'href="/artifacts">Artifacts</a>' in response.text
     assert '"/api/slice-preview"' not in response.text
     assert '"/api/slice-crops"' not in response.text
+    assert 'id="runtime-status"' in response.text
+    assert 'data-runtime="local"' in response.text
+    assert 'data-runtime="comfy"' in response.text
+    assert 'data-runtime="direct"' in response.text
+    assert 'fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5")' in response.text
     assert "confirm-slices" not in response.text
     assert "候选缩略图" in response.text
     assert 'href="/eval/game"' in response.text
@@ -171,6 +185,86 @@ def test_index_serves_upload_ui():
     assert 'backend.value = "auto"' in response.text
 
 
+def test_runtime_capabilities_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_collect_runtime_capabilities(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "ok",
+            "local": {"status": "ok"},
+            "comfy": {"status": "ok", "capabilities": {"ermbg_route_matte": True}},
+            "direct_worker": {"status": "ok", "capabilities": {"batch_matte": True}},
+        }
+
+    monkeypatch.setattr(web, "collect_runtime_capabilities", fake_collect_runtime_capabilities)
+    client = TestClient(app)
+
+    response = client.get("/api/runtime-capabilities?include_object_info=false&timeout=1.25")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["comfy"]["capabilities"]["ermbg_route_matte"] is True
+    assert payload["direct_worker"]["capabilities"]["batch_matte"] is True
+    assert captured == {"timeout": 1.25, "include_object_info": False}
+
+
+def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    run_dir = tmp_path / "out" / "web_matte_runs_20260601" / "run_a"
+    run_dir.mkdir(parents=True)
+    Image.fromarray(np.zeros((3, 4, 4), dtype=np.uint8), mode="RGBA").save(run_dir / "output.png")
+    (run_dir / "summary.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "ermbg.run.v1",
+                "input": "input.png",
+                "outputs": {"rgba": "output.png"},
+                "request": {"backend": "auto", "effective_backend": "comfy-pymatting-known-b"},
+                "route": {"route": "pymatting_known_b", "execution_profile": "pymatting-hard-button"},
+                "runtime": {"kind": "comfy", "backend": "comfy-pymatting-known-b", "strategy": "comfy_pymatting_known_b"},
+                "report": "summary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = TestClient(app)
+    response = client.get("/api/artifacts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema"] == "ermbg.artifacts.index.v1"
+    assert payload["count"] == 1
+    item = payload["items"][0]
+    assert item["type"] == "web-matte"
+    assert item["manifest"] == "out/web_matte_runs_20260601/run_a/manifest.json"
+    assert item["backend"] == "comfy-pymatting-known-b"
+    assert item["route"] == "pymatting_known_b"
+    assert item["execution_profile"] == "pymatting-hard-button"
+    assert item["urls"]["rgba"] == "/eval/game/file/out/web_matte_runs_20260601/run_a/output.png"
+
+    detail = client.get(f"/api/artifacts/{item['id']}")
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert detail_payload["summary"]["manifest"] == item["manifest"]
+    assert detail_payload["manifest"]["schema"] == "ermbg.run.v1"
+
+
+def test_artifacts_page_serves_browser():
+    client = TestClient(app)
+    response = client.get("/artifacts")
+
+    assert response.status_code == 200
+    assert "ERMBG Artifacts" in response.text
+    assert 'fetch("/api/artifacts?limit=200")' in response.text
+    assert 'id="rows"' in response.text
+    assert 'href="/eval/game"' in response.text
+    assert 'href="/"' in response.text
+
+
 def test_slice_page_serves_slice_mode_entry():
     client = TestClient(app)
     response = client.get("/slice")
@@ -220,6 +314,11 @@ def test_game_eval_page_serves_result_table():
     assert "selectedTestPath()" in response.text
     assert 'role="progressbar"' in response.text
     assert 'id="batch-progress"' in response.text
+    assert 'id="runtime-status"' in response.text
+    assert 'data-runtime="local"' in response.text
+    assert 'data-runtime="comfy"' in response.text
+    assert 'data-runtime="direct"' in response.text
+    assert 'fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5")' in response.text
     assert '"sampleRows":' in response.text
     assert '"sampleId": "B001"' in response.text
     assert '"sampleId": "I001"' in response.text
@@ -938,6 +1037,13 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert payload["candidates"][0]["regions"] == []
     assert payload["candidates"][0]["operation_results"] == []
     assert payload["candidates"][0]["plan"] is None
+    manifest_path = Path(payload["artifact_manifest"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema"] == "ermbg.run.v1"
+    assert manifest["request"]["backend"] == "auto"
+    assert manifest["outputs"]["rgba"] == "output.png"
+    assert manifest["report"] == "summary.json"
     data_url = payload["candidates"][0]["rgba"]
     assert data_url.startswith("data:image/png;base64,")
     png = base64.b64decode(data_url.split(",", 1)[1])

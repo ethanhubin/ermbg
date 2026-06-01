@@ -26,6 +26,7 @@ from .direct_worker import (
     direct_matte_auto,
     direct_matte_from_decision,
 )
+from .runtime_capabilities import get_ermbg_version
 from .router import RouteDecision, classify_route
 
 try:
@@ -222,8 +223,15 @@ def health() -> dict[str, Any]:
     info: dict[str, Any] = {
         "status": "ok",
         "backend": "direct-worker",
+        "version": get_ermbg_version(),
         "cpu_workers": _CPU_WORKERS,
         "gpu_concurrency": 1,
+        "capabilities": {
+            "route_profile_contract": True,
+            "direct_pymatting_known_b": True,
+            "direct_corridorkey": True,
+            "batch_matte": True,
+        },
     }
     try:
         import torch

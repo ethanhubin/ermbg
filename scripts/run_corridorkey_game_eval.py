@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ermbg import matte_image
+from ermbg.artifacts import build_run_manifest, route_from_response, runtime_from_response, write_run_manifest
 from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 
@@ -253,6 +254,86 @@ def _case_outputs(case_dir: Path) -> dict[str, str]:
     return outputs
 
 
+def _write_case_manifest(
+    *,
+    case_dir: Path,
+    input_path: Path,
+    result: Any,
+    requested_backend: str,
+    effective_backend: str,
+    summary_path: Path,
+    case_metadata: dict[str, Any],
+    elapsed_sec_client: float,
+) -> Path:
+    outputs = {
+        "rgba": case_dir / "rgba.png",
+        "alpha": case_dir / "alpha.png",
+        "foreground": case_dir / "foreground.png",
+        "shadow": case_dir / "shadow.png",
+        "contact_sheet": case_dir / "contact_sheet.png",
+    }
+    manifest = build_run_manifest(
+        run_dir=case_dir,
+        input_path=case_dir / "input.png",
+        outputs={key: value for key, value in outputs.items() if value.exists()},
+        request={
+            "backend": requested_backend,
+            "effective_backend": effective_backend,
+            "source_input": _rel(input_path),
+        },
+        route=route_from_response(result),
+        runtime={
+            **runtime_from_response(result, requested_backend=requested_backend),
+            "backend": effective_backend,
+            "elapsed_sec_client": elapsed_sec_client,
+        },
+        report_path=summary_path,
+        result=result,
+        extra={"case_metadata": case_metadata},
+    )
+    return write_run_manifest(case_dir / "manifest.json", manifest)
+
+
+def _write_batch_manifest(
+    *,
+    out_root: Path,
+    aggregate: dict[str, Any],
+    summary_path: Path,
+    manifest_path: Path,
+) -> Path:
+    case_manifests = [
+        row.get("artifact_manifest")
+        for row in aggregate.get("runs", [])
+        if isinstance(row, dict) and isinstance(row.get("artifact_manifest"), str)
+    ]
+    manifest = build_run_manifest(
+        run_dir=out_root,
+        outputs={
+            "summary": summary_path,
+        },
+        request={
+            "backend": aggregate.get("backend"),
+            "case_count": aggregate.get("case_count"),
+            "run_count": aggregate.get("run_count"),
+            "manifest": _rel(manifest_path),
+            "category_filter": aggregate.get("category_filter"),
+            "eval_overrides": aggregate.get("eval_overrides", {}),
+        },
+        route={},
+        runtime={
+            "kind": "game-eval",
+            "backend": aggregate.get("backend"),
+            "ok_count": aggregate.get("ok_count"),
+        },
+        report_path=summary_path,
+        extra={
+            "case_manifests": case_manifests,
+            "screens": aggregate.get("screens", []),
+        },
+    )
+    return write_run_manifest(out_root / "manifest.json", manifest)
+
+
 def _checker_bg(size: tuple[int, int], cell: int = 16) -> Image.Image:
     w, h = size
     yy, xx = np.indices((h, w))
@@ -357,6 +438,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         shutil.copy2(input_path, case_dir / "input.png")
         print(f"[{case_index}/{total}] {sample_id}-{screen[:1].upper()} {case_id}", flush=True)
         start = time.perf_counter()
+        result: Any | None = None
         try:
             if args.backend == "direct-worker":
                 result = matte_image_direct_worker(
@@ -419,7 +501,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "case_metadata": case,
             }
             print(f"  ERROR {exc}", flush=True)
-        (case_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        summary_path = case_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        if summary.get("status") == "ok" and result is not None:
+            manifest_path = _write_case_manifest(
+                case_dir=case_dir,
+                input_path=input_path,
+                result=result,
+                requested_backend=args.backend,
+                effective_backend=str(summary.get("backend", args.backend)),
+                summary_path=summary_path,
+                case_metadata=case,
+                elapsed_sec_client=float(summary.get("elapsed_sec_client", 0.0)),
+            )
+            summary["artifact_manifest"] = _rel(manifest_path)
+            summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
         runs.append(summary)
         aggregate = {
             "backend": args.backend,
@@ -438,7 +534,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "timing_summary": _timing_summary(runs),
             "runs": runs,
         }
-        (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+        batch_summary_path = out_root / "summary.json"
+        batch_summary_path.write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+        batch_manifest_path = _write_batch_manifest(
+            out_root=out_root,
+            aggregate=aggregate,
+            summary_path=batch_summary_path,
+            manifest_path=args.manifest,
+        )
+        aggregate["artifact_manifest"] = _rel(batch_manifest_path)
+        batch_summary_path.write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return aggregate
 
