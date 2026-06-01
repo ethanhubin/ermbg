@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_b03_soft_boundary_fragmented_edge",
+  "sample_id": "I007",
+  "category": "icon",
+  "family": "b_soft_boundary",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/icon/icon_icon_b03_soft_boundary_fragmented_edge/blue.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_b03_soft_boundary_fragmented_edge/blue.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "green",
+  "primary_ambiguity": "fragmented edge with small protrusions and holes",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-B03",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a06_pale_hair_translucent_sleeves_white_glow_blue",
+  "sample_id": "C006",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "long hair strands, opaque robe, transparent sleeves/ribbons, smooth glow on blue screen",
+  "composite_type": "pale hair + translucent fabric + smooth white glow",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A06",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}

@@ -19,6 +19,9 @@ AI image model  ->  known background image  ->  ERMBG  ->  RGBA asset
 - **自动路由**:干净 RGBA、绿/品红/青等饱和底、白/黑/灰底、噪声底自动分流。
 - **Known-B foreground recovery**:已知背景时用 linear-RGB unmix,不只靠经验 chroma 脚本。
 - **RGBA hygiene check**:脏透明 PNG 的白边/黑边/旧背景泄漏/硬二值 alpha 会被识别并重抠。
+- **CorridorKey game UI mainline**:游戏 UI 资产由 ERMBG router 先选最终
+  execution profile,再走远端 `comfy-corridorkey` 或 `comfy-pymatting-known-b`。
+  ERMBG 负责背景/色彩分析、参数适配、mask hint、ShadowPatch、QA 和回退。
 - **Keyer + matting 融合**:补小漏检、守住 topology、修 hard edge、对同色歧义生成候选。
 - **Local ownership 归属判断**:对 hole / soft subject / shadow-like layer 做本地多假设评分,
   默认走本地确定性证据。
@@ -91,23 +94,22 @@ known background image
 - `shadow_like_layer`:已知背景的 scalar darkening,走 shadow matte。
 - `conservative_unknown`:证据不足,保留当前 alpha。
 
-当前 G02/G04/G06 green+white 小批次:
+当前全量样本集已经收口到 `samples/corridorkey_semantic/`:
 
 ```bash
-.venv/bin/python scripts/10_local_ownership_batch.py \
-  --out-dir out/local_ownership_resolved2_g02_g04_g06_20260527 \
-  --sample-id G02,G04,G06 \
-  --variants green,white
+.venv/bin/python scripts/run_corridorkey_game_eval.py \
+  --backend comfy-corridorkey
 ```
 
-结果:
+样本规模:
 
-- `ok=6/6`
-- `expected_role_hit=6/6`
-- G02 使用 base matte,避免 material-protected rerun 误伤软阴影。
-- G04/G06 使用 protected matte,避免半透明/辉光被 keyer/repair 泛白或变硬。
+- Button:56
+- Icon / effect:20
+- Character:9 (1024x1024)
 
-详情见 [docs/local-ownership.md](docs/local-ownership.md)。
+第一阶段样本建设已完成。第二阶段目标是基于这 85 个确认样本做识别/路由审计,
+再进入路径内参数调优。详情见
+[docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md)。
 
 ## Python API
 
@@ -139,22 +141,44 @@ COMFY_URL=http://127.0.0.1:8000
 If `COMFY_URL` is not configured, ERMBG falls back to the historical LAN server
 address used by this repository.
 
-正式 Web 抠图路径是 **`comfy-ermbg`**:Mac 侧负责上传、HTTP 编排和轻量诊断,
-远端 ComfyUI `ErmbgAutoMatte` 节点运行完整 ERMBG pipeline。后续算法更新
-不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
+当前游戏 UI 资产自动路径统一由 ERMBG route strategy 决定:硬边按钮走
+**`comfy-pymatting-known-b`**,绿/蓝底 icon、character、玻璃/半透明按钮走
+**`comfy-corridorkey` + ShadowPatch**,未知/不稳定背景也走
+**`comfy-pymatting-known-b` PyMatting fallback**。
+Router 会在执行前写入最终 `execution_profile`,例如
+`pymatting-hard-button`、`corridorkey-transparent-button`、
+`corridorkey-character`、`corridorkey-effect-icon` 或
+`corridorkey-shaped-icon`。执行层只消费这个 profile 和随附参数,不再根据
+CorridorKey 的语义分析二次猜测路径。
+Web/API 的 `backend="auto"` 现在提交单个 **ERMBG Route Matte** Comfy 节点;
+Mac 侧只负责上传输入、提交 workflow、轮询和拉取结果图/metadata。背景/色彩
+分析、参数适配、CorridorKey hint、ShadowPatch 和 PyMatting fallback 均在 Comfy 端运行。
+
+实验路径 `backend="direct-worker"` 仍使用同一套 router、`parameter_profile`
+和 `execution_profile`,但通过远端 `ermbg.direct_worker_server` 直接执行
+PyMatting Known-B 或 CorridorKey,绕过 ComfyUI prompt/queue。Direct Worker
+不是第二套路由或 CorridorKey 实现:Comfy 节点和 Direct Worker 都调用
+`ermbg.corridorkey_runner.LocalCorridorKeyClient`,确保 hint 转换、参数、模型
+调用和 color protection 只维护一份。对比 Direct 与 `backend="auto"` 时,
+应以同样本的 profile、hint source 和 alpha/RGBA 差异为准;明显差异通常说明
+执行层分叉,而不是 profile 本身不同。
+
+后续 Web/API 行为更新不能只以本地 Python 跑通为准,必须同步验证远端节点和 Web API。
 
 `comfy_nodes/` 提供:
 
-- **ERMBG AutoMatte**:IMAGE 加可选 source/subject mask -> foreground、alpha、debug summary。
+- **ERMBG Route Strategy**:在 Comfy 进程内运行同一套 auto 路由策略。
+- **ERMBG Route Matte**:生产 auto 节点,在 Comfy 进程内完成路由和具体抠图。
+- **ERMBG PyMatting Known-B**:已知背景硬边按钮路径。
 - **ERMBG Classify (preview)**:只跑 router,用于工作流分支。
 
 最简工作流:
 
 ```text
-KSampler -> VAEDecode -> ERMBG AutoMatte -> SaveImage(RGBA)
+KSampler -> VAEDecode -> ERMBG Route Matte -> foreground/alpha/rgba_rgb
 ```
 
-开发/迭代验证流程见 [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md)。
+开发/迭代验证流程见 [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md)。
 节点部署见 [comfy_nodes/README.md](comfy_nodes/README.md) 和 [DEPLOY.md](DEPLOY.md)。
 
 ## OpenClaw
@@ -205,18 +229,22 @@ checker 合成、白/黑底对比和 alpha 对比。
 
 全量测试数量会随当前分支变化;接力前以本地 `.venv/bin/pytest -q` 为准。
 
-真实回归样本放在 `samples/regression/`。例如
-`samples/regression/small_ui_icon_green/` 覆盖小尺寸 UI 图标、主体贴边、
-角落绿幕稳定但整圈边缘被主体污染的场景。
+当前主回归入口是 `samples/corridorkey_semantic/manifest.json`。真实用户
+回归以后仍放入 `samples/regression/`，但不要引用已退役的旧样本目录；新增
+case 需要带 `case.json` 并说明它覆盖的失败机制。
 
 ## 文档索引
 
+- [docs/corridorkey-game-ui-plan.md](docs/corridorkey-game-ui-plan.md):
+  当前开发主线:CorridorKey 游戏 UI 工作流、自动参数适配、蓝底路线和 Web mask 兜底。
 - [docs/local-ownership.md](docs/local-ownership.md):
-  当前工程接力入口:local ownership、执行层仲裁、G02/G04/G06 现状和复现命令。
-- [docs/comfy-ermbg-development.md](docs/comfy-ermbg-development.md):
-  正式 `comfy-ermbg` 路径的开发、同步、远端 smoke 和 Web 验证流程。
+  local ownership、执行层仲裁和当前复现命令。
+- [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md):
+  ERMBG auto 路由策略、Comfy 节点和 Web smoke 验证流程。
+- [docs/corridorkey-semantic-paths.md](docs/corridorkey-semantic-paths.md):
+  当前全量测试样本、阶段状态和下一阶段路线。
 - [docs/archive/](docs/archive/):
-  旧模型规划、candidate-planner、G02 单样本路线归档,只作历史参考。
+  旧模型规划、candidate-planner、G-style 单样本路线归档,只作历史参考。
 - [DEPLOY.md](DEPLOY.md):ComfyUI 部署。
 - [comfy_nodes/README.md](comfy_nodes/README.md):ComfyUI 节点用法。
 

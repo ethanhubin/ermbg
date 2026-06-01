@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 
 from .colorspace import oklab_distance, srgb_to_oklab
-from .keyer import KeyerThresholds
+from .keyer import KeyerThresholds, chromatic_key_alpha
 
 
 # Thresholds for classification (all in OKLab ΔE-style units).
@@ -62,6 +62,49 @@ class Strategy:
     passthrough: bool = False    # if True, skip matting net entirely
     notes: str = ""
     extras: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """Production auto-route selected by ERMBG.
+
+    ``Strategy`` above is kept as the legacy matting-pipeline recipe. This
+    route decision is the new public auto contract: ERMBG decides which concrete
+    backend owns the image and which parameter family that backend should use.
+    """
+
+    route: str
+    asset_kind: str
+    backend: str
+    params: dict[str, Any]
+    confidence: float
+    reasons: list[str]
+    analysis: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        corridorkey_analysis = self.analysis.get("corridorkey_analysis")
+        parameter_profile = (
+            corridorkey_analysis.get("parameter_profile")
+            if isinstance(corridorkey_analysis, dict)
+            else None
+        )
+        payload = {
+            "requested_backend": "auto",
+            "route": self.route,
+            "asset_kind": self.asset_kind,
+            "selected_backend": self.backend,
+            "parameter_profile": parameter_profile,
+            "execution_profile": self.params.get("execution_profile"),
+            "params": self.params,
+            "confidence": self.confidence,
+            "reasons": self.reasons,
+            "analysis": self.analysis,
+            # Compatibility for older Web/batch consumers.
+            "reason": self.reasons[0] if self.reasons else "",
+        }
+        if isinstance(corridorkey_analysis, dict):
+            payload["corridorkey_analysis"] = corridorkey_analysis
+        return payload
 
 
 # Hygiene thresholds — when an input arrives with an alpha channel, we still
@@ -479,4 +522,313 @@ def classify_strategy(
     )
 
 
-__all__ = ["Strategy", "AlphaHygiene", "classify_strategy", "assess_source_alpha"]
+def _route_asset_kind(image_srgb: np.ndarray, profile: str, screen_mode: str) -> str:
+    h, w = image_srgb.shape[:2]
+    aspect = float(w / max(1, h))
+    long_side = int(max(h, w))
+    # Character routing should not be a pure "square image" shortcut. The game
+    # eval set has 512x512 square UI controls with known-B holes that can look
+    # composite to CorridorKey's profile classifier; treating every 512 square
+    # as a character sends deterministic button mechanics to the learned keyer.
+    # Reserve the automatic square-character rule for large composite assets.
+    if profile == "composite_character_corridor_only" and long_side >= 768:
+        return "character"
+    if 0.75 <= aspect <= 1.35 and long_side >= 768:
+        return "character"
+    if profile == "composite_character_corridor_only" and long_side < 768:
+        return "button"
+    if aspect >= 1.45 or profile.startswith("opaque_hard_ui") or profile == "translucent_button":
+        return "button"
+    if screen_mode in {"green", "blue"}:
+        return "icon"
+    return "unknown"
+
+
+def _pymatting_route_params(
+    background_color: tuple[int, int, int],
+    *,
+    execution_profile: str = "pymatting-known-b",
+) -> dict[str, Any]:
+    return {
+        "execution_profile": execution_profile,
+        "pymatting_method": "cf",
+        "pymatting_image_space": "linear",
+        "pymatting_bg_source": "custom",
+        "pymatting_bg_color": tuple(int(c) for c in background_color),
+        "pymatting_bg_threshold": 3.5,
+        "pymatting_fg_threshold": 30.0,
+        "pymatting_boundary_band_px": 2,
+        "pymatting_auto_adapt": True,
+        "pymatting_cg_maxiter": 1000,
+        "pymatting_cg_rtol": 1e-6,
+    }
+
+
+def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[str, Any]:
+    settings = analysis.recommended_settings
+    return {
+        "execution_profile": execution_profile,
+        "corridorkey_execution_profile": execution_profile,
+        "corridorkey_screen_mode": analysis.screen_mode,
+        "corridorkey_preset": "auto",
+        "corridorkey_gamma_space": settings.gamma_space,
+        "corridorkey_despill_strength": settings.despill_strength,
+        "corridorkey_refiner_strength": settings.refiner_strength,
+        "corridorkey_auto_despeckle": settings.auto_despeckle,
+        "corridorkey_despeckle_size": settings.despeckle_size,
+        "corridorkey_color_protection": settings.color_protection,
+        "corridorkey_protection_bg_max": settings.protection_bg_max,
+        "corridorkey_protection_fg_min": settings.protection_fg_min,
+        # Auto routes should let CorridorKey choose useful hints for complex
+        # edges, translucency, and characters. Deterministic hard buttons route
+        # to PyMatting instead, so this no longer risks hard-UI hint fragility.
+        "corridorkey_auto_mask": True,
+    }
+
+
+def _wide_button_complex_boundary_score(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[bool, dict[str, Any]]:
+    """Detect glass/translucent button edges missed by aggregate CK profiles.
+
+    Failure mode: blue-screen translucent/real-glass buttons can look like
+    ordinary ``edge_cleanup`` or ``balanced`` in same-key-color statistics
+    because their material is far from the blue screen hue. The observable
+    signal is a wide UI support region with either very high luminance-gradient
+    percentiles from specular/glass texture or a meaningful mid-alpha band from
+    screen-tinted translucency. Hard outlined buttons can have strong contour
+    gradients, so the gradient threshold is intentionally high and the
+    semi-alpha fraction provides the separate glass/translucency escape hatch.
+    """
+    h, w = image_srgb.shape[:2]
+    aspect = float(w / max(1, h))
+    if aspect < 1.45:
+        return False, {"enabled": True, "reason": "not wide button"}
+
+    key = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        KeyerThresholds(bg_max=5.5, fg_min=18.0),
+    )
+    support = key >= 0.16
+    support_pixels = int(support.sum())
+    semi_alpha_fraction = float(np.count_nonzero((key > 0.16) & (key < 0.92)) / max(1, support_pixels))
+    if support_pixels < max(32, int(key.size * 0.04)):
+        return False, {
+            "enabled": True,
+            "support_pixels": support_pixels,
+            "semi_alpha_fraction": semi_alpha_fraction,
+            "reason": "insufficient known-B support",
+        }
+
+    gray = cv2.cvtColor(image_srgb, cv2.COLOR_RGB2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = np.sqrt(gx * gx + gy * gy)
+    support_gradient = gradient[support].astype(np.float32)
+    p75 = float(np.percentile(support_gradient, 75.0))
+    mean = float(support_gradient.mean())
+    gradient_gate = p75 >= 200.0
+    # A broad mid-alpha band alone is not enough for "glass": soft/contact
+    # shadows on hard UI also produce lots of mid-alpha key evidence, but with
+    # low local structure. Require meaningful gradient energy for the pure
+    # semi-alpha gate so heavy shadows stay on deterministic PyMatting.
+    semi_alpha_gate = semi_alpha_fraction >= 0.18 and p75 >= 100.0
+    # Broad glass/translucency evidence can split across two imperfect
+    # observables: a material band that is not wide enough to pass the pure
+    # semi-alpha gate, plus distributed specular/edge gradients that are below
+    # the very-high hard contour guard. When both moderate signals appear on a
+    # wide known-screen button, prefer CorridorKey so complex boundaries stay
+    # with the learned keyer instead of the deterministic hard-edge solver.
+    combined_glass_gate = p75 >= 160.0 and semi_alpha_fraction >= 0.14
+    accepted = gradient_gate or semi_alpha_gate or combined_glass_gate
+    return accepted, {
+        "enabled": True,
+        "support_pixels": support_pixels,
+        "support_fraction": float(support.mean()),
+        "semi_alpha_fraction": semi_alpha_fraction,
+        "support_gradient_p75": p75,
+        "support_gradient_mean": mean,
+        "gradient_gate": gradient_gate,
+        "semi_alpha_gate": semi_alpha_gate,
+        "combined_glass_gate": combined_glass_gate,
+        # Experience-driven but feature-bound: hard outlined buttons can reach
+        # the low hundreds from a single crisp contour; glass/specular buttons
+        # that need CorridorKey show either much higher distributed gradients
+        # or a broad semi-alpha band from known-background blending.
+        "support_gradient_p75_min": 200.0,
+        "semi_alpha_fraction_min": 0.18,
+        "semi_alpha_gradient_p75_min": 100.0,
+        "combined_support_gradient_p75_min": 160.0,
+        "combined_semi_alpha_fraction_min": 0.14,
+        "reason": "" if accepted else "below complex-boundary and semi-alpha gates",
+    }
+
+
+def classify_route(
+    image_srgb: np.ndarray,
+    source_alpha: np.ndarray | None = None,
+    *,
+    screen_mode: str = "auto",
+    preset: str = "auto",
+    fallback_background_color: tuple[int, int, int] = (0, 200, 0),
+) -> RouteDecision:
+    """Select the concrete production route for ``backend='auto'``.
+
+    Broad policy:
+    - clean source alpha passes through;
+    - CorridorKey is used only for green/blue known-screen assets where its
+      learned translucent/complex-boundary behavior is valuable;
+    - deterministic hard UI/buttons use the more stable known-B PyMatting path;
+    - stable non-green/blue flat backgrounds also use known-B PyMatting;
+    - unstable/unknown backgrounds fall back to PyMatting with the configured
+      fallback background color rather than invoking RMBG.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("classify_route() expects HxWx3 sRGB uint8")
+
+    legacy = classify_strategy(image_srgb, source_alpha=source_alpha)
+    if legacy.passthrough:
+        return RouteDecision(
+            route="rgba_passthrough",
+            asset_kind="rgba",
+            backend="passthrough",
+            params={},
+            confidence=1.0,
+            reasons=["clean_source_alpha"],
+            analysis={"strategy": {
+                "name": legacy.name,
+                "bg_type": legacy.bg_type,
+                "image_type": legacy.image_type,
+                "extras": legacy.extras,
+            }},
+        )
+
+    from .corridorkey import corridorkey_analyze_asset
+    from .pymatting_refine import estimate_stable_background_color
+
+    ck = corridorkey_analyze_asset(
+        image_srgb,
+        screen_mode=screen_mode,  # type: ignore[arg-type]
+        preset=preset,  # type: ignore[arg-type]
+        fallback_background_color=fallback_background_color,
+    )
+    profile = ck.parameter_profile
+    # CorridorKey is only production-safe when the green/blue screen is a
+    # confident observed screen (or explicitly forced by the caller). Random
+    # colorful/noisy borders can otherwise look like sparse green/blue coverage
+    # and incorrectly pull unknown photos into the learned keyer route.
+    known_corridor_screen = ck.screen_mode in {"green", "blue"} and (
+        screen_mode != "auto" or ck.background_confidence >= 0.45
+    )
+    asset_kind = _route_asset_kind(
+        image_srgb,
+        profile,
+        ck.screen_mode if known_corridor_screen else "unknown",
+    )
+    reasons: list[str] = []
+    analysis: dict[str, Any] = {
+        "strategy": {
+            "name": legacy.name,
+            "bg_type": legacy.bg_type,
+            "image_type": legacy.image_type,
+            "extras": legacy.extras,
+        },
+        "corridorkey_analysis": ck.to_dict(),
+    }
+
+    button_corridor_profiles = {"translucent_button"}
+    complex_button_boundary, complex_button_info = _wide_button_complex_boundary_score(
+        image_srgb,
+        ck.background_color,
+    )
+    analysis["complex_button_boundary"] = complex_button_info
+    if known_corridor_screen and (
+        asset_kind in {"icon", "character"}
+        or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
+    ):
+        if asset_kind == "character":
+            execution_profile = "corridorkey-character"
+        elif asset_kind == "button":
+            execution_profile = "corridorkey-transparent-button"
+        elif profile == "screen_tinted_translucency":
+            execution_profile = "corridorkey-effect-icon"
+        else:
+            execution_profile = "corridorkey-shaped-icon"
+
+        params = _corridorkey_route_params(ck, execution_profile=execution_profile)
+        if asset_kind == "button":
+            # The router owns the transparent/glass-button decision and sends
+            # the complete execution recipe. Downstream code should not infer
+            # button behavior from CorridorKey's generic semantic profile.
+            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
+        if complex_button_boundary and asset_kind == "button" and profile not in button_corridor_profiles:
+            reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
+        else:
+            reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")
+        return RouteDecision(
+            route="corridorkey",
+            asset_kind=asset_kind,
+            backend="comfy-corridorkey",
+            params=params,
+            confidence=float(max(0.50, ck.background_confidence)),
+            reasons=reasons,
+            analysis=analysis,
+        )
+
+    stable_bg, stable_info = estimate_stable_background_color(image_srgb)
+    analysis["stable_background"] = stable_info
+    if stable_info.get("accepted", False):
+        if asset_kind == "button":
+            reasons.append(f"button_{profile}_uses_known_b_pymatting")
+        elif not known_corridor_screen:
+            reasons.append("non_green_blue_stable_background_uses_known_b_pymatting")
+        else:
+            reasons.append(f"deterministic_{profile}_uses_known_b_pymatting")
+        return RouteDecision(
+            route="pymatting_known_b",
+            asset_kind=asset_kind if asset_kind != "unknown" else "known_bg_graphic",
+            backend="comfy-pymatting-known-b",
+            params=_pymatting_route_params(
+                stable_bg,
+                execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
+            ),
+            confidence=float(max(0.45, ck.background_confidence, 0.80)),
+            reasons=reasons,
+            analysis=analysis,
+        )
+
+    reasons.append("unknown_or_unstable_background_uses_pymatting_fallback")
+    fallback_params = _pymatting_route_params(
+        fallback_background_color,
+        execution_profile="pymatting-fallback",
+    )
+    # Unknown fallback is not a true measured known-B screen. The normal
+    # adaptive thresholding treats noisy/colorful borders as background noise
+    # and can raise the foreground threshold until the trimap has no foreground
+    # seeds. Use fixed thresholds so PyMatting receives a valid, bounded trimap.
+    fallback_params["pymatting_auto_adapt"] = False
+    return RouteDecision(
+        route="pymatting_fallback",
+        asset_kind=asset_kind if asset_kind != "unknown" else "unknown_fallback",
+        backend="comfy-pymatting-known-b",
+        # Fallback is intentionally deterministic and bounded: unknown inputs
+        # may not have a true known-B screen, but the production auto path must
+        # stay on the PyMatting/CorridorKey family and never trigger the slow
+        # RMBG model path from the RouteMatte node.
+        params=fallback_params,
+        confidence=float(max(0.10, ck.background_confidence)),
+        reasons=reasons,
+        analysis=analysis,
+    )
+
+
+__all__ = [
+    "Strategy",
+    "RouteDecision",
+    "AlphaHygiene",
+    "classify_strategy",
+    "classify_route",
+    "assess_source_alpha",
+]

@@ -26,43 +26,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
 
+import cv2
 import numpy as np
 from PIL import Image
 
 from . import io as ermbg_io
 from .comfy import DEFAULT_COMFY_URL
-from .matting import matte as _matte_internal
-from .matting import solid_graphic_to_matting_result
 from .qa import run_qa
-from .router import Strategy, classify_strategy
-from .segmenter import build_segmenter
-from .solid_graphic import analyze_solid_bg_graphic
+from .router import RouteDecision, Strategy, classify_route, classify_strategy
 
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
 MaskLike = Union[str, Path, np.ndarray, Image.Image]
-
 _SEGMENTER_CACHE: dict[tuple[str, str, int, str], Any] = {}
 
 
-def _get_segmenter(backend: str, model_id: str, input_size: int, comfy_url: str):
-    """Return a process-local segmenter for repeated API/Web calls.
-
-    BiRefNet model construction dominates first-call latency and is wasteful in
-    long-lived server processes. Cache only by explicit public knobs so tests
-    and callers can still request independent backends/models/sizes.
-    """
-    key = (backend, model_id, int(input_size), comfy_url)
-    seg = _SEGMENTER_CACHE.get(key)
-    if seg is None:
-        kwargs: dict[str, Any] = {
-            "model_id": model_id,
-            "input_size": input_size,
-        }
-        if backend == "comfy-rmbg":
-            kwargs["url"] = comfy_url
-        seg = build_segmenter(backend=backend, **kwargs)
-        _SEGMENTER_CACHE[key] = seg
-    return seg
+def build_segmenter(*args: Any, **kwargs: Any) -> Any:
+    """Compatibility stub for removed legacy full-matting callers."""
+    del args, kwargs
+    raise RuntimeError("legacy ERMBG full-matting segmenters were removed")
 
 
 @dataclass
@@ -153,6 +134,43 @@ def classify_image(image: ImageLike) -> Strategy:
     return classify_strategy(rgb, source_alpha=alpha)
 
 
+def classify_image_route(
+    image: ImageLike,
+    *,
+    corridorkey_screen_mode: str = "auto",
+    corridorkey_preset: str = "auto",
+    bg_color: tuple[int, int, int] = (0, 200, 0),
+) -> RouteDecision:
+    """Run ERMBG's production auto-route strategy without executing matting."""
+    rgb, alpha, _ = _to_rgb_and_alpha(image)
+    return classify_route(
+        rgb,
+        source_alpha=alpha,
+        screen_mode=corridorkey_screen_mode,
+        preset=corridorkey_preset,
+        fallback_background_color=bg_color,
+    )
+
+
+def _auto_backend_for_image(
+    image_srgb: np.ndarray,
+    *,
+    source_alpha: np.ndarray | None = None,
+    screen_mode: str,
+    preset: str,
+    fallback_background_color: tuple[int, int, int],
+) -> tuple[str, dict[str, Any], RouteDecision]:
+    """Route production auto mode through ERMBG's strategy layer."""
+    decision = classify_route(
+        image_srgb,
+        source_alpha=source_alpha,
+        screen_mode=screen_mode,  # type: ignore[arg-type]
+        preset=preset,  # type: ignore[arg-type]
+        fallback_background_color=fallback_background_color,
+    )
+    return decision.backend, decision.to_dict(), decision
+
+
 def matte_image(
     image: ImageLike,
     output_dir: str | Path | None = None,
@@ -171,6 +189,30 @@ def matte_image(
     vlm_prior_mode: str = "shadow",
     comfy_url: str = DEFAULT_COMFY_URL,
     solid_graphic_prepass: bool = True,
+    corridorkey_gamma_space: str = "sRGB",
+    corridorkey_despill_strength: float = 1.0,
+    corridorkey_refiner_strength: float = 1.0,
+    corridorkey_auto_despeckle: str = "On",
+    corridorkey_despeckle_size: int = 400,
+    corridorkey_auto_mask: bool = False,
+    corridorkey_color_protection: bool | None = None,
+    corridorkey_protection_bg_max: float = 12.0,
+    corridorkey_protection_fg_min: float = 28.0,
+    corridorkey_screen_mode: str = "auto",
+    corridorkey_preset: str = "auto",
+    corridorkey_hint_mask: MaskLike | None = None,
+    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    solid_graphic_alpha_refiner: str = "heuristic",
+    pymatting_method: str = "cf",
+    pymatting_image_space: str = "linear",
+    pymatting_bg_source: str = "auto",
+    pymatting_bg_color: tuple[int, int, int] | None = None,
+    pymatting_bg_threshold: float = 3.5,
+    pymatting_fg_threshold: float = 30.0,
+    pymatting_boundary_band_px: int = 2,
+    pymatting_auto_adapt: bool = True,
+    pymatting_cg_maxiter: int = 1000,
+    pymatting_cg_rtol: float = 1e-6,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -180,279 +222,846 @@ def matte_image(
             ``report.json`` here. If ``qa=True``, also writes ``qa/on_*.png``.
         qa: run multi-background composite QA. Adds ~6 image saves and the
             full halo/recomp/binarization metric block to the report.
-        matting_model: HF id of BiRefNet variant.
-        backend: ``auto`` | ``birefnet`` | ``grabcut`` | ``comfy-rmbg`` |
-            ``comfy-ermbg``. ``comfy-ermbg`` runs the full ERMBG Comfy custom
-            node remotely and only downloads the resulting images.
-        input_size: square matting-net input size for BiRefNet backends.
-        bg_color: composite color used when an RGBA source is dirty enough
-            that the router falls through to re-matte (since the matting net
-            needs RGB on a known constant bg). Default is the green-screen
-            target so the first stage's outputs route well.
-        despill, use_keyer: optional manual overrides; default ``None`` lets
-            the router decide.
-        subject_mask: optional H×W ownership mask from an independent segmenter.
-            When provided, ERMBG may repair keyer-supported low-alpha holes
-            inside this mask without raising the subject's external soft edge.
+        matting_model: deprecated compatibility argument for removed legacy
+            full-matting backends. It is ignored by maintained route backends.
+        backend: ``auto`` | ``comfy-rmbg`` | ``comfy-corridorkey`` |
+            ``pymatting-known-b`` | ``comfy-pymatting-known-b``.
+            ``auto`` routes through ERMBG's strategy layer, then dispatches to
+            CorridorKey, PyMatting Known-B, RMBG, or clean-RGBA passthrough.
+        input_size: deprecated compatibility argument for removed legacy
+            full-matting backends.
+        bg_color: fallback composite color used when an RGBA source needs to be
+            converted back to RGB before a selected backend runs.
+        despill, use_keyer: deprecated compatibility arguments. Maintained
+            backends derive despill/keyer behavior from the selected route.
+        subject_mask: removed with the old ERMBG ownership-repair path.
         shadow_mode: ``on`` preserves full shadow recovery, ``off`` skips it
             for faster previews, ``auto`` currently preserves ``on`` behavior.
-        vlm_prior: call the optional VLM semantic-prior pass before
-            despill. The model only classifies CV candidate regions; local code
-            still computes alpha, foreground colors, and shadow strength.
-        vlm_provider: ``openai`` or ``comfy-qwen``.
-        vlm_prior_mode: ``shadow`` (default), ``material``, or ``all``.
-        solid_graphic_prepass: when true, high-confidence solid-background
-            graphics use the analytic ownership-first path before constructing
-            a local matting segmenter.
+        vlm_prior: removed with the old semantic ownership-repair path.
+        vlm_provider, vlm_prior_mode: deprecated compatibility arguments.
+        solid_graphic_prepass: deprecated compatibility argument; ERMBG auto
+            routing now performs the maintained path selection.
+        solid_graphic_alpha_refiner: deprecated compatibility argument.
+        corridorkey_screen_mode: ``auto``, ``green``, or ``blue`` for the
+            CorridorKey path. ``auto`` estimates the key screen from border
+            evidence before submitting the remote workflow.
+        corridorkey_preset: ``auto``, ``detail_safe``, ``spill_safe``, or
+            ``manual``. Non-manual presets may override the individual
+            CorridorKey knobs with analysis-driven recommendations.
+        corridorkey_color_protection: ``None`` follows the selected preset's
+            recommendation. Explicit ``True`` or ``False`` is a caller override,
+            including when ``corridorkey_preset="auto"``.
+        corridorkey_hint_mask: optional H×W coarse foreground hint for
+            CorridorKey. It is a hint only; CorridorKey still computes the
+            detail alpha.
+        corridorkey_hard_ui_hint_mode: ``bbox_2px`` keeps the current hard-UI
+            path. ``boundary_2px`` is an experimental A/B path that sends only
+            the edge band to CorridorKey and restores solid interiors locally.
+            ``boundary_2px_shadow_safe`` uses the same boundary hint but leaves
+            measured screen-darkening out of local interior restore.
+            ``boundary_2px_shadow_safe_edge_floor`` also applies a soft
+            known-background material floor for unoutlined hard-UI edges.
+            ``translucent_button`` sends a full-frame CorridorKey hint and
+            disables color protection for glass/translucent UI, leaving the
+            model to solve both material translucency and shadow.
+            ``all_white`` disables automatic hint construction while keeping
+            the same CorridorKey and post-processing path.
+        pymatting_*: experimental local known-background PyMatting controls.
+            The most important knobs are background source, trimap thresholds,
+            and unknown-band width; solver knobs are exposed for A/B only.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
-    subject_support = _to_mask(subject_mask, rgb.shape[:2], "subject_mask")
+    corridorkey_hint_alpha = _to_mask(corridorkey_hint_mask, rgb.shape[:2], "corridorkey_hint_mask")
+    if subject_mask is not None:
+        raise ValueError("subject_mask belonged to the removed legacy ERMBG matting path")
+    if vlm_prior:
+        raise ValueError("vlm_prior belonged to the removed legacy ERMBG matting path")
+    if backend in {"birefnet", "grabcut", "comfy-ermbg"}:
+        raise ValueError(f"backend={backend!r} was removed; use backend='auto' or an explicit routed backend")
 
-    # If source has α but the router decides to re-matte, the matting net
-    # needs RGB on a known bg, not the raw (possibly premul or leaky) RGB.
-    strat_preview = classify_strategy(rgb, source_alpha=alpha)
-    if alpha is not None and (backend == "comfy-ermbg" or not strat_preview.passthrough):
+    auto_route: dict[str, Any] | None = None
+    auto_params: dict[str, Any] = {}
+    if backend == "auto":
+        return _matte_image_comfy_route_matte(
+            rgb,
+            source_alpha=alpha,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            bg_color=bg_color,
+            shadow_mode=shadow_mode,
+            comfy_url=comfy_url,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            pymatting_method=pymatting_method,
+            pymatting_image_space=pymatting_image_space,
+            pymatting_bg_source=pymatting_bg_source,
+            pymatting_bg_color=pymatting_bg_color,
+            pymatting_bg_threshold=pymatting_bg_threshold,
+            pymatting_fg_threshold=pymatting_fg_threshold,
+            pymatting_boundary_band_px=pymatting_boundary_band_px,
+            pymatting_auto_adapt=pymatting_auto_adapt,
+            pymatting_cg_maxiter=pymatting_cg_maxiter,
+            pymatting_cg_rtol=pymatting_cg_rtol,
+        )
+
+    if backend == "auto-local":
+        auto_decision: RouteDecision
+        backend, auto_route, auto_decision = _auto_backend_for_image(
+            rgb,
+            source_alpha=alpha,
+            screen_mode=corridorkey_screen_mode,
+            preset=corridorkey_preset,
+            fallback_background_color=bg_color,
+        )
+        auto_params = dict(auto_decision.params)
+    if backend == "passthrough":
+        return _matte_image_passthrough(rgb, alpha, src_path=src_path, output_dir=output_dir, qa=qa, auto_route=auto_route)
+
+    remote_full_backends = {"comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg"}
+    local_known_bg_backends = {"pymatting-known-b"}
+    if alpha is not None and (
+        backend in remote_full_backends
+        or backend in local_known_bg_backends
+    ):
         bg_arr = np.broadcast_to(np.asarray(bg_color, dtype=np.uint8), rgb.shape[:2] + (3,))
         a4 = alpha[..., None]
         rgb_lin = ermbg_io.srgb_to_linear(rgb)
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
-    if backend == "comfy-ermbg":
-        if vlm_prior:
-            raise ValueError("backend='comfy-ermbg' does not support local vlm_prior")
-        if subject_support is not None:
-            raise ValueError("backend='comfy-ermbg' does not support local subject_mask")
-        return _matte_image_comfy_ermbg(
+    if backend == "comfy-corridorkey":
+        return _matte_image_comfy_corridorkey(
             rgb,
             src_path=src_path,
             output_dir=output_dir,
             qa=qa,
-            matting_model=matting_model,
             bg_color=bg_color,
-            despill=despill,
-            use_keyer=use_keyer,
             shadow_mode=shadow_mode,
             comfy_url=comfy_url,
+            gamma_space=auto_params.get("corridorkey_gamma_space", corridorkey_gamma_space),
+            despill_strength=auto_params.get("corridorkey_despill_strength", corridorkey_despill_strength),
+            refiner_strength=auto_params.get("corridorkey_refiner_strength", corridorkey_refiner_strength),
+            auto_despeckle=auto_params.get("corridorkey_auto_despeckle", corridorkey_auto_despeckle),
+            despeckle_size=auto_params.get("corridorkey_despeckle_size", corridorkey_despeckle_size),
+            auto_mask=auto_params.get("corridorkey_auto_mask", corridorkey_auto_mask),
+            apply_color_protection=auto_params.get("corridorkey_color_protection", corridorkey_color_protection),
+            color_protection_bg_max=auto_params.get("corridorkey_protection_bg_max", corridorkey_protection_bg_max),
+            color_protection_fg_min=auto_params.get("corridorkey_protection_fg_min", corridorkey_protection_fg_min),
+            screen_mode=auto_params.get("corridorkey_screen_mode", corridorkey_screen_mode),
+            preset=auto_params.get("corridorkey_preset", corridorkey_preset),
+            hint_alpha=corridorkey_hint_alpha,
+            hard_ui_hint_mode=auto_params.get("corridorkey_hard_ui_hint_mode", corridorkey_hard_ui_hint_mode),
+            execution_profile=auto_params.get("corridorkey_execution_profile", "auto"),
+            auto_route=auto_route,
         )
 
-    semantic_prior = None
-    soft_preview = None
-    result = None
-    can_try_solid_graphic = (
-        solid_graphic_prepass
-        and backend != "comfy-rmbg"
-        and subject_support is None
-        and not vlm_prior
-        and despill is None
-        and use_keyer is None
-        and shadow_mode != "off"
-        and strat_preview.bg_type in {"saturated", "white", "black", "grey"}
-    )
-    if can_try_solid_graphic:
-        solid = analyze_solid_bg_graphic(rgb)
-        if solid.accepted:
-            result = solid_graphic_to_matting_result(solid, strat_preview, shadow_mode=shadow_mode)
-
-    if result is None:
-        seg = _get_segmenter(
-            backend=backend,
-            model_id=matting_model,
-            input_size=input_size,
-            comfy_url=comfy_url,
-        )
-
-    if result is None and vlm_prior:
-        from .diagnose import BackgroundDiagnoser
-        from .shadow import estimate_shadow_alpha
-        from .vlm_semantic import (
-            ComfyQwenVLMSemanticPriorClient,
-            OpenAIVLMSemanticPriorClient,
-            build_vlm_semantic_request,
-            extract_shadow_candidate_regions,
-            extract_subject_material_candidate_regions,
-        )
-
-        soft_preview = seg.segment(rgb)
-        diag = BackgroundDiagnoser().diagnose(rgb, soft_preview)
-        B = np.asarray(diag.background_color, dtype=np.uint8)
-        shadow_alpha, _ = estimate_shadow_alpha(rgb, soft_preview, B)
-        mode = vlm_prior_mode.strip().lower()
-        if mode not in {"shadow", "material", "all"}:
-            raise ValueError(f"Unknown vlm_prior_mode: {vlm_prior_mode!r}")
-        regions = []
-        if mode in {"shadow", "all"}:
-            regions.extend(
-                extract_shadow_candidate_regions(
-                    rgb,
-                    soft_preview,
-                    B,
-                    shadow_alpha=shadow_alpha,
-                )
-            )
-        if mode in {"material", "all"}:
-            regions.extend(
-                extract_subject_material_candidate_regions(
-                    rgb,
-                    soft_preview,
-                    B,
-                    shadow_alpha=shadow_alpha,
-                )
-            )
-        if regions:
-            request = build_vlm_semantic_request(
-                image_srgb=rgb,
-                subject_alpha=soft_preview,
-                background_color=tuple(int(c) for c in B),
-                regions=regions,
-                shadow_alpha=shadow_alpha,
-            )
-            if vlm_provider == "openai":
-                client = OpenAIVLMSemanticPriorClient(
-                    model=vlm_model,
-                    env_path=Path(".env"),
-                )
-            elif vlm_provider == "comfy-qwen":
-                client = ComfyQwenVLMSemanticPriorClient(
-                    url=comfy_url,
-                    model=vlm_model if vlm_model != "gpt-4o-mini" else "Qwen3-VL-4B-Instruct-FP8",
-                )
-            else:
-                raise ValueError(f"Unknown vlm_provider: {vlm_provider!r}")
-            semantic_prior = client.classify_request(request, regions, rgb.shape[:2])
-
-    if result is None:
-        result = _matte_internal(
+    if backend == "comfy-rmbg":
+        return _matte_image_comfy_rmbg(
             rgb,
-            source_alpha=alpha,
-            segmenter=seg,
-            despill=despill,
-            use_keyer=use_keyer,
-            subject_support=subject_support,
-            semantic_prior=semantic_prior,
-            soft_mask=soft_preview,
-            shadow_mode=shadow_mode,
-            solid_graphic_prepass=False,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            bg_color=bg_color,
+            comfy_url=comfy_url,
+            auto_route=auto_route,
         )
 
-    # Build report.
-    report: dict[str, Any] = {
-        "diagnosis": result.diagnosis.to_dict() if result.diagnosis is not None else None,
-        "background_color": list(result.background_color),
-        "despill_method": result.debug.get("despill_method"),
-        "matting_model": matting_model,
-        "keyer": result.debug.get("keyer", {}),
-        "shadow": result.debug.get("shadow", {}),
-        "semantic_prior": result.debug.get("semantic_prior", {}),
-        "strategy": result.debug.get("strategy", {}),
-    }
+    if backend == "comfy-pymatting-known-b":
+        if vlm_prior:
+            raise ValueError("backend='comfy-pymatting-known-b' does not support local vlm_prior")
+        return _matte_image_comfy_pymatting_known_b(
+            rgb,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            shadow_mode=shadow_mode,
+            comfy_url=comfy_url,
+            method=auto_params.get("pymatting_method", pymatting_method),
+            image_space=auto_params.get("pymatting_image_space", pymatting_image_space),
+            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
+            fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
+            boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
+            auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
+            cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
+            cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
+            auto_route=auto_route,
+        )
 
+    if backend == "pymatting-known-b":
+        if vlm_prior:
+            raise ValueError("backend='pymatting-known-b' does not support local vlm_prior")
+        return _matte_image_pymatting_known_b(
+            rgb,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            shadow_mode=shadow_mode,
+            method=auto_params.get("pymatting_method", pymatting_method),
+            image_space=auto_params.get("pymatting_image_space", pymatting_image_space),
+            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
+            fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
+            boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
+            auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
+            cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
+            cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
+            auto_route=auto_route,
+        )
+
+    raise ValueError(f"Unsupported backend after ERMBG route cleanup: {backend!r}")
+
+
+def _matte_image_passthrough(
+    rgb: np.ndarray,
+    alpha: np.ndarray | None,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    if alpha is None:
+        raise ValueError("passthrough route requires source alpha")
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    rgba = np.dstack([rgb, (a * 255.0 + 0.5).astype(np.uint8)])
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": [0, 0, 0],
+        "despill_method": "passthrough",
+        "matting_model": "none",
+        "keyer": {},
+        "shadow": {"mode": "passthrough", "applied": False},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "rgba_passthrough",
+            "bg_type": "rgba_passthrough",
+            "image_type": "rgba",
+            "keyer_mode": None,
+            "despill": "none",
+            "passthrough": True,
+            "notes": "Clean source alpha passed through by ERMBG route strategy.",
+            "extras": {},
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
     out_dir: Path | None = None
     if output_dir is not None:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(src_path).stem if src_path else "matte"
-        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", result.debug["shadow_alpha"])
-        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
-        ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", result.debug["trimap_u8"])
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", a)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", rgb)
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        # Passthrough has no known observed background, so QA composites are not
+        # meaningful. Keep the flag accepted for compatibility and report why.
+        report["qa"] = {"skipped": True, "reason": "rgba_passthrough"}
+    debug = {
+        "strategy": report["strategy"],
+        "soft_mask": a,
+        "shadow_alpha": np.zeros(a.shape, dtype=np.float32),
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=rgba,
+        alpha=a,
+        foreground_srgb=rgb,
+        strategy_name="rgba_passthrough",
+        background_color=(0, 0, 0),
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
 
+
+def _write_common_outputs(
+    *,
+    rgb: np.ndarray,
+    rgba: np.ndarray,
+    alpha: np.ndarray,
+    foreground: np.ndarray,
+    report: dict[str, Any],
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    background_color: tuple[int, int, int],
+) -> Path | None:
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", foreground)
         if qa:
             qa_dir = out_dir / f"{stem}_qa"
             qa_metrics = run_qa(
                 image_srgb=rgb,
-                rgba=result.rgba,
-                soft_mask=result.debug["soft_mask"],
-                background_color=result.background_color,
+                rgba=rgba,
+                soft_mask=alpha,
+                background_color=background_color,
                 out_dir=qa_dir,
             )
             report["qa"] = qa_metrics
             (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-
         (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
-
     elif qa:
-        # qa requested without output dir: still compute metrics, just don't save composites
         qa_metrics = run_qa(
             image_srgb=rgb,
-            rgba=result.rgba,
-            soft_mask=result.debug["soft_mask"],
-            background_color=result.background_color,
-            out_dir=Path("/tmp/_ermbg_qa_discard"),  # writes happen here; user can ignore
+            rgba=rgba,
+            soft_mask=alpha,
+            background_color=background_color,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
         )
         report["qa"] = qa_metrics
+    return out_dir
 
+
+def _matte_image_comfy_route_matte(
+    rgb: np.ndarray,
+    *,
+    source_alpha: np.ndarray | None,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    bg_color: tuple[int, int, int],
+    shadow_mode: str,
+    comfy_url: str,
+    corridorkey_screen_mode: str,
+    corridorkey_preset: str,
+    corridorkey_hard_ui_hint_mode: str,
+    pymatting_method: str,
+    pymatting_image_space: str,
+    pymatting_bg_source: str,
+    pymatting_bg_color: tuple[int, int, int] | None,
+    pymatting_bg_threshold: float,
+    pymatting_fg_threshold: float,
+    pymatting_boundary_band_px: int,
+    pymatting_auto_adapt: bool,
+    pymatting_cg_maxiter: int,
+    pymatting_cg_rtol: float,
+) -> MatteResponse:
+    from .probe.comfyui_route_matte import ComfyUIRouteMatteClient
+
+    client = ComfyUIRouteMatteClient(url=comfy_url, poll_interval=0.05)
+    remote = client.matte(
+        rgb,
+        source_alpha=source_alpha,
+        fallback_bg_color=bg_color,
+        shadow_mode=shadow_mode,
+        corridorkey_screen_mode=corridorkey_screen_mode,
+        corridorkey_preset=corridorkey_preset,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        pymatting_method=pymatting_method,
+        pymatting_image_space=pymatting_image_space,
+        pymatting_bg_source=pymatting_bg_source,
+        pymatting_bg_color=pymatting_bg_color,
+        pymatting_bg_threshold=pymatting_bg_threshold,
+        pymatting_fg_threshold=pymatting_fg_threshold,
+        pymatting_boundary_band_px=pymatting_boundary_band_px,
+        pymatting_auto_adapt=pymatting_auto_adapt,
+        pymatting_cg_maxiter=pymatting_cg_maxiter,
+        pymatting_cg_rtol=pymatting_cg_rtol,
+    )
+    report = dict(remote.report)
+    out_dir = _write_common_outputs(
+        rgb=rgb,
+        rgba=remote.rgba,
+        alpha=remote.alpha,
+        foreground=remote.foreground_srgb,
+        report=report,
+        src_path=src_path,
+        output_dir=output_dir,
+        qa=qa,
+        background_color=remote.background_color,
+    )
+    debug = dict(remote.debug)
+    debug.setdefault("soft_mask", remote.alpha)
+    debug.setdefault("shadow_alpha", np.zeros(remote.alpha.shape, dtype=np.float32))
     return MatteResponse(
-        rgba=result.rgba,
-        alpha=result.alpha,
-        foreground_srgb=result.foreground_srgb,
-        strategy_name=result.debug.get("strategy", {}).get("name", "unknown"),
-        background_color=result.background_color,
+        rgba=remote.rgba,
+        alpha=remote.alpha,
+        foreground_srgb=remote.foreground_srgb,
+        strategy_name=remote.strategy_name,
+        background_color=remote.background_color,
         report=report,
         output_dir=out_dir,
-        debug=result.debug,
+        debug=debug,
     )
 
 
-def _matte_image_comfy_ermbg(
+def _matte_image_pymatting_known_b(
     rgb: np.ndarray,
     *,
     src_path: str | None,
     output_dir: str | Path | None,
     qa: bool,
-    matting_model: str,
-    bg_color: tuple[int, int, int],
-    despill: str | None,
-    use_keyer: bool | None,
     shadow_mode: str,
-    comfy_url: str,
+    method: str,
+    image_space: str,
+    bg_source: str,
+    bg_color: tuple[int, int, int] | None,
+    bg_threshold: float,
+    fg_threshold: float,
+    boundary_band_px: int,
+    auto_adapt: bool,
+    cg_maxiter: int,
+    cg_rtol: float,
+    auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
-    from .probe.comfyui_ermbg_matte import ComfyUIErmbgMatteClient
+    from .pymatting_refine import (
+        build_known_background_trimap,
+        estimate_alpha_with_pymatting,
+        estimate_stable_background_color,
+    )
+    from .trimap import trimap_to_uint8
 
-    client = ComfyUIErmbgMatteClient(url=comfy_url)
-    remote = client.matte(
+    method = method.removeprefix("pymatting-").lower().replace("_", "-")
+    if method not in {"cf", "knn", "lbdm", "lkm", "rw", "sm"}:
+        raise ValueError(f"Unsupported pymatting method: {method!r}")
+    if image_space not in {"linear", "sRGB"}:
+        raise ValueError("pymatting_image_space must be 'linear' or 'sRGB'")
+    bg_source = bg_source.strip().lower()
+    if bg_source not in {"auto", "green", "blue", "custom"}:
+        raise ValueError("pymatting_bg_source must be auto, green, blue, or custom")
+    if not 0.0 <= float(bg_threshold) < float(fg_threshold):
+        raise ValueError("pymatting_bg_threshold must be non-negative and less than pymatting_fg_threshold")
+    if int(boundary_band_px) < 0:
+        raise ValueError("pymatting_boundary_band_px must be >= 0")
+    if int(cg_maxiter) <= 0:
+        raise ValueError("pymatting_cg_maxiter must be > 0")
+    if float(cg_rtol) <= 0.0:
+        raise ValueError("pymatting_cg_rtol must be > 0")
+
+    bg_info: dict[str, Any]
+    if bg_source == "auto":
+        selected_bg, bg_info = estimate_stable_background_color(rgb)
+        if not bg_info.get("accepted", False):
+            raise ValueError(f"pymatting-known-b requires a stable known background: {bg_info.get('reason')}")
+    elif bg_source == "green":
+        selected_bg = (0, 200, 0)
+        bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
+    elif bg_source == "blue":
+        selected_bg = (0, 0, 200)
+        bg_info = {"accepted": True, "source": "preset_blue", "reason": "preset"}
+    else:
+        if bg_color is None:
+            raise ValueError("pymatting_bg_color is required when pymatting_bg_source='custom'")
+        selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
+        bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
+
+    trimap, trimap_info = build_known_background_trimap(
         rgb,
-        matting_model=matting_model,
-        bg_color=bg_color,
-        despill=despill,
-        use_keyer=use_keyer,
+        selected_bg,
+        bg_threshold=float(bg_threshold),
+        fg_threshold=float(fg_threshold),
+        boundary_band_px=int(boundary_band_px),
+        adaptive=bool(auto_adapt),
+    )
+    pm = estimate_alpha_with_pymatting(
+        rgb,
+        trimap,
+        method=method,
+        image_space=image_space,
+        cg_maxiter=int(cg_maxiter),
+        cg_rtol=float(cg_rtol),
+    )
+    alpha = np.clip(pm.alpha.astype(np.float32), 0.0, 1.0)
+
+    C_lin = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
+    B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
+    foreground_linear = C_lin.copy()
+    solve = alpha > 1e-3
+    # Mechanism: once PyMatting has solved the narrow antialiasing band, recover
+    # straight foreground against the measured known-B color so the exported RGB
+    # does not retain green/blue-screen contribution at the edge.
+    foreground_linear[solve] = (
+        C_lin[solve] - (1.0 - alpha[solve, None]) * B_lin.reshape(1, 3)
+    ) / np.maximum(alpha[solve, None], 1e-3)
+    foreground_linear[~solve] = 0.0
+    foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
+    foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
+    subject_alpha = alpha
+    subject_foreground_srgb = foreground_srgb
+    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
+        rgb,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground_srgb,
+        background_color=selected_bg,
         shadow_mode=shadow_mode,
     )
+    alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
+
     report: dict[str, Any] = {
         "diagnosis": None,
-        "background_color": list(bg_color),
-        "despill_method": "remote",
-        "matting_model": matting_model,
+        "background_color": list(selected_bg),
+        "despill_method": "known_background_unmix",
+        "matting_model": "pymatting",
         "keyer": {},
-        "shadow": {"mode": shadow_mode, "source": "remote_comfy_ermbg"},
+        "shadow": shadow_info,
         "semantic_prior": {},
         "strategy": {
-            "name": "comfy_ermbg",
-            "bg_type": "remote",
-            "image_type": "remote",
+            "name": "pymatting_known_b",
+            "bg_type": "known",
+            "image_type": "graphic",
             "keyer_mode": None,
-            "despill": "remote",
+            "despill": "known_background_unmix",
             "passthrough": False,
-            "notes": "Full ERMBG pipeline executed by remote ComfyUI.",
-            "extras": remote.debug,
+            "notes": "Experimental local PyMatting alpha on a measured or specified known background.",
+            "extras": {
+                "background": bg_info,
+                "pymatting": pm.debug,
+                "trimap": trimap_info,
+                "parameters": {
+                    "method": method,
+                    "image_space": image_space,
+                    "bg_source": bg_source,
+                    "bg_threshold": float(bg_threshold),
+                    "fg_threshold": float(fg_threshold),
+                    "boundary_band_px": int(boundary_band_px),
+                    "auto_adapt": bool(auto_adapt),
+                    "cg_maxiter": int(cg_maxiter),
+                    "cg_rtol": float(cg_rtol),
+                },
+            },
         },
     }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
 
     out_dir: Path | None = None
     if output_dir is not None:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         stem = Path(src_path).stem if src_path else "matte"
-        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", remote.rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", remote.alpha)
-        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", remote.foreground_srgb)
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
+        ermbg_io.save_rgb(out_dir / f"{stem}_rgba_rgb.png", rgba_rgb_srgb)
+        ermbg_io.save_mask(out_dir / f"{stem}_pymatting_subject_alpha.png", subject_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
+        ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", trimap_to_uint8(trimap))
         if qa:
             qa_dir = out_dir / f"{stem}_qa"
             qa_metrics = run_qa(
                 image_srgb=rgb,
-                rgba=remote.rgba,
-                soft_mask=remote.alpha,
+                rgba=rgba,
+                soft_mask=alpha,
+                background_color=selected_bg,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=rgba,
+            soft_mask=alpha,
+            background_color=selected_bg,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        "strategy": report["strategy"],
+        "soft_mask": alpha,
+        "subject_alpha": subject_alpha,
+        "pymatting_subject_alpha": subject_alpha,
+        "pymatting_subject_foreground": subject_foreground_srgb,
+        "rgba_rgb": rgba_rgb_srgb,
+        "shadow_alpha": shadow_alpha,
+        "shadow_alpha_physical": shadow_alpha_physical,
+        "trimap_u8": trimap_to_uint8(trimap),
+        "pymatting_known_b": {
+            "background": bg_info,
+            "trimap": trimap_info,
+            "pymatting": pm.debug,
+            "parameters": report["strategy"]["extras"]["parameters"],
+        },
+        "shadow": shadow_info,
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=rgba,
+        alpha=alpha,
+        foreground_srgb=subject_foreground_srgb,
+        strategy_name="pymatting_known_b",
+        background_color=selected_bg,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
+
+
+def _matte_image_comfy_pymatting_known_b(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    shadow_mode: str,
+    comfy_url: str,
+    method: str,
+    image_space: str,
+    bg_source: str,
+    bg_color: tuple[int, int, int] | None,
+    bg_threshold: float,
+    fg_threshold: float,
+    boundary_band_px: int,
+    auto_adapt: bool,
+    cg_maxiter: int,
+    cg_rtol: float,
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    from .probe.comfyui_pymatting_known_b import ComfyUIPyMattingKnownBClient
+    from .pymatting_refine import build_known_background_trimap, estimate_stable_background_color
+    from .trimap import trimap_to_uint8
+
+    method = method.removeprefix("pymatting-").lower().replace("_", "-")
+    if method not in {"cf", "knn", "lbdm", "lkm", "rw", "sm"}:
+        raise ValueError(f"Unsupported pymatting method: {method!r}")
+    if image_space not in {"linear", "sRGB"}:
+        raise ValueError("pymatting_image_space must be 'linear' or 'sRGB'")
+    bg_source = bg_source.strip().lower()
+    if bg_source not in {"auto", "green", "blue", "custom"}:
+        raise ValueError("pymatting_bg_source must be auto, green, blue, or custom")
+    if not 0.0 <= float(bg_threshold) < float(fg_threshold):
+        raise ValueError("pymatting_bg_threshold must be non-negative and less than pymatting_fg_threshold")
+    if int(boundary_band_px) < 0:
+        raise ValueError("pymatting_boundary_band_px must be >= 0")
+    if int(cg_maxiter) <= 0:
+        raise ValueError("pymatting_cg_maxiter must be > 0")
+    if float(cg_rtol) <= 0.0:
+        raise ValueError("pymatting_cg_rtol must be > 0")
+
+    bg_info: dict[str, Any]
+    if bg_source == "auto":
+        selected_bg, bg_info = estimate_stable_background_color(rgb)
+        if not bg_info.get("accepted", False):
+            raise ValueError(f"comfy-pymatting-known-b requires a stable known background: {bg_info.get('reason')}")
+    elif bg_source == "green":
+        selected_bg = (0, 200, 0)
+        bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
+    elif bg_source == "blue":
+        selected_bg = (0, 0, 200)
+        bg_info = {"accepted": True, "source": "preset_blue", "reason": "preset"}
+    else:
+        if bg_color is None:
+            raise ValueError("pymatting_bg_color is required when pymatting_bg_source='custom'")
+        selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
+        bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
+
+    # Build the same trimap locally for report/debug symmetry. The remote node
+    # uses the synced helper, so this is metadata parity rather than a second
+    # alpha solve.
+    trimap, trimap_info = build_known_background_trimap(
+        rgb,
+        selected_bg,
+        bg_threshold=float(bg_threshold),
+        fg_threshold=float(fg_threshold),
+        boundary_band_px=int(boundary_band_px),
+        adaptive=bool(auto_adapt),
+    )
+    client = ComfyUIPyMattingKnownBClient(url=comfy_url)
+    remote = client.matte(
+        rgb,
+        method=method,
+        image_space=image_space,
+        bg_source=bg_source,
+        bg_color=selected_bg,
+        bg_threshold=float(bg_threshold),
+        fg_threshold=float(fg_threshold),
+        boundary_band_px=int(boundary_band_px),
+        auto_adapt=bool(auto_adapt),
+        cg_maxiter=int(cg_maxiter),
+        cg_rtol=float(cg_rtol),
+    )
+    subject_alpha = remote.alpha
+    subject_foreground_srgb = remote.foreground_srgb
+    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
+        rgb,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground_srgb,
+        background_color=selected_bg,
+        shadow_mode=shadow_mode,
+    )
+    rgba = np.dstack(
+        [
+            rgba_rgb_srgb,
+            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    parameters = {
+        "method": method,
+        "image_space": image_space,
+        "bg_source": bg_source,
+        "bg_threshold": float(bg_threshold),
+        "fg_threshold": float(fg_threshold),
+        "boundary_band_px": int(boundary_band_px),
+        "auto_adapt": bool(auto_adapt),
+        "cg_maxiter": int(cg_maxiter),
+        "cg_rtol": float(cg_rtol),
+    }
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(selected_bg),
+        "despill_method": "remote_pymatting_known_background_unmix",
+        "matting_model": "pymatting",
+        "keyer": {},
+        "shadow": shadow_info,
+        "semantic_prior": {},
+        "strategy": {
+            "name": "comfy_pymatting_known_b",
+            "bg_type": "known",
+            "image_type": "graphic",
+            "keyer_mode": None,
+            "despill": "remote_known_background_unmix",
+            "passthrough": False,
+            "notes": "Experimental PyMatting alpha executed by remote ERMBG ComfyUI node.",
+            "extras": {
+                "background": bg_info,
+                "trimap": trimap_info,
+                "parameters": parameters,
+                "remote": remote.debug,
+            },
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
+        ermbg_io.save_rgb(out_dir / f"{stem}_rgba_rgb.png", rgba_rgb_srgb)
+        ermbg_io.save_mask(out_dir / f"{stem}_pymatting_subject_alpha.png", subject_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
+        ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", trimap_to_uint8(trimap))
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=rgba,
+                soft_mask=alpha,
+                background_color=selected_bg,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=rgba,
+            soft_mask=alpha,
+            background_color=selected_bg,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        **remote.debug,
+        "strategy": report["strategy"],
+        "soft_mask": alpha,
+        "subject_alpha": subject_alpha,
+        "pymatting_subject_alpha": subject_alpha,
+        "pymatting_subject_foreground": subject_foreground_srgb,
+        "rgba_rgb": rgba_rgb_srgb,
+        "shadow_alpha": shadow_alpha,
+        "shadow_alpha_physical": shadow_alpha_physical,
+        "trimap_u8": remote.trimap_u8,
+        "pymatting_known_b": {
+            "background": bg_info,
+            "trimap": trimap_info,
+            "parameters": parameters,
+            "remote": remote.debug,
+        },
+        "shadow": shadow_info,
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=rgba,
+        alpha=alpha,
+        foreground_srgb=subject_foreground_srgb,
+        strategy_name="comfy_pymatting_known_b",
+        background_color=selected_bg,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
+
+
+def _matte_image_comfy_rmbg(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    bg_color: tuple[int, int, int],
+    comfy_url: str,
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    from .probe.comfyui_rmbg import ComfyUIRembgBaseline
+
+    client = ComfyUIRembgBaseline(url=comfy_url)
+    rgba = client.matte(rgb)
+    alpha = (rgba[..., 3].astype(np.float32) / 255.0).clip(0.0, 1.0)
+    foreground = rgba[..., :3].astype(np.uint8, copy=True)
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(bg_color),
+        "despill_method": "remote_rmbg",
+        "matting_model": "comfy-rmbg",
+        "keyer": {},
+        "shadow": {"mode": "none", "source": "comfy-rmbg", "applied": False},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "comfy_rmbg",
+            "bg_type": "remote",
+            "image_type": "remote",
+            "keyer_mode": None,
+            "despill": "remote_rmbg",
+            "passthrough": False,
+            "notes": "Unknown/unstable background fallback through remote ComfyUI RMBG.",
+            "extras": {},
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", foreground)
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=rgba,
+                soft_mask=alpha,
                 background_color=bg_color,
                 out_dir=qa_dir,
             )
@@ -462,9 +1071,2137 @@ def _matte_image_comfy_ermbg(
     elif qa:
         qa_metrics = run_qa(
             image_srgb=rgb,
-            rgba=remote.rgba,
-            soft_mask=remote.alpha,
+            rgba=rgba,
+            soft_mask=alpha,
             background_color=bg_color,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        "strategy": report["strategy"],
+        "soft_mask": alpha,
+        "shadow_alpha": np.zeros(alpha.shape, dtype=np.float32),
+        "backend": "comfy-rmbg",
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=rgba,
+        alpha=alpha,
+        foreground_srgb=foreground,
+        strategy_name="comfy_rmbg",
+        background_color=bg_color,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
+
+
+def _pymatting_known_b_shadow_patch(
+    image_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    shadow_mode: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Recover a black shadow layer by matching the source over known B.
+
+    Core rule: PyMatting owns the subject; ShadowPatch owns only the residual.
+    Put the subject back on known B, compare with the source, and solve shadow
+    from the mismatch so the two paths do not compete over soft UI pixels.
+    """
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    if shadow_mode == "off":
+        empty = np.zeros(subject.shape, dtype=np.float32)
+        info = {
+            "mode": shadow_mode,
+            "source": "pymatting_known_b_shadow_patch",
+            "subject_source": "pymatting_known_b",
+            "detected": False,
+            "applied": False,
+            "reason": "shadow_mode=off",
+        }
+        return subject, subject_foreground_srgb, empty, empty, info
+
+    shadow_display, objective_info = _pymatting_known_b_objective_shadow_from_source(
+        image_srgb,
+        subject_alpha=subject,
+        subject_foreground_srgb=subject_foreground_srgb,
+        background_color=background_color,
+    )
+    # Compatibility/debug metadata for the previous residue-split shadow
+    # detector. The objective reprojection path above owns execution now, but
+    # tests and Web reports still inspect these feature signals to distinguish
+    # scalar known-B residue from colored subject material.
+    _residue_shadow_display, residue_info = _pymatting_known_b_shadow_residue_from_source(
+        image_srgb,
+        subject_alpha=subject,
+        subject_foreground_srgb=subject_foreground_srgb,
+        background_color=background_color,
+    )
+
+    stabilized_foreground_srgb, foreground_stabilization = _stabilize_pymatting_subject_foreground_for_export(
+        subject_foreground_srgb,
+        subject_alpha=subject,
+        shadow_mask=np.zeros(subject.shape, dtype=bool),
+        background_color=background_color,
+    )
+    from .shadow import composite_subject_with_shadow
+
+    foreground_linear = ermbg_io.srgb_to_linear(stabilized_foreground_srgb)
+    alpha, rgba_rgb_linear = composite_subject_with_shadow(
+        foreground_linear,
+        subject,
+        shadow_display,
+        subject_occlusion_blur_sigma=0.0,
+    )
+    rgba_rgb_srgb = ermbg_io.linear_to_srgb_u8(rgba_rgb_linear)
+    shadow_alpha_physical = _display_shadow_alpha_to_physical_alpha(shadow_display, background_color)
+    shadow_execution = shadow_display > 0.0
+    applied = bool(shadow_execution.any())
+    info = {
+        "method": "objective_source_reprojection",
+        "mode": shadow_mode,
+        "source": "pymatting_known_b_shadow_patch",
+        "subject_source": "pymatting_known_b",
+        "detected": applied,
+        "applied": applied,
+        "reason": "" if applied else objective_info.get("reason", "no objective shadow support"),
+        "pixels": int(shadow_execution.sum()),
+        "mean_alpha": float(shadow_display[shadow_execution].mean()) if applied else 0.0,
+        "p95_alpha": float(np.percentile(shadow_display[shadow_execution], 95.0)) if applied else 0.0,
+        "max_alpha": float(shadow_display[shadow_execution].max()) if applied else 0.0,
+        "objective_shadow": objective_info,
+        "residue_split": residue_info,
+        "foreground_stabilization": foreground_stabilization,
+    }
+    return (
+        alpha.astype(np.float32),
+        rgba_rgb_srgb,
+        shadow_display.astype(np.float32),
+        shadow_alpha_physical.astype(np.float32),
+        info,
+    )
+
+
+def _pymatting_known_b_objective_shadow_from_source(
+    image_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Solve the shadow layer that makes subject-only compositing match source.
+
+    The broad rule is mechanism-based: if the original pixel is darker than
+    the PyMatting subject composited over the known background, and that
+    difference is explainable as scalar darkening of the background channels,
+    the error belongs to the shadow layer. High-confidence pixels seed the
+    region; support is deliberately expanded so contact seams are covered, but
+    per-pixel opacity is still taken from the source reprojection residual.
+    """
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("image_srgb must be uint8")
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    if image_srgb.shape[:2] != subject.shape:
+        raise ValueError("image_srgb and subject_alpha must share HxW")
+    h, w = subject.shape
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    foreground = subject_foreground_srgb.astype(np.float32)
+    predicted = subject[..., None] * foreground + (1.0 - subject[..., None]) * bg.reshape(1, 1, 3)
+    diff = predicted - image_srgb.astype(np.float32)
+
+    informative_channels = bg >= max(8.0, float(bg.max()) * 0.12)
+    if not bool(informative_channels.any()):
+        informative_channels = bg == float(bg.max())
+    off_channels = bg < max(8.0, float(bg.max()) * 0.12)
+    bg_darkening = np.where(informative_channels.reshape(1, 1, 3), diff, 0.0).max(axis=-1)
+    off_channel_error = (
+        np.where(off_channels.reshape(1, 1, 3), np.abs(diff), 0.0).max(axis=-1)
+        if bool(off_channels.any())
+        else np.zeros(subject.shape, dtype=np.float32)
+    )
+    solved_shadow = _known_bg_display_shadow_alpha_under_subject(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject,
+    )
+    border = _image_border_mask(subject.shape)
+    border_shadow = solved_shadow[border].astype(np.float32)
+    border_shadow_floor = float(np.percentile(border_shadow, 99.5)) if border_shadow.size else 0.0
+
+    subject_core = subject >= 0.50
+    if not bool(subject_core.any()):
+        return np.zeros(subject.shape, dtype=np.float32), {
+            "enabled": True,
+            "reason": "no subject core",
+            "seed_pixels": 0,
+            "support_pixels": 0,
+            "pixels": 0,
+        }
+    dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+    # Experience-driven but scale-keyed: UI cast shadows sit near the control,
+    # and this generous band is used only as a search/support bound. The actual
+    # written opacity still requires source residual evidence, which prevents
+    # plain background from turning into shadow.
+    near_subject_px = float(max(12.0, min(72.0, round(min(h, w) * 0.18))))
+    near_subject = dist_to_core <= near_subject_px
+    # Split decision from coverage: close anchors decide whether shadow exists;
+    # wider connected source residuals decide how far a soft shadow may extend.
+    support_near_subject_px = float(max(near_subject_px, min(80.0, round(min(h, w) * 0.34))))
+    support_near_subject = dist_to_core <= support_near_subject_px
+    exterior = subject < 0.995
+
+    seed_alpha_min = max(4.0 / 255.0, float(np.percentile(solved_shadow[near_subject], 75.0)) * 0.20)
+    # Support must clear the observed background residual floor. Ring/hole
+    # samples can have gentle green-screen gradients connected to a true shadow;
+    # accepting 1/255 everywhere turns that gradient into gray haze.
+    support_alpha_min = max(1.0 / 255.0, border_shadow_floor + 1.0 / 255.0, seed_alpha_min * 0.50)
+    off_guard_u8 = max(48.0, float(bg.max()) * 0.24)
+    seed = (
+        exterior
+        & near_subject
+        & (solved_shadow >= seed_alpha_min)
+        & (bg_darkening >= 2.0)
+        & (off_channel_error <= off_guard_u8)
+    )
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(seed.astype(np.uint8), 8)
+    img_area = float(h * w)
+    min_area = int(max(8.0, img_area * 0.00005))
+    coherent_anchor_area = int(max(float(min_area), img_area * 0.005))
+    kept = np.zeros(subject.shape, dtype=bool)
+    largest_kept_area = 0
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        values = solved_shadow[comp]
+        p90 = float(np.percentile(values, 90.0)) if values.size else 0.0
+        keep = bool(area >= min_area and p90 >= max(0.035, seed_alpha_min * 1.50))
+        if keep:
+            kept |= comp
+            largest_kept_area = max(largest_kept_area, area)
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "shadow_alpha_p90": p90,
+                "keep": keep,
+            }
+        )
+
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    if not bool(kept.any()) or largest_kept_area < coherent_anchor_area:
+        return np.zeros(subject.shape, dtype=np.float32), {
+            "enabled": True,
+            "reason": (
+                "no connected source residual shadow support"
+                if not bool(kept.any())
+                else "no coherent shadow anchor component"
+            ),
+            "near_subject_px": near_subject_px,
+            "seed_alpha_min": float(seed_alpha_min),
+            "seed_pixels": int(seed.sum()),
+            "kept_seed_pixels": int(kept.sum()),
+            "support_pixels": 0,
+            "pixels": 0,
+            "component_min_area": int(min_area),
+            # No coherent anchor means no shadow profile; this protects
+            # no-shadow UI outlines from being expanded into false shadows.
+            "coherent_anchor_min_area": int(coherent_anchor_area),
+            "largest_kept_component_area": int(largest_kept_area),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+        }
+
+    expand_px = int(max(5, min(18, round(min(h, w) * 0.04))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (expand_px * 2 + 1, expand_px * 2 + 1))
+    anchor_support = cv2.dilate(kept.astype(np.uint8), kernel, iterations=1).astype(bool)
+    anchor_support &= support_near_subject & exterior
+    source_support_candidate = (
+        exterior
+        & support_near_subject
+        & (solved_shadow >= support_alpha_min)
+        & (bg_darkening >= 0.25)
+        & (off_channel_error <= max(off_guard_u8, 96.0))
+    )
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(source_support_candidate.astype(np.uint8), 8)
+    support = anchor_support.copy()
+    anchored_support_components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        touches_anchor = bool(np.any(comp & anchor_support))
+        if touches_anchor:
+            support |= comp
+        anchored_support_components.append(
+            {
+                "area": int(stats[label, cv2.CC_STAT_AREA]),
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "anchored": touches_anchor,
+            }
+        )
+    anchored_support_components.sort(key=lambda item: (item["anchored"], item["area"]), reverse=True)
+    # Raw source reprojection can be sparse along antialiased contact shadows:
+    # the high-confidence component proves the region is shadow, but individual
+    # texels may fail a channel guard due to subpixel subject color or generator
+    # noise. First write source-solved pixels, then close small holes inside the
+    # connected support and borrow nearby opacity with distance falloff. This
+    # completes the shadow matte without handing those pixels back to PyMatting.
+    write = (
+        support
+        & (solved_shadow >= support_alpha_min)
+        & (bg_darkening >= 0.25)
+        & (off_channel_error <= max(off_guard_u8, 96.0))
+    )
+    shadow = np.where(write, solved_shadow, 0.0).astype(np.float32)
+    close_px = int(max(3, min(10, round(min(h, w) * 0.025))))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px * 2 + 1, close_px * 2 + 1))
+    completed_support = cv2.morphologyEx(write.astype(np.uint8), cv2.MORPH_CLOSE, close_kernel, iterations=1)
+    completed_support = completed_support.astype(bool) & support
+    completed_fill = completed_support & ~write
+    if bool(completed_fill.any()) and bool(write.any()):
+        from scipy import ndimage
+
+        dist_to_written, nearest = ndimage.distance_transform_edt(~write, return_indices=True)
+        borrowed = shadow[nearest[0], nearest[1]]
+        falloff = np.clip(1.0 - dist_to_written / float(close_px + expand_px + 1), 0.0, 1.0)
+        shadow[completed_fill] = np.maximum(
+            shadow[completed_fill],
+            (borrowed * falloff * 0.90).astype(np.float32)[completed_fill],
+        )
+    values = shadow[shadow > 0.0]
+    return shadow, {
+        "enabled": True,
+        "reason": "" if bool(values.size) else "expanded support had no positive source shadow residual",
+        "near_subject_px": near_subject_px,
+        "seed_alpha_min": float(seed_alpha_min),
+        "support_alpha_min": float(support_alpha_min),
+        "border_shadow_floor": float(border_shadow_floor),
+        "off_channel_error_guard_u8": float(off_guard_u8),
+        "expand_px": int(expand_px),
+        "support_near_subject_px": float(support_near_subject_px),
+        "completion_close_px": int(close_px),
+        "seed_pixels": int(seed.sum()),
+        "kept_seed_pixels": int(kept.sum()),
+        "coherent_anchor_min_area": int(coherent_anchor_area),
+        "largest_kept_component_area": int(largest_kept_area),
+        "source_support_candidate_pixels": int(source_support_candidate.sum()),
+        "anchor_support_pixels": int(anchor_support.sum()),
+        "support_pixels": int(support.sum()),
+        "raw_source_pixels": int(write.sum()),
+        "completed_support_pixels": int(completed_support.sum()),
+        "completed_fill_pixels": int(completed_fill.sum()),
+        "pixels": int((shadow > 0.0).sum()),
+        "mean_alpha": float(values.mean()) if values.size else 0.0,
+        "p95_alpha": float(np.percentile(values, 95.0)) if values.size else 0.0,
+        "max_alpha": float(values.max()) if values.size else 0.0,
+        "component_min_area": int(min_area),
+        "components": components[:12],
+        "support_components": anchored_support_components[:12],
+        "omitted_support_components": max(0, len(anchored_support_components) - 12),
+        "omitted_components": max(0, len(components) - 12),
+    }
+
+
+def _stabilize_pymatting_subject_foreground_for_export(
+    foreground_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    shadow_mask: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Extend stable subject RGB into soft colored UI edges.
+
+    Known-B straight-foreground solving divides by alpha. On low/mid-alpha UI
+    antialiasing this can amplify tiny alpha/background errors into saturated
+    purple or cyan stair-steps even when the alpha ramp itself is smooth. Fill
+    only non-shadow colored material edges from nearby high-alpha subject seeds;
+    alpha and the already measured shadow mask remain unchanged.
+    """
+    fg = foreground_srgb.astype(np.uint8, copy=True)
+    a = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    shadow = np.asarray(shadow_mask, dtype=bool)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    off_channels = bg < max(8.0, float(bg.max()) * 0.12)
+    if not bool(off_channels.any()):
+        return fg, {
+            "used": False,
+            "reason": "no off-background material channel",
+            "filled_pixels": 0,
+        }
+
+    off = np.where(off_channels.reshape(1, 1, 3), fg.astype(np.float32), 0.0).max(axis=-1)
+    material_threshold = float(min(220.0, max(140.0, float(bg.max()) * 0.70)))
+    seeds = (a >= 0.95) & (~shadow) & (off >= material_threshold)
+    candidate = (a > 1.0 / 255.0) & (a < 0.95) & (~shadow) & (off >= material_threshold)
+    from scipy import ndimage
+
+    # This is an edge RGB repair, not an interior material recolor. The failure
+    # mode it protects is broad PyMatting unknown interiors: they can be
+    # alpha~0.9 and foreground-colored, but their alpha is locally flat. True
+    # foreground division artifacts sit on a local alpha transition. Derive the
+    # transition cutoff from the candidate alpha-range histogram instead of a
+    # sample-specific opacity threshold.
+    local_min = ndimage.minimum_filter(a, size=5, mode="nearest")
+    local_max = ndimage.maximum_filter(a, size=5, mode="nearest")
+    local_alpha_range = local_max - local_min
+    edge_values = local_alpha_range[candidate]
+    edge_threshold = _otsu_positive_threshold(edge_values)
+    if edge_threshold is None:
+        edge_threshold = float(np.percentile(edge_values, 75.0)) if edge_values.size else 0.0
+    edge_threshold = max(float(edge_threshold), 1.0 / 255.0)
+    edge_like = candidate & (local_alpha_range >= edge_threshold)
+    edge_dominance = float(edge_like.sum()) / max(float(candidate.sum()), 1.0)
+    exterior = a <= (1.0 / 255.0)
+    if bool(exterior.any()):
+        dist_to_exterior = ndimage.distance_transform_edt(~exterior)
+        distance_values = dist_to_exterior[edge_like].astype(np.float32)
+        distance_threshold = _otsu_positive_threshold(distance_values)
+        if distance_threshold is None:
+            distance_threshold = float(np.percentile(distance_values, 75.0)) if distance_values.size else 0.0
+        distance_threshold = max(float(distance_threshold), 1.0)
+        # Alpha changes inside a UI control are material boundaries, not matte
+        # boundaries. Require edge-like foreground RGB repairs to sit in the
+        # exterior-contact band of the matte so highlight seams and broad
+        # opaque-ish interiors cannot be recolored.
+        exterior_contact = dist_to_exterior <= distance_threshold
+    else:
+        distance_threshold = 0.0
+        exterior_contact = np.zeros(a.shape, dtype=bool)
+    fill = edge_like & exterior_contact
+    info: dict[str, Any] = {
+        "used": True,
+        "material_threshold_u8": material_threshold,
+        "seed_pixels": int(seeds.sum()),
+        "candidate_pre_edge_pixels": int(candidate.sum()),
+        "edge_like_pixels": int(edge_like.sum()),
+        "candidate_pixels": int(fill.sum()),
+        "filled_pixels": 0,
+        "local_alpha_range_threshold": float(edge_threshold),
+        "exterior_distance_threshold_px": float(distance_threshold),
+        "edge_dominance": float(edge_dominance),
+        "reason": "",
+    }
+    if not bool(seeds.any()):
+        info["reason"] = "no stable subject material seed"
+        return fg, info
+    if bool(candidate.any()) and edge_dominance < 0.50:
+        # A foreground RGB repair is safe when the candidate set is dominated
+        # by actual matte-edge transition pixels. When most candidates are
+        # locally flat, the path is seeing interior material or shadow-colored
+        # regions; filling even the exterior-contact subset then creates
+        # sample-wide color shifts on heavy-shadow UI controls.
+        info["reason"] = "foreground candidates not dominated by matte edge"
+        info["candidate_pixels"] = 0
+        return fg, info
+    if not bool(fill.any()):
+        return fg, info
+
+    _, nearest = ndimage.distance_transform_edt(~seeds, return_indices=True)
+    fg[fill] = fg[nearest[0][fill], nearest[1][fill]]
+    info["filled_pixels"] = int(fill.sum())
+    return fg, info
+
+
+def _pymatting_known_b_shadow_residue_from_source(
+    image_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Extract green/blue-screen shadow residue already absorbed by PyMatting.
+
+    PyMatting can assign high alpha to scalar-darkened known background pixels,
+    especially around UI contact shadows and inside transparent holes. Those
+    pixels are visually background-colored residue, not subject material. The
+    test below keys on the source pixel being reconstructable as
+    ``C_srgb ~= (1 - shadow) * B_srgb`` and on the PyMatting alpha still being
+    below fully opaque subject ownership; this keeps black outlines and other
+    hard subject pixels from being reclassified as shadows.
+    """
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    source_alpha = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    predicted = (1.0 - source_alpha[..., None]) * bg
+    err = np.abs(image_srgb.astype(np.float32) - predicted)
+    weights = np.where(bg >= 8.0, bg * bg, 0.0).astype(np.float32)
+    weight_sum = max(float(weights.sum()), 1e-6)
+    weighted_err = (err * weights).sum(axis=-1) / weight_sum
+    bg_signal = max(float((bg * weights).sum() / weight_sum), 1.0)
+    relative_err = weighted_err / np.maximum(source_alpha * bg_signal, 1.0)
+    thresholds = _pymatting_known_b_shadow_residue_thresholds(
+        image_srgb,
+        source_alpha=source_alpha,
+        subject_alpha=subject,
+        weighted_error=weighted_err,
+        background_color=background_color,
+    )
+    bg_flat = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    informative = np.asarray(thresholds["informative_channels"], dtype=bool).reshape(1, 1, 3)
+    channel_excess = np.where(informative, image_srgb.astype(np.float32) - bg_flat, 0.0).max(axis=-1)
+    off_background = np.asarray(thresholds["off_background_channels"], dtype=bool).reshape(1, 1, 3)
+    off_channel_excess = np.where(off_background, image_srgb.astype(np.float32) - bg_flat, 0.0).max(axis=-1)
+    foreground_off_channel = np.where(
+        off_background,
+        subject_foreground_srgb.astype(np.float32),
+        0.0,
+    ).max(axis=-1)
+    foreground_material = foreground_off_channel >= thresholds["subject_material_off_channel_u8"]
+    scalar_fit = (
+        (source_alpha >= thresholds["source_alpha_min"])
+        & (channel_excess <= thresholds["channel_excess_u8"])
+        # Most PyMatting shadow residue is semi-opaque, but enclosed-hole inner
+        # shadows can be solved as alpha=1. Let moderate scalar darkenings pass
+        # while keeping near-black/high-opacity subject outlines protected.
+        & ((subject < thresholds["subject_opaque_threshold"]) | (source_alpha <= thresholds["opaque_shadow_alpha_max"]))
+    )
+    strict_scalar_core = scalar_fit & (off_channel_excess <= thresholds["off_channel_excess_u8"])
+    # UI contact shadows are often rendered beneath antialiased subject edges,
+    # so their outer pixels can carry a little red/blue/yellow from the subject
+    # while the green/blue background channel still proves scalar darkening.
+    # Let those pixels support a component only when they are low-alpha fringe
+    # connected to a strict core; a colorful opaque subject has no such core.
+    scalar_support = scalar_fit & (
+        (off_channel_excess <= thresholds["off_channel_excess_u8"])
+        | (
+            (off_channel_excess <= thresholds["off_channel_support_excess_u8"])
+            & (subject < thresholds["subject_shadow_fringe_threshold"])
+            & ~foreground_material
+        )
+    )
+    subject_core = subject >= thresholds["subject_core_threshold"]
+    if bool(subject_core.any()):
+        dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+        near_px = thresholds["near_subject_px"]
+        near_subject = dist_to_core <= near_px
+    else:
+        dist_to_core = np.full(subject.shape, np.inf, dtype=np.float32)
+        near_px = 0.0
+        near_subject = np.zeros(subject.shape, dtype=bool)
+
+    candidate_pre_error = scalar_support & near_subject
+    relative_values = relative_err[candidate_pre_error].astype(np.float32)
+    relative_threshold = _otsu_positive_threshold(relative_values)
+    if relative_threshold is None:
+        relative_threshold = float(np.percentile(relative_values, 75.0)) if relative_values.size else 0.0
+    relative_threshold = max(float(relative_threshold), float(thresholds["weighted_error_u8"] / bg_signal))
+    low_error_core = strict_scalar_core & near_subject & (relative_err <= relative_threshold)
+    candidate = _grow_shadow_residue_from_core(
+        candidate_pre_error,
+        low_error_core,
+        support_px=float(thresholds["core_support_expand_px"]),
+    )
+    scalar_darkening = candidate | (strict_scalar_core & low_error_core)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    min_area = int(thresholds["component_min_area"])
+    kept = np.zeros(subject.shape, dtype=bool)
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        values = source_alpha[comp]
+        keep = bool(
+            area >= min_area
+            and values.size
+            and float(np.percentile(values, 90.0)) >= thresholds["component_source_alpha_p90_min"]
+        )
+        if keep:
+            kept |= comp
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "source_display_p90": float(np.percentile(values, 90.0)) if values.size else 0.0,
+                "subject_alpha_p90": float(np.percentile(subject[comp], 90.0)) if values.size else 0.0,
+                "keep": keep,
+            }
+        )
+    shadow_display = np.where(kept, source_alpha, 0.0).astype(np.float32)
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    return shadow_display, {
+        "enabled": True,
+        **thresholds,
+        "relative_error_threshold": float(relative_threshold),
+        "candidate_pre_error_pixels": int(candidate_pre_error.sum()),
+        "low_error_core_pixels": int((candidate_pre_error & low_error_core).sum()),
+        "source_display_pixels": int((source_alpha >= thresholds["source_alpha_min"]).sum()),
+        "scalar_darkening_pixels": int(scalar_darkening.sum()),
+        "foreground_material_pixels": int(foreground_material.sum()),
+        "subject_material_off_channel_u8": float(thresholds["subject_material_off_channel_u8"]),
+        "near_subject_px": float(near_px),
+        "core_support_expand_px": float(thresholds["core_support_expand_px"]),
+        "candidate_pixels": int(candidate.sum()),
+        "kept_pixels": int(kept.sum()),
+        "component_min_area": int(min_area),
+        "components": components[:12],
+        "omitted_components": max(0, len(components) - 12),
+        "reason": "" if bool(kept.any()) else "no scalar-darkening residue near subject",
+    }
+
+
+def _grow_shadow_residue_from_core(candidate: np.ndarray, low_error_core: np.ndarray, *, support_px: float) -> np.ndarray:
+    """Keep scalar-shadow support that is spatially anchored by a strict core.
+
+    Broad saturated UI subjects can satisfy the known-background darkening
+    equation in the dominant channel while failing off-channel evidence. Grow
+    only a short distance from strict scalar core pixels so antialiased shadow
+    fringes survive without letting an entire blue/yellow subject component
+    ride along as "shadow".
+    """
+    if not bool(candidate.any()) or not bool(low_error_core.any()):
+        return np.zeros(candidate.shape, dtype=bool)
+    dist_to_core = cv2.distanceTransform((~low_error_core).astype(np.uint8), cv2.DIST_L2, 3)
+    return candidate & (dist_to_core <= max(0.0, float(support_px)))
+
+
+def _keep_shadow_residue_components(candidate: np.ndarray, low_error_core: np.ndarray) -> np.ndarray:
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    kept = np.zeros(candidate.shape, dtype=bool)
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        core_fraction = float((comp & low_error_core).sum()) / float(area)
+        # Component continuity is a structural signal: source shadows can carry
+        # generated texture/noise, but a component with a substantial low-error
+        # scalar-darkening core should stay one shadow layer instead of being
+        # punched into speckles by per-pixel fit noise.
+        if core_fraction >= 0.30:
+            kept |= comp
+    return kept
+
+
+def _pymatting_known_b_shadow_residue_thresholds(
+    image_srgb: np.ndarray,
+    *,
+    source_alpha: np.ndarray,
+    subject_alpha: np.ndarray,
+    weighted_error: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> dict[str, Any]:
+    """Derive PyMatting shadow-residue gates from this image.
+
+    The calibration uses border pixels as the current image's false-positive
+    baseline for scalar darkening and reconstruction error. Subject-alpha gates
+    come from the solved alpha distribution, while spatial reach and component
+    area scale with the detected subject footprint. Small additive floors are
+    8-bit quantization guards, not sample tuning values.
+    """
+    h, w = subject_alpha.shape
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    informative_channels = bg >= max(8.0, float(bg.max()) * 0.12)
+    if not bool(informative_channels.any()):
+        informative_channels = bg == bg.max()
+    # Scalar shadow can only reduce the known background channels. On saturated
+    # UI screens this is the main counter-signal for colorful subject material:
+    # a blue button on green B has a low green channel that looks like darkened
+    # background, but its blue off-channel energy cannot be produced by shadow.
+    off_background_channels = bg < max(8.0, float(bg.max()) * 0.12)
+    border = _image_border_mask((h, w))
+    border_source = source_alpha[border].astype(np.float32)
+    if border_source.size == 0:
+        border_source = source_alpha.reshape(-1).astype(np.float32)
+
+    source_floor = float(np.percentile(border_source, 99.5)) if border_source.size else 0.0
+    source_mad = _median_abs_deviation(border_source)
+    source_alpha_min = max(1.0 / 255.0, source_floor + max(1.0 / 255.0, 3.0 * source_mad))
+
+    bg_like = border & (source_alpha <= source_alpha_min)
+    if not bool(bg_like.any()):
+        bg_like = border
+    bg_flat = bg.reshape(1, 1, 3)
+    excess = np.where(informative_channels.reshape(1, 1, 3), image_srgb.astype(np.float32) - bg_flat, 0.0).max(axis=-1)
+    excess_baseline = excess[bg_like].astype(np.float32)
+    channel_excess_u8 = float(np.percentile(excess_baseline, 99.5)) + max(2.0, 3.0 * _median_abs_deviation(excess_baseline))
+    off_excess = np.where(
+        off_background_channels.reshape(1, 1, 3),
+        image_srgb.astype(np.float32) - bg_flat,
+        0.0,
+    ).max(axis=-1)
+    off_excess_baseline = off_excess[bg_like].astype(np.float32)
+    off_channel_excess_u8 = (
+        float(np.percentile(off_excess_baseline, 99.5)) + max(3.0, 4.0 * _median_abs_deviation(off_excess_baseline))
+        if bool(off_background_channels.any()) and off_excess_baseline.size
+        else 255.0
+    )
+    # Experience-driven support allowance keyed to observable topology: B007/B037
+    # contact shadows have a strict scalar core plus an edge band contaminated
+    # by nearby subject antialiasing. The 128 cap admits blue/cyan fringe values
+    # while still excluding saturated UI material near 255 unless it has a true
+    # scalar core anchor and clears the visible-shadow component gate.
+    off_channel_support_excess_u8 = (
+        min(128.0, max(off_channel_excess_u8 + 24.0, float(bg.max()) * 0.65))
+        if bool(off_background_channels.any())
+        else 255.0
+    )
+    # If the recovered foreground already has strong non-background-channel
+    # material color, the pixel belongs to the subject edge, not to the shadow
+    # support band. This protects blue/yellow button antialiasing while allowing
+    # dark green/cyan residue with weak recovered foreground to be neutralized.
+    subject_material_off_channel_u8 = float(
+        min(220.0, max(140.0, float(bg.max()) * 0.70))
+        if bool(off_background_channels.any())
+        else 255.0
+    )
+    weighted_baseline = weighted_error[bg_like].astype(np.float32)
+    weighted_mad = _median_abs_deviation(weighted_baseline)
+    weighted_error_u8 = float(np.percentile(weighted_baseline, 99.5)) + max(1.5, 4.0 * weighted_mad)
+
+    nonzero_alpha = subject_alpha[subject_alpha > (1.0 / 255.0)]
+    subject_core_threshold = _otsu_unit_interval(nonzero_alpha, fallback=0.50)
+    subject_opaque_threshold = float(np.percentile(nonzero_alpha, 99.0)) if nonzero_alpha.size else 0.98
+    subject_opaque_threshold = float(np.clip(subject_opaque_threshold - max(1.0 / 255.0, _median_abs_deviation(nonzero_alpha)), 0.90, 0.995))
+    # The fringe threshold is deliberately below opaque subject ownership but
+    # above the core split: colored UI shadows can be solved by PyMatting as a
+    # mid/high-alpha edge. Spatial anchoring to strict scalar core remains the
+    # real protection against reclassifying the whole subject.
+    subject_shadow_fringe_threshold = float(
+        min(0.88, max(subject_core_threshold, subject_opaque_threshold - 0.12))
+    )
+    # Let the anchored support cover a realistic generated hard-shadow edge.
+    # This is scale-based rather than sample-specific: at 128px UI height the
+    # contaminated contact-shadow fringe can be around 8-13px wide, while larger
+    # inputs are capped so support cannot drift across broad subject material.
+    core_support_expand_px = float(np.clip(0.10 * float(min(h, w)), 4.0, 14.0))
+
+    subject_core = subject_alpha >= subject_core_threshold
+    if bool(subject_core.any()):
+        ys, xs = np.nonzero(subject_core)
+        width = float(xs.max() - xs.min() + 1)
+        height = float(ys.max() - ys.min() + 1)
+        footprint = max(1.0, float(np.sqrt(float(subject_core.sum()))))
+        near_subject_px = float(np.clip(0.45 * max(width, height), 0.08 * min(h, w), 0.40 * max(h, w)))
+        component_min_area = max(4, int(round((footprint * 0.045) ** 2)))
+    else:
+        near_subject_px = 0.0
+        component_min_area = max(4, int(round(float(h * w) * 0.00002)))
+
+    foreground_like = subject_alpha >= subject_opaque_threshold
+    foreground_source = source_alpha[foreground_like]
+    if foreground_source.size:
+        # The lower tail of fully opaque scalar-darkening candidates often
+        # contains inner shadows; the upper tail is dominated by black outlines.
+        opaque_shadow_alpha_max = float(np.percentile(foreground_source, 90.0))
+    else:
+        opaque_shadow_alpha_max = float(np.percentile(source_alpha, 95.0))
+    opaque_shadow_alpha_max = float(np.clip(opaque_shadow_alpha_max, source_alpha_min, 0.95))
+
+    return {
+        "source_alpha_min": float(source_alpha_min),
+        "weighted_error_u8": float(weighted_error_u8),
+        "channel_excess_u8": float(channel_excess_u8),
+        "informative_channels": [bool(v) for v in informative_channels.tolist()],
+        "off_channel_excess_u8": float(off_channel_excess_u8),
+        "off_channel_support_excess_u8": float(off_channel_support_excess_u8),
+        "off_background_channels": [bool(v) for v in off_background_channels.tolist()],
+        "subject_material_off_channel_u8": float(subject_material_off_channel_u8),
+        "core_support_expand_px": float(core_support_expand_px),
+        "subject_core_threshold": float(subject_core_threshold),
+        "subject_shadow_fringe_threshold": float(subject_shadow_fringe_threshold),
+        "subject_opaque_threshold": float(subject_opaque_threshold),
+        "opaque_shadow_alpha_max": float(opaque_shadow_alpha_max),
+        # Component-level strength must clear an export-visible floor. Without
+        # this, saturated subjects with tiny channel quantization differences
+        # can anchor a broad false shadow, as in no-shadow blue UI buttons.
+        "component_source_alpha_p90_min": float(max(source_alpha_min, 10.0 / 255.0)),
+        "component_min_area": int(component_min_area),
+        "near_subject_px": float(near_subject_px),
+    }
+
+
+def _image_border_mask(shape: tuple[int, int]) -> np.ndarray:
+    h, w = shape
+    band = max(2, min(10, int(round(min(h, w) * 0.06))))
+    mask = np.zeros((h, w), dtype=bool)
+    mask[:band, :] = True
+    mask[-band:, :] = True
+    mask[:, :band] = True
+    mask[:, -band:] = True
+    return mask
+
+
+def _median_abs_deviation(values: np.ndarray) -> float:
+    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    if vals.size == 0:
+        return 0.0
+    med = float(np.median(vals))
+    return float(np.median(np.abs(vals - med)))
+
+
+def _otsu_unit_interval(values: np.ndarray, *, fallback: float) -> float:
+    vals = np.asarray(values, dtype=np.float32)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 16:
+        return float(fallback)
+    hist, edges = np.histogram(np.clip(vals, 0.0, 1.0), bins=96, range=(0.0, 1.0))
+    total = float(hist.sum())
+    if total <= 0:
+        return float(fallback)
+    centers = (edges[:-1] + edges[1:]) * 0.5
+    weight_bg = np.cumsum(hist).astype(np.float64)
+    weight_fg = total - weight_bg
+    valid = (weight_bg > 0) & (weight_fg > 0)
+    if not bool(valid.any()):
+        return float(fallback)
+    sum_bg = np.cumsum(hist * centers)
+    sum_total = float(sum_bg[-1])
+    mean_bg = np.zeros_like(sum_bg, dtype=np.float64)
+    mean_fg = np.zeros_like(sum_bg, dtype=np.float64)
+    mean_bg[valid] = sum_bg[valid] / weight_bg[valid]
+    mean_fg[valid] = (sum_total - sum_bg[valid]) / weight_fg[valid]
+    between = np.zeros_like(mean_bg)
+    between[valid] = weight_bg[valid] * weight_fg[valid] * (mean_bg[valid] - mean_fg[valid]) ** 2
+    threshold = float(centers[int(np.argmax(between))])
+    return float(np.clip(threshold, 0.15, 0.85))
+
+
+def _otsu_positive_threshold(values: np.ndarray) -> float | None:
+    vals = np.asarray(values, dtype=np.float32)
+    vals = vals[np.isfinite(vals) & (vals >= 0.0)]
+    if vals.size < 16:
+        return None
+    hi = float(np.percentile(vals, 99.0))
+    if hi <= 0.0:
+        return None
+    hist, edges = np.histogram(np.clip(vals, 0.0, hi), bins=96, range=(0.0, hi))
+    total = float(hist.sum())
+    if total <= 0:
+        return None
+    centers = (edges[:-1] + edges[1:]) * 0.5
+    weight_bg = np.cumsum(hist).astype(np.float64)
+    weight_fg = total - weight_bg
+    valid = (weight_bg > 0) & (weight_fg > 0)
+    if not bool(valid.any()):
+        return None
+    sum_bg = np.cumsum(hist * centers)
+    sum_total = float(sum_bg[-1])
+    mean_bg = np.zeros_like(sum_bg, dtype=np.float64)
+    mean_fg = np.zeros_like(sum_bg, dtype=np.float64)
+    mean_bg[valid] = sum_bg[valid] / weight_bg[valid]
+    mean_fg[valid] = (sum_total - sum_bg[valid]) / weight_fg[valid]
+    between = np.zeros_like(mean_bg)
+    between[valid] = weight_bg[valid] * weight_fg[valid] * (mean_bg[valid] - mean_fg[valid]) ** 2
+    return float(centers[int(np.argmax(between))])
+
+
+def _corridorkey_shadow_patch(
+    image_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    shadow_mode: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Add a measured known-background shadow layer below CorridorKey output.
+
+    CorridorKey is treated as the subject owner and this patch never edits its
+    subject alpha. It only measures exterior scalar darkening against the known
+    screen color, then flattens a black shadow layer behind the subject for
+    single-PNG export. This protects against the blue-screen failure class where
+    CorridorKey keeps the hard subject edge but drops the soft contact shadow.
+    """
+    from .shadow import (
+        ShadowThresholds,
+        composite_subject_with_shadow,
+        estimate_shadow_alpha,
+        remove_small_display_shadow_components,
+        shadow_alpha_to_display_alpha,
+    )
+
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    if shadow_mode == "off":
+        empty = np.zeros(subject.shape, dtype=np.float32)
+        info = {
+            "mode": shadow_mode,
+            "source": "corridorkey_shadow_patch",
+            "detected": False,
+            "applied": False,
+            "reason": "shadow_mode=off",
+        }
+        return subject, subject_foreground_srgb, empty, empty, info
+
+    # CorridorKey already owns the hard subject. For this patch we deliberately
+    # use a broader known-B support than the generic matte path: the trigger
+    # gate below stays conservative, but once a real missing cast shadow is
+    # confirmed we want to cover the whole soft tail. Any overlap with the
+    # subject is removed during the layer composite.
+    shadow_physical, info = estimate_shadow_alpha(
+        image_srgb,
+        subject,
+        background_color,
+        thresholds=ShadowThresholds(
+            min_strength=0.06,
+            loose_min_strength=0.001,
+            max_reconstruction_error=0.085,
+            loose_error_multiplier=1.8,
+            max_distance_ratio=0.20,
+            max_distance_px=240,
+            loose_distance_multiplier=2.4,
+            min_component_area_ratio=0.00025,
+            min_total_area_ratio=0.0015,
+            boundary_falloff_px=36.0,
+            contact_distance_ratio=0.05,
+            contact_distance_px=56,
+            contact_outer_feather_px=14.0,
+        ),
+    )
+    info = dict(info)
+    info["mode"] = shadow_mode
+    info["source"] = "corridorkey_shadow_patch"
+    shadow_display = shadow_alpha_to_display_alpha(shadow_physical, background_color)
+    if info.get("detected"):
+        min_display_shadow_area = float(
+            max(8.0, float(ShadowThresholds().min_total_area_ratio) * float(subject.size))
+        )
+        shadow_display, display_filter_info = remove_small_display_shadow_components(
+            shadow_display,
+            min_area=min_display_shadow_area,
+        )
+        physical_mask = shadow_physical > 0.0
+        info["display_safe"] = {
+            "enabled": True,
+            "mean_alpha": float(shadow_display[physical_mask].mean()) if physical_mask.any() else 0.0,
+            "p95_alpha": float(np.percentile(shadow_display[physical_mask], 95.0)) if physical_mask.any() else 0.0,
+            "max_alpha": float(shadow_display[physical_mask].max()) if physical_mask.any() else 0.0,
+            **display_filter_info,
+        }
+        if not bool((shadow_display > 0.0).any()):
+            info["detected"] = False
+            info["applied"] = False
+            info["reason"] = "display shadow below minimum area"
+
+    shadow_display, patch_gate = _corridorkey_shadow_patch_gate(subject, shadow_display, info)
+    info["patch_gate"] = patch_gate
+    if not patch_gate["apply"]:
+        info["applied"] = False
+        info["reason"] = patch_gate["reason"]
+        shadow_display = np.zeros(subject.shape, dtype=np.float32)
+        shadow_physical = np.zeros(subject.shape, dtype=np.float32)
+    else:
+        shadow_display, source_refine_info = _refine_shadow_display_from_source_pixels(
+            image_srgb,
+            background_color,
+            shadow_display,
+            subject,
+        )
+        info["patch_gate"]["source_reprojection"] = source_refine_info
+        shadow_physical = _display_shadow_alpha_to_physical_alpha(shadow_display, background_color)
+
+    foreground_linear = ermbg_io.srgb_to_linear(subject_foreground_srgb)
+    if patch_gate["apply"]:
+        info["applied"] = True
+        # CorridorKey owns the subject; this patch owns only shadow repair.
+        # Low CK alpha in accepted shadow support is often shadow residue, but
+        # low alpha glued to a real subject core is still subject AA. Keep that
+        # subject edge above the repaired shadow layer and clear only exterior
+        # residue before flattening the two layers into the single PNG alpha.
+        shadow_patch_alpha_max = 0.25
+        shadow_display, near_subject_info = _refine_near_subject_shadow_from_source_pixels(
+            shadow_display,
+            subject,
+            image_srgb,
+            background_color,
+            subject_foreground_srgb,
+        )
+        subject_edge_ownership = _corridorkey_subject_edge_ownership(subject, shadow_display > 0.0)
+        shadow_layer_execution = (
+            (shadow_display > 0.0)
+            & ((subject <= shadow_patch_alpha_max) | subject_edge_ownership)
+        )
+        blocked_by_subject = (shadow_display > 0.0) & ~shadow_layer_execution
+        shadow_display = np.where(shadow_layer_execution, shadow_display, 0.0).astype(np.float32)
+        shadow_physical = np.where(
+            shadow_layer_execution,
+            _display_shadow_alpha_to_physical_alpha(shadow_display, background_color),
+            0.0,
+        ).astype(np.float32)
+        residue_execution = shadow_layer_execution & (subject <= shadow_patch_alpha_max) & ~subject_edge_ownership
+        subject_for_shadow = np.where(residue_execution, 0.0, subject).astype(np.float32)
+        info["patch_gate"]["shadow_patch_subject_alpha_max"] = float(shadow_patch_alpha_max)
+        info["patch_gate"]["near_subject_reprojection"] = near_subject_info
+        info["patch_gate"]["shadow_patch_pixels_blocked_by_subject_alpha"] = int(blocked_by_subject.sum())
+        info["patch_gate"]["corridorkey_subject_edge_pixels_preserved"] = int(subject_edge_ownership.sum())
+        info["patch_gate"]["corridorkey_shadow_residue_pixels_removed"] = int(
+            (residue_execution & (subject > 0.0)).sum()
+        )
+        alpha, rgba_rgb_linear = composite_subject_with_shadow(
+            foreground_linear,
+            subject_for_shadow,
+            shadow_display,
+            # This is a literal layer stack: shadow below, CorridorKey subject
+            # above. Near-subject source reprojection closes contact gaps before
+            # the stack, so extra occluder blur would only muddy hard UI edges.
+            subject_occlusion_blur_sigma=0.0,
+        )
+        rgba_rgb_srgb = ermbg_io.linear_to_srgb_u8(rgba_rgb_linear)
+    else:
+        alpha = subject
+        rgba_rgb_srgb = subject_foreground_srgb
+        shadow_display = np.zeros(subject.shape, dtype=np.float32)
+        shadow_physical = np.zeros(subject.shape, dtype=np.float32)
+
+    return (
+        alpha.astype(np.float32),
+        rgba_rgb_srgb,
+        shadow_display.astype(np.float32),
+        shadow_physical.astype(np.float32),
+        info,
+    )
+
+
+def _refine_near_subject_shadow_from_source_pixels(
+    shadow_display: np.ndarray,
+    subject_alpha: np.ndarray,
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    subject_foreground_srgb: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Reproject all near-subject shadow pixels from the source image.
+
+    Near a hard UI subject, source pixels may be pure shadow, subject AA over
+    shadow, or a one-pixel support gap between the two. Treat them uniformly by
+    solving C ~= a*F + (1-a)*(1-shadow)*B wherever there is nearby subject and
+    nearby shadow evidence. CorridorKey still owns the subject layer; this only
+    repairs the shadow layer underneath it.
+    """
+    shadow = np.clip(shadow_display.astype(np.float32), 0.0, 1.0)
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    shadow_mask = shadow > 0.0
+    subject_core = subject >= 0.50
+    if not bool(shadow_mask.any()) or not bool(subject_core.any()):
+        return shadow, {
+            "enabled": True,
+            "repair_pixels": 0,
+            "source_reproject_pixels": 0,
+            "source_added_pixels": 0,
+            "existing_shadow_pixels": 0,
+            "reason": "missing shadow or subject core",
+        }
+
+    dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+    dist_to_shadow = cv2.distanceTransform((~shadow_mask).astype(np.uint8), cv2.DIST_L2, 3)
+    near_core = dist_to_core <= 3.0
+    near_shadow = dist_to_shadow <= 3.0
+    source_shadow = _known_bg_display_shadow_alpha_under_subject(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject,
+    )
+    source_visible = source_shadow >= (1.5 / 255.0)
+    repair_domain = near_core & near_shadow & (subject < 0.50) & (shadow_mask | source_visible)
+    if not bool(repair_domain.any()):
+        return shadow, {
+            "enabled": True,
+            "repair_pixels": 0,
+            "source_reproject_pixels": 0,
+            "source_added_pixels": 0,
+            "existing_shadow_pixels": 0,
+            "reason": "",
+        }
+    out = shadow.copy()
+    before_error = _near_subject_shadow_reprojection_error(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject,
+        out,
+        repair_domain,
+    )
+    source_reproject = repair_domain & (source_shadow > 0.0)
+    out[source_reproject] = source_shadow[source_reproject]
+    contact_gap = near_core & near_shadow & (subject < 0.08) & ~shadow_mask & ~source_visible
+    if bool(contact_gap.any()):
+        # UI shadow renderers often leave a subpixel strip of unchanged screen
+        # color between a hard antialiased subject and the first measurable
+        # shadow texel. After background removal that strip becomes a white
+        # preview gap. Bridge only pixels caught between an accepted shadow and
+        # a subject core; this cannot create shadows in B036-style no-shadow
+        # cases because it needs an existing shadow component nearby.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        borrowed_shadow = cv2.dilate(shadow, kernel)
+        falloff = np.clip(1.0 - (dist_to_shadow / 3.0), 0.0, 1.0).astype(np.float32)
+        bridged = np.minimum(borrowed_shadow * falloff * 0.90, 0.45).astype(np.float32)
+        bridge_pixels = contact_gap & (bridged >= (1.0 / 255.0))
+        bridge_fraction_of_repair = float(bridge_pixels.sum()) / max(float(repair_domain.sum()), 1.0)
+        bridge_fraction_of_shadow = float(bridge_pixels.sum()) / max(float(shadow_mask.sum()), 1.0)
+        # Contact-gap bridging is a seam repair. If it becomes a large fraction
+        # of the near-subject repair domain or accepted shadow, it is no longer
+        # filling isolated subpixel holes; it is expanding the cast shadow along
+        # the whole UI outline, which creates unstable grey rims on heavy-shadow
+        # buttons. These empirical gates key on the repair's own scale rather
+        # than any sample id or color.
+        bridge_rejected_as_expansion = bool(
+            bridge_fraction_of_repair > 0.12 or bridge_fraction_of_shadow > 0.05
+        )
+        if bridge_rejected_as_expansion:
+            rejected_bridge_pixels = bridge_pixels
+            bridge_pixels = np.zeros(shadow.shape, dtype=bool)
+        else:
+            rejected_bridge_pixels = np.zeros(shadow.shape, dtype=bool)
+        out[bridge_pixels] = np.maximum(out[bridge_pixels], bridged[bridge_pixels])
+    else:
+        bridge_pixels = np.zeros(shadow.shape, dtype=bool)
+        rejected_bridge_pixels = np.zeros(shadow.shape, dtype=bool)
+        bridge_fraction_of_repair = 0.0
+        bridge_fraction_of_shadow = 0.0
+        bridge_rejected_as_expansion = False
+    after_error = _near_subject_shadow_reprojection_error(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject,
+        out,
+        repair_domain,
+    )
+    improvement = before_error - after_error
+    if improvement < max(0.12, before_error * 0.20):
+        # Source reprojection is a repair, not a stylistic preference. B037-like
+        # contact gaps show a clear reconstruction win; B007-like yellow/white
+        # UI edges can satisfy the same geometry while barely improving the
+        # source fit, and changing them creates visible material damage.
+        return shadow, {
+            "enabled": True,
+            "repair_pixels": int(repair_domain.sum()),
+            "source_reproject_pixels": 0,
+            "source_added_pixels": 0,
+            "contact_gap_bridge_pixels": 0,
+            "existing_shadow_pixels": int((repair_domain & shadow_mask).sum()),
+            "mean_abs_error_before_u8": before_error,
+            "mean_abs_error_after_u8": after_error,
+            "rejected_source_reproject_pixels": int(source_reproject.sum()),
+            "rejected_contact_gap_bridge_pixels": int((bridge_pixels | rejected_bridge_pixels).sum()),
+            "contact_gap_bridge_fraction_of_repair": float(bridge_fraction_of_repair),
+            "contact_gap_bridge_fraction_of_shadow": float(bridge_fraction_of_shadow),
+            "contact_gap_bridge_rejected_as_expansion": bool(bridge_rejected_as_expansion),
+            "reason": "source reprojection did not significantly improve fit",
+        }
+    return np.clip(out, 0.0, 1.0).astype(np.float32), {
+        "enabled": True,
+        "repair_pixels": int(repair_domain.sum()),
+        "source_reproject_pixels": int(source_reproject.sum()),
+        "source_added_pixels": int((source_reproject & ~shadow_mask).sum()),
+        "contact_gap_bridge_pixels": int(bridge_pixels.sum()),
+        "rejected_contact_gap_bridge_pixels": int(rejected_bridge_pixels.sum()),
+        "contact_gap_bridge_fraction_of_repair": float(bridge_fraction_of_repair),
+        "contact_gap_bridge_fraction_of_shadow": float(bridge_fraction_of_shadow),
+        "contact_gap_bridge_rejected_as_expansion": bool(bridge_rejected_as_expansion),
+        "existing_shadow_pixels": int((repair_domain & shadow_mask).sum()),
+        "mean_abs_error_before_u8": before_error,
+        "mean_abs_error_after_u8": after_error,
+        "reason": "",
+    }
+
+
+def _known_bg_display_shadow_alpha_under_subject(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    subject_foreground_srgb: np.ndarray,
+    subject_alpha: np.ndarray,
+) -> np.ndarray:
+    """Solve display shadow alpha below an existing CorridorKey subject layer."""
+    image = image_srgb.astype(np.float32)
+    foreground = subject_foreground_srgb.astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    base = (1.0 - subject[..., None]) * bg
+    residual = image - subject[..., None] * foreground
+    usable = base >= 4.0
+    weights = np.where(usable, base * base, 0.0).astype(np.float32)
+    weight_sum = np.maximum(weights.sum(axis=-1), 1e-6)
+    channel_alpha = 1.0 - residual / np.maximum(base, 1.0)
+    alpha = (channel_alpha * weights).sum(axis=-1) / weight_sum
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+
+def _near_subject_shadow_reprojection_error(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    subject_foreground_srgb: np.ndarray,
+    subject_alpha: np.ndarray,
+    shadow_display: np.ndarray,
+    support: np.ndarray,
+) -> float:
+    pixels = int(support.sum())
+    if pixels <= 0:
+        return 0.0
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    shadow = np.clip(shadow_display.astype(np.float32), 0.0, 1.0)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    foreground = subject_foreground_srgb.astype(np.float32)
+    predicted = subject[..., None] * foreground + (1.0 - subject[..., None]) * (1.0 - shadow[..., None]) * bg
+    base = (1.0 - subject[..., None]) * bg
+    weights = np.where(base >= 4.0, base * base, 0.0).astype(np.float32)
+    weight_sum = np.maximum(weights.sum(axis=-1), 1e-6)
+    err = np.abs(predicted - image_srgb.astype(np.float32))
+    weighted = (err * weights).sum(axis=-1) / weight_sum
+    return float(weighted[support].mean())
+
+
+def _corridorkey_subject_edge_ownership(subject_alpha: np.ndarray, shadow_execution: np.ndarray) -> np.ndarray:
+    """Keep CorridorKey-owned subject AA where the shadow patch touches it.
+
+    CorridorKey is still the subject owner. ShadowPatch may erase low CK alpha
+    in exterior shadow support because that residue is often a weak, banded
+    shadow estimate. The exception is low alpha glued to a real subject core:
+    that is the subject antialiasing the user already trusts from CorridorKey,
+    so the shadow layer should sit underneath instead of replacing it.
+    """
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    subject_core = subject >= 0.50
+    if not bool(subject_core.any()):
+        return np.zeros(subject.shape, dtype=bool)
+    dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+    return (
+        np.asarray(shadow_execution, dtype=bool)
+        & (subject >= 0.015)
+        & (subject < 0.50)
+        & (dist_to_core <= 2.5)
+    )
+
+
+def _pymatting_subject_edge_ownership(
+    subject_alpha: np.ndarray,
+    shadow_execution: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Preserve only PyMatting subject AA whose recovered color is material-like.
+
+    Shadow repair is allowed to clear low-alpha residue, but a real UI subject
+    edge should remain above the shadow. Known-B foreground solving is
+    underdetermined when a material shares the screen's dominant channel: a
+    yellow/white edge over green can recover as magenta. Compare only the
+    non-background channels against the nearest high-alpha material seed; if
+    those channels disagree, the low-alpha pixel is safer to treat as residue
+    than as subject AA.
+    """
+    base = _corridorkey_subject_edge_ownership(subject_alpha, shadow_execution)
+    info: dict[str, Any] = {
+        "enabled": True,
+        "base_pixels": int(base.sum()),
+        "kept_pixels": 0,
+        "rejected_by_material_pixels": 0,
+        "reason": "",
+    }
+    if not bool(base.any()):
+        return base, info
+
+    from scipy import ndimage
+
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    fg = subject_foreground_srgb.astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    off_channels = bg < max(8.0, float(bg.max()) * 0.12)
+    if not bool(off_channels.any()):
+        info["kept_pixels"] = int(base.sum())
+        info["reason"] = "no off-background material channel"
+        return base, info
+
+    off_fg = fg[..., off_channels]
+    off_strength = off_fg.max(axis=-1)
+    material_threshold = float(min(220.0, max(140.0, float(bg.max()) * 0.70)))
+    seeds = (subject >= 0.95) & (off_strength >= material_threshold)
+    if not bool(seeds.any()):
+        info["reason"] = "no stable subject material seed"
+        return np.zeros(base.shape, dtype=bool), info
+
+    _, nearest = ndimage.distance_transform_edt(~seeds, return_indices=True)
+    nearest_off = off_fg[nearest[0], nearest[1]]
+    off_delta = np.max(np.abs(off_fg - nearest_off), axis=-1)
+    # Empirical but feature-based: compare the channels that are not part of
+    # the screen. B037-style blue edges stay within a small delta from nearby
+    # blue seeds, while B007-style yellow/white edges that solve as magenta
+    # disagree by well over 100 code values in the blue off-channel.
+    material_consistent = off_delta <= 72.0
+    kept = base & material_consistent
+    info.update(
+        {
+            "material_threshold_u8": material_threshold,
+            "off_channel_delta_max_u8": 72.0,
+            "seed_pixels": int(seeds.sum()),
+            "kept_pixels": int(kept.sum()),
+            "rejected_by_material_pixels": int((base & ~material_consistent).sum()),
+        }
+    )
+    return kept, info
+
+
+def _known_bg_display_shadow_alpha(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> np.ndarray:
+    """Invert the PNG display composite that users visually inspect.
+
+    Shadow extraction measures the physical known-background darkening in
+    linear RGB. The exported artifact, however, is a black RGBA layer that will
+    normally be composited by viewers in sRGB/display space. For hard shadows on
+    a known screen, the most direct target is therefore:
+
+        original_srgb ~= (1 - display_alpha) * background_srgb
+
+    This inverse is only used inside already accepted shadow support, so subject
+    colors with a coincidental background-channel ratio cannot create shadows on
+    their own.
+    """
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    image = image_srgb.astype(np.float32)
+    usable = bg >= 8.0
+    if not bool(usable.any()):
+        return np.zeros(image_srgb.shape[:2], dtype=np.float32)
+
+    weights = np.where(usable, bg * bg, 0.0).astype(np.float32)
+    weight_sum = np.maximum(float(weights.sum()), 1e-6)
+    channel_alpha = 1.0 - image / np.maximum(bg, 1.0)
+    alpha = (channel_alpha * weights).sum(axis=-1) / weight_sum
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+
+def _display_shadow_alpha_to_physical_alpha(
+    display_alpha: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> np.ndarray:
+    """Map display-space black alpha back to linear scalar-darkening strength."""
+    alpha = np.clip(display_alpha.astype(np.float32), 0.0, 1.0)
+    bg_u8 = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    bg_linear = ermbg_io.srgb_to_linear(bg_u8)[0, 0].astype(np.float32)
+    denom = max(float(np.dot(bg_linear, bg_linear)), 1e-6)
+    bg_srgb = bg_u8.astype(np.float32) / 255.0
+    shadowed_srgb = (1.0 - alpha[..., None]) * bg_srgb
+    shadowed_linear = ermbg_io.srgb_to_linear(np.clip(shadowed_srgb, 0.0, 1.0)).astype(np.float32)
+    scale = np.tensordot(shadowed_linear, bg_linear, axes=([-1], [0])) / denom
+    return np.clip(1.0 - scale, 0.0, 1.0).astype(np.float32)
+
+
+def _shadow_reprojection_error(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    display_alpha: np.ndarray,
+    support: np.ndarray,
+) -> float:
+    pixels = int(support.sum())
+    if pixels <= 0:
+        return 0.0
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    predicted = (1.0 - np.clip(display_alpha.astype(np.float32), 0.0, 1.0)[..., None]) * bg
+    usable = bg >= 8.0
+    weights = np.where(usable, bg * bg, 0.0).astype(np.float32)
+    weight_sum = np.maximum(float(weights.sum()), 1e-6)
+    err = np.abs(predicted - image_srgb.astype(np.float32))
+    weighted = (err * weights).sum(axis=-1) / weight_sum
+    return float(weighted[support].mean())
+
+
+def _refine_shadow_display_from_source_pixels(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    shadow_display: np.ndarray,
+    subject_alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Use source pixels as the shadow reconstruction target.
+
+    The accepted support says "this is exterior shadow"; the source image then
+    tells us what alpha the exported black layer needs so that placing the PNG
+    back over the same screen color reproduces the original pixels. A small
+    normalized blur suppresses 8-bit/compression noise inside the support while
+    preserving the measured support boundary by never expanding outside the
+    accepted mask.
+    """
+    initial_support = (shadow_display > 0.0) & (subject_alpha <= 0.25)
+    if not bool(initial_support.any()):
+        return np.zeros(shadow_display.shape, dtype=np.float32), {
+            "enabled": True,
+            "pixels": 0,
+            "reason": "empty accepted shadow support",
+        }
+
+    source_alpha = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    support_values = source_alpha[initial_support]
+    grow_floor = max(6.0 / 255.0, float(np.percentile(support_values, 50.0)) * 0.30)
+    rim_floor = 1.5 / 255.0
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    low_subject_bg = subject_alpha <= 0.25
+    # The detector/gate can lose the antialiasing rim of a hard shadow. The
+    # source pixels are the authority here: allow a two-pixel expansion for
+    # clearly darkened source pixels, then recover the connected low-alpha rim
+    # from the source itself so the exported shadow edge does not become a
+    # binary stair-step.
+    strong_grown_support = (
+        cv2.dilate(initial_support.astype(np.uint8), kernel, iterations=2).astype(bool)
+        & low_subject_bg
+        & (source_alpha >= grow_floor)
+    )
+    rim_candidates = low_subject_bg & (source_alpha >= rim_floor)
+    rim_seed = initial_support | strong_grown_support
+    rim_labels_count, rim_labels, _, _ = cv2.connectedComponentsWithStats(
+        rim_candidates.astype(np.uint8),
+        connectivity=8,
+    )
+    aa_rim_support = np.zeros(initial_support.shape, dtype=bool)
+    for rim_label in range(1, rim_labels_count):
+        comp = rim_labels == rim_label
+        if bool((comp & rim_seed).any()):
+            aa_rim_support |= comp
+    support = initial_support | strong_grown_support | aa_rim_support
+    out = np.zeros(shadow_display.shape, dtype=np.float32)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        support.astype(np.uint8),
+        connectivity=8,
+    )
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        if not bool(comp.any()):
+            continue
+        comp_source = np.where(comp, source_alpha, 0.0).astype(np.float32)
+        comp_weight = comp.astype(np.float32)
+        # Generated/PNG source shadows are usually smooth but can contain
+        # one-code-value channel noise. Normalized convolution inside the
+        # accepted component makes the patch follow the source gradient/plateau
+        # without growing into subject edges or background.
+        blurred_num = cv2.GaussianBlur(comp_source * comp_weight, (0, 0), sigmaX=0.65, sigmaY=0.65)
+        blurred_den = cv2.GaussianBlur(comp_weight, (0, 0), sigmaX=0.65, sigmaY=0.65)
+        smoothed = np.where(blurred_den > 1e-5, blurred_num / np.maximum(blurred_den, 1e-5), source_alpha)
+        refined = np.clip(0.78 * source_alpha + 0.22 * smoothed, 0.0, 1.0)
+        out[comp] = refined[comp]
+        values = source_alpha[comp]
+        components.append(
+            {
+                "area": int(stats[label, cv2.CC_STAT_AREA]),
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "source_display_mean": float(values.mean()) if values.size else 0.0,
+                "source_display_p50": float(np.percentile(values, 50.0)) if values.size else 0.0,
+                "source_display_p90": float(np.percentile(values, 90.0)) if values.size else 0.0,
+            }
+        )
+
+    before_error = _shadow_reprojection_error(image_srgb, background_color, shadow_display, support)
+    after_error = _shadow_reprojection_error(image_srgb, background_color, out, support)
+    return np.clip(out, 0.0, 1.0).astype(np.float32), {
+        "enabled": True,
+        "pixels": int(support.sum()),
+        "initial_pixels": int(initial_support.sum()),
+        "source_grown_pixels": int((support & ~initial_support).sum()),
+        "source_grow_floor": float(grow_floor),
+        "source_rim_floor": float(rim_floor),
+        "source_aa_rim_pixels": int((aa_rim_support & ~initial_support & ~strong_grown_support).sum()),
+        "mean_abs_error_before_u8": before_error,
+        "mean_abs_error_after_u8": after_error,
+        "components": components[:8],
+        "omitted_components": max(0, len(components) - 8),
+        "reason": "",
+    }
+
+
+def _corridorkey_shadow_patch_gate(
+    subject_alpha: np.ndarray,
+    shadow_display: np.ndarray,
+    shadow_info: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decide whether a CorridorKey shadow candidate is missing enough to patch.
+
+    The detector may find a real shadow even when CorridorKey already preserved
+    it as partial alpha. In that case adding another layer would double-darken
+    the result. This gate is intentionally stricter than the candidate extractor:
+    strong measured shadow evidence plus low existing CorridorKey alpha over
+    the visible shadow support is required before the patch is applied.
+    """
+    shadow_patch_subject_alpha_max = 0.25
+    empty = np.zeros(subject_alpha.shape, dtype=np.float32)
+    if not shadow_info.get("detected"):
+        return empty, {"apply": False, "reason": shadow_info.get("reason") or "no high-confidence shadow candidate"}
+
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    display = np.clip(shadow_display.astype(np.float32), 0.0, 1.0)
+    visible = (display >= (6.0 / 255.0)) & (subject <= 0.75)
+    pixels = int(visible.sum())
+    if pixels <= 0:
+        return empty, {"apply": False, "reason": "no visible exterior shadow support"}
+
+    img_area = float(subject_alpha.size)
+    area_ratio = float(pixels / max(1.0, img_area))
+    display_values = display[visible].astype(np.float32)
+    subject_values = subject[visible].astype(np.float32)
+    display_mean = float(display_values.mean())
+    display_p75 = float(np.percentile(display_values, 75.0))
+    display_p95 = float(np.percentile(display_values, 95.0))
+    subject_mean = float(subject_values.mean())
+    subject_p75 = float(np.percentile(subject_values, 75.0))
+    ratio_mean = subject_mean / max(display_mean, 1e-6)
+    ratio_p75 = subject_p75 / max(display_p75, 1e-6)
+
+    high_confidence = (
+        area_ratio >= 0.0015
+        and display_p95 >= 0.055
+        and int(shadow_info.get("accepted_components", 0)) >= 1
+    )
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        visible.astype(np.uint8),
+        connectivity=8,
+    )
+    kept = np.zeros(subject.shape, dtype=bool)
+    adjusted_display = display.copy()
+    component_details: list[dict[str, Any]] = []
+    min_component_pixels = max(8, int(round(img_area * 0.0015)))
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        comp_area_ratio = float(area / max(1.0, img_area))
+        bbox_width_ratio = float(width / max(1, subject.shape[1]))
+        bbox_height_ratio = float(height / max(1, subject.shape[0]))
+        comp = labels == label
+        comp_display = display[comp]
+        comp_subject = subject[comp]
+        comp_display_mean = float(comp_display.mean())
+        comp_display_p75 = float(np.percentile(comp_display, 75.0))
+        comp_display_p95 = float(np.percentile(comp_display, 95.0))
+        comp_subject_mean = float(comp_subject.mean())
+        comp_subject_p75 = float(np.percentile(comp_subject, 75.0))
+        comp_shadow_domain = comp & (subject <= shadow_patch_subject_alpha_max)
+        comp_shadow_domain_area = int(comp_shadow_domain.sum())
+        if comp_shadow_domain_area > 0:
+            domain_display = display[comp_shadow_domain]
+            domain_subject = subject[comp_shadow_domain]
+            domain_display_mean = float(domain_display.mean())
+            domain_display_p75 = float(np.percentile(domain_display, 75.0))
+            domain_display_p95 = float(np.percentile(domain_display, 95.0))
+            domain_subject_mean = float(domain_subject.mean())
+            domain_subject_p75 = float(np.percentile(domain_subject, 75.0))
+        else:
+            domain_display_mean = 0.0
+            domain_display_p75 = 0.0
+            domain_display_p95 = 0.0
+            domain_subject_mean = 0.0
+            domain_subject_p75 = 0.0
+        # ShadowPatch is a contact/cast-shadow repair under the CorridorKey
+        # subject layer. Broad vertical washes usually come from AI-generated
+        # non-flat screen backgrounds or subject-material residue, not an
+        # exterior ground shadow; applying a black layer there dirties the whole
+        # asset. Keep components with a shadow-like horizontal footprint.
+        shadow_like_shape = width >= max(6, int(round(height * 1.15)))
+        broad_low_contrast_wash = (
+            comp_area_ratio >= 0.18
+            and bbox_width_ratio >= 0.65
+            and bbox_height_ratio >= 0.50
+            and comp_display_p95 <= 0.12
+        )
+        comp_high_confidence = (
+            area >= min_component_pixels
+            and comp_display_p95 >= 0.055
+            and shadow_like_shape
+            and not broad_low_contrast_wash
+        )
+        # Mixed candidates can contain both a true cast shadow and subject
+        # outline antialiasing. Gate the missing-shadow claim on the low-alpha
+        # shadow domain only; medium/high CK alpha blocks patch execution later
+        # and should not suppress a genuinely under-reconstructed shadow tail.
+        clearly_missing = (
+            comp_shadow_domain_area >= min_component_pixels
+            and domain_subject_mean <= max(0.035, domain_display_mean * 0.45)
+            and domain_subject_p75 <= max(0.055, domain_display_p75 * 0.55)
+        )
+        # A hard UI shadow can be physically strong and smooth on the known
+        # screen, while CorridorKey keeps only a weak, visibly banded alpha
+        # residue. Treating any alpha as "preserved" leaves the poor CK estimate
+        # in the export. This broader branch still requires a high measured
+        # display shadow and less than roughly half of that opacity in CK alpha,
+        # so already-preserved shadows are not double-darkened.
+        under_reconstructed_shadow = (
+            comp_shadow_domain_area >= min_component_pixels
+            and domain_display_p75 >= 0.14
+            and domain_subject_mean <= max(0.055, domain_display_mean * 0.55)
+            and domain_subject_p75 <= max(0.085, domain_display_p75 * 0.55)
+        )
+        comp_missing = bool(clearly_missing or under_reconstructed_shadow)
+        comp_apply = bool(comp_high_confidence and comp_missing)
+        if comp_apply:
+            if under_reconstructed_shadow:
+                # Hard-shadow components have a measurable opacity plateau on
+                # the known background. CK often turns that plateau into a
+                # banded low-alpha estimate. A soft-shadow support mask is too
+                # broad for this case, so use a strong core as the uniform
+                # platform and keep only a one-pixel measured rim for AA. This
+                # prevents the patch from exporting a fuzzy tail when the source
+                # shadow is perceptually hard.
+                core_floor = max(0.09, domain_display_p75 * 0.58)
+                rim_floor = max(0.025, domain_display_p75 * 0.14)
+                hard_shadow_core = comp_shadow_domain & (display >= core_floor)
+                if hard_shadow_core.any():
+                    core_u8 = hard_shadow_core.astype(np.uint8)
+                    kernel = np.ones((3, 3), dtype=np.uint8)
+                    hard_shadow_core = cv2.morphologyEx(core_u8, cv2.MORPH_CLOSE, kernel).astype(bool) & comp_shadow_domain
+                    rim = (
+                        (cv2.dilate(hard_shadow_core.astype(np.uint8), kernel, iterations=1).astype(bool))
+                        & comp_shadow_domain
+                        & ~hard_shadow_core
+                        & (display >= rim_floor)
+                    )
+                    kept |= hard_shadow_core | rim
+                else:
+                    rim = np.zeros(subject.shape, dtype=bool)
+                    kept |= comp_shadow_domain
+                adjusted_display[hard_shadow_core] = np.maximum(
+                    adjusted_display[hard_shadow_core],
+                    domain_display_p75,
+                )
+            else:
+                hard_shadow_core = np.zeros(subject.shape, dtype=bool)
+                rim = np.zeros(subject.shape, dtype=bool)
+                kept |= comp
+        component_details.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    left,
+                    top,
+                    left + width,
+                    top + height,
+                ],
+                "area_ratio": comp_area_ratio,
+                "bbox_width_ratio": bbox_width_ratio,
+                "bbox_height_ratio": bbox_height_ratio,
+                "shadow_like_shape": bool(shadow_like_shape),
+                "broad_low_contrast_wash": bool(broad_low_contrast_wash),
+                "display_mean": comp_display_mean,
+                "display_p75": comp_display_p75,
+                "display_p95": comp_display_p95,
+                "corridorkey_alpha_mean": comp_subject_mean,
+                "corridorkey_alpha_p75": comp_subject_p75,
+                "shadow_domain_area": int(comp_shadow_domain_area),
+                "shadow_domain_display_mean": domain_display_mean,
+                "shadow_domain_display_p75": domain_display_p75,
+                "shadow_domain_corridorkey_alpha_mean": domain_subject_mean,
+                "shadow_domain_corridorkey_alpha_p75": domain_subject_p75,
+                "high_confidence": bool(comp_high_confidence),
+                "clearly_missing": bool(clearly_missing),
+                "under_reconstructed_shadow": bool(under_reconstructed_shadow),
+                "levelled_display_p75": float(domain_display_p75) if comp_apply and under_reconstructed_shadow else 0.0,
+                "hard_shadow_core_pixels": int(hard_shadow_core.sum()) if comp_apply and under_reconstructed_shadow else 0,
+                "hard_shadow_rim_pixels": int(rim.sum()) if comp_apply and under_reconstructed_shadow else 0,
+                "missing_in_corridorkey": bool(comp_missing),
+                "apply": comp_apply,
+            }
+        )
+    missing_in_corridorkey = bool(kept.any())
+    component_details.sort(key=lambda item: (item["apply"], item["high_confidence"], item["area"]), reverse=True)
+    omitted_component_details = max(0, len(component_details) - 16)
+    reported_component_details = component_details[:16]
+    rejected_missing_shape_components = sum(
+        1
+        for item in component_details
+        if item["missing_in_corridorkey"] and (not item["shadow_like_shape"] or item["broad_low_contrast_wash"])
+    )
+    apply = bool(high_confidence and missing_in_corridorkey)
+    if not high_confidence:
+        reason = "shadow candidate below high-confidence gate"
+    elif not missing_in_corridorkey:
+        if rejected_missing_shape_components:
+            reason = "shadow candidates rejected as broad background wash or vertical subject residue"
+        else:
+            reason = "CorridorKey already preserved shadow alpha"
+    else:
+        reason = ""
+    filtered = np.where(kept, adjusted_display, 0.0).astype(np.float32) if apply else empty
+    return filtered, {
+        "apply": apply,
+        "reason": reason,
+        "visible_pixels": pixels,
+        "visible_area_ratio": area_ratio,
+        "kept_visible_pixels": int(kept.sum()),
+        "kept_components": int(sum(1 for item in component_details if item["apply"])),
+        "candidate_components": int(len(component_details)),
+        "rejected_missing_shape_components": int(rejected_missing_shape_components),
+        "omitted_component_details": int(omitted_component_details),
+        "component_min_pixels": int(min_component_pixels),
+        "component_details": reported_component_details,
+        "display_mean": display_mean,
+        "display_p75": display_p75,
+        "display_p95": display_p95,
+        "corridorkey_alpha_mean": subject_mean,
+        "corridorkey_alpha_p75": subject_p75,
+        "corridorkey_to_shadow_mean_ratio": float(ratio_mean),
+        "corridorkey_to_shadow_p75_ratio": float(ratio_p75),
+        "high_confidence": bool(high_confidence),
+        "missing_in_corridorkey": bool(missing_in_corridorkey),
+    }
+
+
+def _matte_image_known_bg_hard_ui_shadow(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    analysis: Any,
+    solver_result: Any,
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    selected_bg_color = solver_result.background_color
+    alpha = solver_result.alpha
+    rgba_rgb_srgb = solver_result.rgba_rgb_srgb
+    rgba = np.dstack(
+        [
+            rgba_rgb_srgb,
+            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    shadow_rgba = np.dstack(
+        [
+            np.zeros(rgb.shape, dtype=np.uint8),
+            (np.clip(solver_result.shadow_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    subject_rgba = np.dstack(
+        [
+            solver_result.foreground_srgb,
+            (np.clip(solver_result.subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+    key_color_protection = np.zeros(rgb.shape[:2], dtype=np.float32)
+    shadow_info = {
+        "mode": "on",
+        "source": "known_bg_hard_ui_shadow",
+        "detected": bool((solver_result.shadow_alpha > 0.0).any()),
+        "applied": True,
+        "reason": "",
+        **solver_result.debug.get("shadow_model", {}),
+    }
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(selected_bg_color),
+        "despill_method": "known_bg_hard_ui_shadow",
+        "matting_model": "KnownBgHardUiShadow",
+        "corridorkey_analysis": analysis.to_dict(),
+        "known_bg_hard_ui_shadow": solver_result.debug,
+        "keyer": {
+            "used": True,
+            "source": "known_bg_hard_ui_shadow",
+            "hint": {"source": "analytic_known_background", "mean": 1.0},
+        },
+        "shadow": shadow_info,
+        "semantic_prior": {},
+        "strategy": {
+            "name": "known_bg_hard_ui_shadow",
+            "bg_type": f"saturated_{analysis.screen_mode}" if analysis.screen_mode in {"green", "blue"} else "known_screen",
+            "image_type": "hard_ui_shadow",
+            "keyer_mode": "known_bg_analytic",
+            "despill": "known_bg_inverse_solve",
+            "passthrough": False,
+            "notes": "Analytic known-background hard UI solver separated subject ownership from scalar cast shadow.",
+            "extras": solver_result.debug,
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", rgba_rgb_srgb)
+        ermbg_io.save_rgba(out_dir / f"{stem}_corridorkey_subject_rgba.png", subject_rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_subject_alpha.png", solver_result.subject_alpha)
+        ermbg_io.save_rgba(out_dir / f"{stem}_shadow_layer.png", shadow_rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", solver_result.shadow_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", solver_result.shadow_alpha_physical)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_hint.png", hint_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_raw_alpha.png", solver_result.subject_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_key_color_protection.png", key_color_protection)
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=rgba,
+                soft_mask=alpha,
+                background_color=selected_bg_color,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=rgba,
+            soft_mask=alpha,
+            background_color=selected_bg_color,
+            out_dir=Path("/tmp/_ermbg_qa_discard"),
+        )
+        report["qa"] = qa_metrics
+
+    debug = {
+        **solver_result.debug,
+        "strategy": report["strategy"],
+        "corridorkey_analysis": analysis.to_dict(),
+        "known_bg_hard_ui_shadow": solver_result.debug,
+        "soft_mask": alpha,
+        "subject_alpha": solver_result.subject_alpha,
+        "corridorkey_subject_rgba": subject_rgba,
+        "corridorkey_hint": hint_alpha,
+        "corridorkey_raw_alpha": solver_result.subject_alpha,
+        "key_color_protection": key_color_protection,
+        "shadow_alpha": solver_result.shadow_alpha,
+        "shadow_alpha_physical": solver_result.shadow_alpha_physical,
+        "shadow_layer_rgba": shadow_rgba,
+        "shadow": shadow_info,
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=rgba,
+        alpha=alpha,
+        foreground_srgb=rgba_rgb_srgb,
+        strategy_name="known_bg_hard_ui_shadow",
+        background_color=selected_bg_color,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
+
+
+def _matte_image_comfy_corridorkey(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    bg_color: tuple[int, int, int],
+    shadow_mode: str,
+    comfy_url: str,
+    gamma_space: str = "sRGB",
+    despill_strength: float = 1.0,
+    refiner_strength: float = 1.0,
+    auto_despeckle: str = "On",
+    despeckle_size: int = 400,
+    auto_mask: bool = False,
+    apply_color_protection: bool | None = None,
+    color_protection_bg_max: float = 12.0,
+    color_protection_fg_min: float = 28.0,
+    screen_mode: str = "auto",
+    preset: str = "auto",
+    hint_alpha: np.ndarray | None = None,
+    hard_ui_hint_mode: str = "bbox_2px",
+    execution_profile: str = "auto",
+    auto_route: dict[str, Any] | None = None,
+    corridorkey_client: Any | None = None,
+) -> MatteResponse:
+    from .corridorkey import corridorkey_analyze_asset
+    from .probe.comfyui_corridorkey import (
+        ComfyUICorridorKeyClient,
+        build_hard_ui_boundary_corridorkey_hint,
+        build_hard_ui_corridorkey_hint,
+        build_hard_ui_shadow_safe_material_alpha_floor,
+        build_hard_ui_shadow_safe_solid_interior_mask,
+        build_hard_ui_solid_interior_mask,
+    )
+
+    hard_ui_hint_modes = {
+        "all_white",
+        "bbox_2px",
+        "boundary_2px",
+        "boundary_2px_shadow_safe",
+        "boundary_2px_shadow_safe_edge_floor",
+        "translucent_button",
+    }
+    if hard_ui_hint_mode not in hard_ui_hint_modes:
+        raise ValueError(
+            "corridorkey_hard_ui_hint_mode must be all_white, bbox_2px, boundary_2px, "
+            "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
+        )
+
+    analysis = corridorkey_analyze_asset(
+        rgb,
+        screen_mode=screen_mode,  # type: ignore[arg-type]
+        preset=preset,  # type: ignore[arg-type]
+        fallback_background_color=bg_color,
+    )
+    selected_bg_color = analysis.background_color
+    explicit_color_protection = apply_color_protection
+    forced_translucent_hint_settings = False
+    if preset != "manual":
+        settings = analysis.recommended_settings
+        gamma_space = settings.gamma_space
+        despill_strength = settings.despill_strength
+        refiner_strength = settings.refiner_strength
+        auto_despeckle = settings.auto_despeckle
+        despeckle_size = settings.despeckle_size
+        # ``corridorkey_color_protection`` is the one CorridorKey knob callers
+        # often need to A/B against the auto preset. Treat None as "use the
+        # preset recommendation"; a real bool is an explicit override so batch
+        # evals can truly disable protection while preserving the rest of auto.
+        apply_color_protection = (
+            settings.color_protection if explicit_color_protection is None else bool(explicit_color_protection)
+        )
+        color_protection_bg_max = settings.protection_bg_max
+        color_protection_fg_min = settings.protection_fg_min
+    elif apply_color_protection is None:
+        apply_color_protection = True
+    if execution_profile == "auto":
+        if hard_ui_hint_mode == "translucent_button":
+            execution_profile = "corridorkey-transparent-button"
+        elif analysis.parameter_profile == "composite_character_corridor_only":
+            execution_profile = "corridorkey-character"
+        elif analysis.parameter_profile == "translucent_button":
+            execution_profile = "corridorkey-transparent-button"
+        elif analysis.parameter_profile == "screen_tinted_translucency":
+            execution_profile = "corridorkey-effect-icon"
+        else:
+            execution_profile = "corridorkey-shaped-icon"
+
+    if preset != "manual" and execution_profile in {
+        "corridorkey-transparent-button",
+        "corridorkey-effect-icon",
+    }:
+        # The router has already decided this asset needs CorridorKey's
+        # translucent/complex-boundary profile. Keep the full recipe here so
+        # button/effect routes cannot inherit key-color material protection.
+        forced_translucent_hint_settings = analysis.parameter_profile not in {
+            "translucent_button",
+            "screen_tinted_translucency",
+        }
+        gamma_space = "sRGB"
+        despill_strength = 1.0
+        refiner_strength = 1.15
+        auto_despeckle = "Off"
+        despeckle_size = 64
+        apply_color_protection = False
+        color_protection_bg_max = 6.0
+        color_protection_fg_min = 14.0
+    if preset != "manual" and execution_profile == "corridorkey-character":
+        # Character is a first-class route profile: full-frame CorridorKey
+        # control, no color-protection ownership, and detail-safe cleanup.
+        gamma_space = "sRGB"
+        despill_strength = 1.0
+        refiner_strength = 1.0
+        auto_despeckle = "Off"
+        despeckle_size = 64
+        apply_color_protection = False
+        color_protection_bg_max = 6.0
+        color_protection_fg_min = 14.0
+
+    client = corridorkey_client if corridorkey_client is not None else ComfyUICorridorKeyClient(url=comfy_url)
+    hint_source = None
+    solid_interior_mask: np.ndarray | None = None
+    material_alpha_floor: np.ndarray | None = None
+    solid_interior_info: dict[str, Any] = {}
+    if hint_alpha is not None:
+        hint_source = "provided_corridorkey_hint_mask"
+    elif not auto_mask or hard_ui_hint_mode == "all_white":
+        # ``corridorkey_auto_mask`` now controls only automatic hint strategy,
+        # not an external SAM-style model. Off means a pure all-white control
+        # hint; hard-UI strategies are used only when the caller opts in.
+        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+        hint_source = "all_white_alpha_hint"
+    elif execution_profile == "corridorkey-transparent-button":
+        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+        hint_source = "glass_all_white_corridorkey_hint"
+    elif execution_profile == "corridorkey-character":
+        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+        hint_source = "character_all_white_corridorkey_hint"
+    elif execution_profile == "corridorkey-effect-icon":
+        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+        hint_source = "effect_all_white_corridorkey_hint"
+    elif analysis.parameter_profile.startswith("opaque_hard_ui"):
+        if hard_ui_hint_mode == "boundary_2px":
+            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
+            solid_interior_mask = build_hard_ui_solid_interior_mask(rgb, selected_bg_color)
+            hint_source = "known_bg_hard_ui_boundary_2px_hint"
+        elif hard_ui_hint_mode == "boundary_2px_shadow_safe":
+            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
+            solid_interior_mask, solid_interior_info = build_hard_ui_shadow_safe_solid_interior_mask(
+                rgb,
+                selected_bg_color,
+            )
+            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_hint"
+        elif hard_ui_hint_mode == "boundary_2px_shadow_safe_edge_floor":
+            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
+            material_alpha_floor, solid_interior_info = build_hard_ui_shadow_safe_material_alpha_floor(
+                rgb,
+                selected_bg_color,
+            )
+            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_edge_floor_hint"
+        else:
+            hint_alpha = build_hard_ui_corridorkey_hint(rgb, selected_bg_color)
+            hint_source = "known_bg_hard_ui_bbox_2px_hint"
+    remote = client.matte(
+        rgb,
+        background_color=selected_bg_color,
+        hint_alpha=hint_alpha,
+        hint_source=hint_source,
+        gamma_space=gamma_space,
+        screen_color=analysis.screen_mode if analysis.screen_mode in {"green", "blue"} else "auto",
+        despill_strength=despill_strength,
+        refiner_strength=refiner_strength,
+        auto_despeckle=auto_despeckle,
+        despeckle_size=despeckle_size,
+        apply_color_protection=apply_color_protection,
+        color_protection_bg_max=color_protection_bg_max,
+        color_protection_fg_min=color_protection_fg_min,
+        protect_hint_supported_material=analysis.parameter_profile == "key_color_material",
+        execution_profile=execution_profile,
+    )
+    subject_alpha = remote.alpha
+    subject_foreground_srgb = remote.foreground_srgb
+    subject_rgba = remote.rgba
+    solid_interior_pixels = 0
+    material_floor_lift_pixels = 0
+    if solid_interior_mask is not None and solid_interior_mask.any():
+        interior = solid_interior_mask.astype(bool)
+        solid_interior_pixels = int(interior.sum())
+        subject_alpha = remote.alpha.copy()
+        subject_foreground_srgb = remote.foreground_srgb.copy()
+        subject_alpha[interior] = 1.0
+        subject_foreground_srgb[interior] = rgb[interior]
+    if material_alpha_floor is not None and (material_alpha_floor > 0.0).any():
+        floor = np.clip(material_alpha_floor.astype(np.float32), 0.0, 1.0)
+        lift = floor > (subject_alpha + 1e-4)
+        material_floor_lift_pixels = int(lift.sum())
+        solid_interior_pixels = int(solid_interior_info.get("solid_interior_pixels", int((floor >= 0.999).sum())))
+        if lift.any():
+            subject_alpha = np.maximum(subject_alpha, floor).astype(np.float32)
+            subject_foreground_srgb = subject_foreground_srgb.copy()
+            # Unoutlined hard-UI edges need a local material floor, but using
+            # source RGB directly would keep key-color contribution in the AA
+            # pixels. Recover straight foreground against the known screen
+            # color only where the floor actually lifts CorridorKey alpha.
+            C_lin = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
+            B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg_color, dtype=np.uint8).reshape(1, 1, 3))[
+                0,
+                0,
+            ].astype(np.float32)
+            recovered = C_lin.copy()
+            a = np.maximum(floor[lift, None], 1e-3)
+            recovered[lift] = (C_lin[lift] - (1.0 - floor[lift, None]) * B_lin.reshape(1, 3)) / a
+            recovered = np.clip(recovered, 0.0, 1.0).astype(np.float32)
+            recovered_srgb = ermbg_io.linear_to_srgb_u8(recovered)
+            subject_foreground_srgb[lift] = recovered_srgb[lift]
+    if (
+        (solid_interior_mask is not None and solid_interior_mask.any())
+        or (material_alpha_floor is not None and (material_alpha_floor > 0.0).any())
+    ):
+        subject_rgba = np.dstack(
+            [
+                subject_foreground_srgb,
+                (np.clip(subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+            ]
+        )
+    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _corridorkey_shadow_patch(
+        rgb,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground_srgb,
+        background_color=selected_bg_color,
+        shadow_mode=shadow_mode,
+    )
+    rgba = np.dstack(
+        [
+            rgba_rgb_srgb,
+            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    shadow_rgba = np.dstack(
+        [
+            np.zeros(rgb.shape, dtype=np.uint8),
+            (np.clip(shadow_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+        ]
+    )
+    bg_type = f"saturated_{analysis.screen_mode}" if analysis.screen_mode in {"green", "blue"} else "unknown_screen"
+    image_type = f"ai_{analysis.screen_mode}_asset" if analysis.screen_mode in {"green", "blue"} else "ai_screen_asset"
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(selected_bg_color),
+        "despill_method": "remote_corridorkey",
+        "matting_model": "CorridorKey",
+        "corridorkey_analysis": analysis.to_dict(),
+        "keyer": {
+            "used": True,
+            "source": remote.debug.get("hint", {}).get("source") or hint_source or "known_bg_chromatic_key_alpha_hint",
+            "hint": remote.debug.get("hint", {}),
+        },
+        "shadow": shadow_info,
+        "semantic_prior": {},
+        "strategy": {
+            "name": "comfy_corridorkey",
+            "bg_type": bg_type,
+            "image_type": image_type,
+            "keyer_mode": "corridorkey",
+            "despill": "remote_corridorkey",
+            "passthrough": False,
+            "notes": "CorridorKey executed by remote ComfyUI using ERMBG screen/color analysis.",
+            "extras": remote.debug,
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
+        ermbg_io.save_rgba(out_dir / f"{stem}_corridorkey_subject_rgba.png", subject_rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_subject_alpha.png", subject_alpha)
+        ermbg_io.save_rgba(out_dir / f"{stem}_shadow_layer.png", shadow_rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_hint.png", remote.hint_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_raw_alpha.png", remote.raw_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_key_color_protection.png", remote.color_protection_alpha)
+        if qa:
+            qa_dir = out_dir / f"{stem}_qa"
+            qa_metrics = run_qa(
+                image_srgb=rgb,
+                rgba=rgba,
+                soft_mask=alpha,
+                background_color=selected_bg_color,
+                out_dir=qa_dir,
+            )
+            report["qa"] = qa_metrics
+            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
+        (out_dir / f"{stem}.report.json").write_text(json.dumps(report, indent=2))
+    elif qa:
+        qa_metrics = run_qa(
+            image_srgb=rgb,
+            rgba=rgba,
+            soft_mask=alpha,
+            background_color=selected_bg_color,
             out_dir=Path("/tmp/_ermbg_qa_discard"),
         )
         report["qa"] = qa_metrics
@@ -472,15 +3209,34 @@ def _matte_image_comfy_ermbg(
     debug = {
         **remote.debug,
         "strategy": report["strategy"],
-        "soft_mask": remote.alpha,
-        "shadow_alpha": np.zeros(remote.alpha.shape, dtype=np.float32),
+        "corridorkey_analysis": analysis.to_dict(),
+        "soft_mask": alpha,
+        "subject_alpha": subject_alpha,
+        "corridorkey_subject_rgba": subject_rgba,
+        "corridorkey_hint": remote.hint_alpha,
+        "corridorkey_raw_alpha": remote.raw_alpha,
+        "key_color_protection": remote.color_protection_alpha,
+        "shadow_alpha": shadow_alpha,
+        "shadow_alpha_physical": shadow_alpha_physical,
+        "shadow_layer_rgba": shadow_rgba,
+        "shadow": shadow_info,
+        "hard_ui_hint": {
+            "mode": hard_ui_hint_mode,
+            "execution_profile": execution_profile,
+            "forced_translucent_settings": forced_translucent_hint_settings,
+            "solid_interior_pixels": solid_interior_pixels,
+            "material_floor_lift_pixels": material_floor_lift_pixels,
+            **solid_interior_info,
+        },
     }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
     return MatteResponse(
-        rgba=remote.rgba,
-        alpha=remote.alpha,
-        foreground_srgb=remote.foreground_srgb,
-        strategy_name="comfy_ermbg",
-        background_color=bg_color,
+        rgba=rgba,
+        alpha=alpha,
+        foreground_srgb=subject_foreground_srgb,
+        strategy_name="comfy_corridorkey",
+        background_color=selected_bg_color,
         report=report,
         output_dir=out_dir,
         debug=debug,

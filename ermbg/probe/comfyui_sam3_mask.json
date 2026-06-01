@@ -1,0 +1,38 @@
+{
+  "_comment": "SAM3 auto mask via remote ComfyUI: Load RGB -> SAM3_Detect -> MaskToImage -> SaveImage.",
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "${checkpoint}"
+    }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "20": {
+    "class_type": "SAM3_Detect",
+    "inputs": {
+      "model": ["1", 0],
+      "image": ["10", 0],
+      "threshold": "${threshold}",
+      "refine_iterations": "${refine_iterations}",
+      "individual_masks": false
+    }
+  },
+  "30": {
+    "class_type": "MaskToImage",
+    "inputs": {
+      "mask": ["20", 0]
+    }
+  },
+  "40": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["30", 0],
+      "filename_prefix": "${filename_prefix}_sam3_mask"
+    }
+  }
+}

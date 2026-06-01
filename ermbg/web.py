@@ -33,19 +33,75 @@ try:
 except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
-from .api import matte_image
+from .api import MatteResponse, matte_image
 from .candidates import MatteCandidate, generate_matte_candidates
+from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
-ALLOWED_BACKENDS = {"grabcut", "auto", "birefnet", "comfy-rmbg", "comfy-ermbg"}
+ALLOWED_BACKENDS = {
+    "auto",
+    "comfy-rmbg",
+    "comfy-corridorkey",
+    "pymatting-known-b",
+    "comfy-pymatting-known-b",
+    "direct-worker",
+}
+REMOTE_DIRECT_BACKENDS = {
+    "passthrough",
+    "comfy-rmbg",
+    "comfy-corridorkey",
+    "pymatting-known-b",
+    "comfy-pymatting-known-b",
+    "direct-worker",
+}
 WEB_SHADOW_MODE = "on"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
+GAME_SAMPLE_REL = Path("samples") / "corridorkey_semantic"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
 SOLID_GRAPHIC_EVAL_PREFIX = "solid_graphic_"
-GAME_EVAL_RUN_PREFIXES = (LOCAL_OWNERSHIP_EVAL_PREFIX, SOLID_GRAPHIC_EVAL_PREFIX)
-FAST_GAME_EVAL_SAMPLE_IDS = ("G02", "G04", "G06")
+AUTO_EVAL_PREFIX = "auto_"
+CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
+RMBG_EVAL_PREFIX = "rmbg_"
+DIRECT_WORKER_EVAL_PREFIX = "direct_worker_"
+GAME_EVAL_RUN_PREFIXES = (
+    LOCAL_OWNERSHIP_EVAL_PREFIX,
+    SOLID_GRAPHIC_EVAL_PREFIX,
+    AUTO_EVAL_PREFIX,
+    CORRIDORKEY_EVAL_PREFIX,
+    RMBG_EVAL_PREFIX,
+    DIRECT_WORKER_EVAL_PREFIX,
+)
+FAST_GAME_EVAL_SAMPLE_IDS = ("B001", "B016", "B031", "B046", "I011", "I019", "C004", "C009")
+GAME_EVAL_SCREENS = ("green", "blue")
+# Fallback only applies in tests or broken installs where the manifest is not
+# available. It mirrors the current B/I/C semantic manifest so progress does not
+# silently drift back to the retired 78-sample set.
+FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
+DEFAULT_GAME_EVAL_TEST_PATH = "auto"
+GAME_EVAL_TEST_PATHS = {
+    "auto": {
+        "label": "Auto RouteMatte",
+        "backend": "auto",
+        "prefix": AUTO_EVAL_PREFIX,
+    },
+    "corridorkey": {
+        "label": "CorridorKey",
+        "backend": "comfy-corridorkey",
+        "prefix": CORRIDORKEY_EVAL_PREFIX,
+    },
+    "rmbg": {
+        "label": "RMBG",
+        "backend": "comfy-rmbg",
+        "prefix": RMBG_EVAL_PREFIX,
+    },
+    "direct-worker": {
+        "label": "Direct Worker",
+        "backend": "direct-worker",
+        "prefix": DIRECT_WORKER_EVAL_PREFIX,
+    },
+}
 SERVABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 REGION_BOX_COLORS = {
     "same_bg_enclosed_region": (0, 153, 255, 235),
@@ -65,6 +121,14 @@ _SLICE_CACHE_MAX = 4
 _SLICE_WEB_MAX_PIXELS = 4_000_000
 _SLICE_CACHE: OrderedDict[tuple[str, int, int], SliceResult] = OrderedDict()
 _SLICE_CACHE_LOCK = Lock()
+
+
+def _game_sample_root() -> Path:
+    return PROJECT_ROOT / GAME_SAMPLE_REL
+
+
+def _game_sample_manifest() -> Path:
+    return _game_sample_root() / "manifest.json"
 
 
 def _encode_png(rgba: np.ndarray) -> bytes:
@@ -121,33 +185,78 @@ def _matte_page_html() -> str:
   <style>
     :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
     header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
     h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
     .header-actions { min-width: 0; display: flex; align-items: center; gap: 14px; }
     .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
-    main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
+    main { width: min(1120px, 100%); height: calc(100vh - 56px); min-height: 0; margin: 0 auto; padding: 16px 24px; display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: stretch; overflow: hidden; }
     form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
-    form { min-width: 0; padding: 16px; display: grid; gap: 12px; }
+    form { min-width: 0; min-height: 0; max-height: 100%; padding: 16px; display: grid; gap: 12px; align-content: start; overflow-y: auto; }
     label { display: grid; gap: 8px; font-size: 13px; font-weight: 600; color: #47524c; }
+    .inline-label { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 10px; }
     input, select, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
     input[type="file"] { padding: 8px; }
     button, a.download { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; border: 0; border-radius: 6px; background: #196f5a; color: #ffffff; text-decoration: none; font-weight: 700; cursor: pointer; }
     button:disabled, a.download[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
-    .source-preview { display: none; gap: 10px; }
+    .settings { display: none; border: 1px solid #d9dfd7; border-radius: 6px; background: #fbfcfa; }
+    .settings.is-visible { display: block; }
+    .settings summary { min-height: 38px; display: flex; align-items: center; padding: 0 10px; color: #196f5a; font-size: 13px; font-weight: 800; cursor: pointer; user-select: none; }
+    .settings-grid { display: grid; gap: 12px; padding: 0 10px 10px; }
+    .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .settings label { font-size: 12px; gap: 6px; }
+    .check-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 38px; }
+    .check-label input { width: 18px; min-height: 18px; }
+    .color-range { display: grid; gap: 8px; padding: 8px 0 2px; }
+    .range-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 700; color: #47524c; }
+    .range-value { min-width: 58px; text-align: right; color: #196f5a; }
+    .dual-range { --range-low: 16%; --range-high: 33%; position: relative; height: 34px; }
+    .range-rail, .range-fill { position: absolute; left: 0; right: 0; top: 15px; height: 6px; border-radius: 999px; pointer-events: none; }
+    .range-rail { background: linear-gradient(90deg, #00c853 0%, #c8d28c 45%, #f2bc24 72%, #d84646 100%); opacity: 0.78; }
+    .range-fill { left: var(--range-low); right: calc(100% - var(--range-high)); background: rgba(25, 111, 90, 0.58); box-shadow: 0 0 0 1px rgba(25, 111, 90, 0.18); }
+    .dual-range input[type="range"] { position: absolute; inset: 0; width: 100%; min-height: 34px; margin: 0; padding: 0; appearance: none; -webkit-appearance: none; background: transparent; border: 0; pointer-events: none; }
+    .dual-range input[type="range"]::-webkit-slider-runnable-track { height: 6px; background: transparent; border: 0; }
+    .dual-range input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin-top: -6px; border: 2px solid #ffffff; border-radius: 50%; background: #196f5a; box-shadow: 0 1px 4px rgba(12, 17, 15, 0.28); pointer-events: auto; cursor: ew-resize; }
+    .dual-range input[type="range"]::-moz-range-track { height: 6px; background: transparent; border: 0; }
+    .dual-range input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 2px solid #ffffff; border-radius: 50%; background: #196f5a; box-shadow: 0 1px 4px rgba(12, 17, 15, 0.28); pointer-events: auto; cursor: ew-resize; }
+    .range-labels { display: flex; justify-content: space-between; color: #6a746f; font-size: 11px; font-weight: 700; }
+    .source-preview { display: none; gap: 8px; }
     .source-preview.is-visible { display: grid; }
-    .source-frame { width: 100%; aspect-ratio: 4 / 3; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; }
-    .source-frame img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; }
-    .source-meta { min-height: auto; font-size: 12px; line-height: 1.4; color: #5d6862; overflow-wrap: anywhere; }
-    .preview { min-height: 520px; display: grid; grid-template-rows: 48px 1fr 104px 56px; overflow: hidden; }
+    .mask-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+    .canvas:not(.is-mask-mode) .mask-stage { display: none; }
+    .canvas.is-mask-mode .mask-stage { display: grid; }
+    .preview-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; display: grid; place-items: center; overflow: hidden; }
+    .canvas.is-mask-mode .preview-stage { display: none; }
+    .source-frame { position: relative; width: 100%; aspect-ratio: 4 / 3; max-height: 360px; min-height: 148px; display: grid; place-items: center; border: 1px solid #d9dfd7; border-radius: 6px; background-color: #eef2ec; background-image: linear-gradient(45deg, #d7dfd4 25%, transparent 25%), linear-gradient(-45deg, #d7dfd4 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d7dfd4 75%), linear-gradient(-45deg, transparent 75%, #d7dfd4 75%); background-position: 0 0, 0 10px, 10px -10px, -10px 0; background-size: 20px 20px; overflow: hidden; }
+    .source-frame img { position: absolute; z-index: 1; left: 50%; top: 50%; display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; transform: translate(-50%, -50%) scale(1); transform-origin: center center; will-change: transform; }
+    .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; }
+    .mask-overlay { position: absolute; z-index: 2; display: none; touch-action: none; cursor: crosshair; opacity: 0.62; image-rendering: pixelated; transform-origin: center center; will-change: transform; }
+    .source-frame.has-mask .mask-overlay { display: block; }
+    .preview-statuses { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+    .preview-statuses .status { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mask-toolbar { display: none; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap; min-height: 42px; padding: 5px 16px; border-bottom: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .preview.is-mask-mode .mask-toolbar { display: flex; }
+    .mask-toolbar label { display: flex; align-items: center; font-size: 12px; gap: 6px; white-space: nowrap; }
+    .mask-toolbar button { width: auto; min-height: 32px; padding: 0 10px; white-space: nowrap; }
+    .mask-tools { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap; }
+    .mask-tools > label { width: auto; flex: 0 0 auto; }
+    .mask-mode-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; }
+    .mask-mode-button { min-height: 28px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 800; }
+    .mask-mode-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
+    #mask-brush-size { width: 104px; min-height: 32px; }
+    .mask-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 104px 56px; overflow: hidden; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
-    .preview-actions { border-top: 1px solid #d9dfd7; border-bottom: 0; }
+    .preview-actions { height: 56px; min-height: 56px; max-height: 56px; border-top: 1px solid #d9dfd7; border-bottom: 0; overflow: hidden; }
+    .preview-actions a.download { flex: 0 0 auto; min-width: 128px; padding: 0 18px; white-space: nowrap; }
     .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; flex-shrink: 0; }
     .tab { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 700; }
     .tab[aria-selected="true"] { background: #196f5a; color: #ffffff; }
     .status { font-size: 13px; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .canvas, .candidate-thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); }
-    .canvas { min-height: 416px; display: grid; place-items: center; padding: 16px; overflow: hidden; touch-action: none; background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    .canvas { width: 100%; height: 100%; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; align-self: stretch; justify-self: stretch; display: grid; place-items: stretch; padding: 16px; overflow: hidden; contain: layout paint; touch-action: none; background-position: 0 0, 0 12px, 12px -12px, -12px 0; background-size: 24px 24px; }
+    .canvas.is-mask-mode { padding: 0; }
+    .canvas.is-mask-mode .source-frame { border: 0; border-radius: 0; }
     .canvas.has-image { cursor: grab; }
     .canvas.is-dragging { cursor: grabbing; }
     .canvas.bg-white { background: #ffffff; }
@@ -156,9 +265,12 @@ def _matte_page_html() -> str:
     .canvas.bg-green { background: #00c853; }
     .canvas.bg-blue { background: #4aa3ff; }
     img { max-width: 100%; max-height: 68vh; object-fit: contain; image-rendering: auto; }
-    .result-image { transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; }
+    .canvas img { max-width: 100%; max-height: 100%; }
+    .result-image { width: 100%; height: 100%; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
-    .candidate-panel { min-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; }
+    .candidate-panel { height: 104px; min-height: 104px; max-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }
+    .preview.is-mask-mode .candidate-panel { display: none; min-height: 0; padding: 0; border: 0; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
     .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
     .candidate-tab { width: 92px; min-width: 92px; min-height: 76px; display: grid; grid-template-rows: 48px auto; gap: 5px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
@@ -166,7 +278,7 @@ def _matte_page_html() -> str:
     .candidate-thumb { width: 100%; height: 48px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
     .candidate-thumb img { width: 100%; height: 100%; object-fit: contain; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .preview { min-height: 420px; grid-template-rows: auto 1fr 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 312px; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } }
+    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
   </style>
 </head>
 <body>
@@ -181,32 +293,109 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <div class="source-preview" id="source-preview" aria-live="polite">
-        <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
-        <div class="source-meta" id="source-meta">未选择图片</div>
-      </div>
-      <label>后端<select id="backend" name="backend"><option value="comfy-ermbg" selected>comfy-ermbg</option><option value="grabcut">grabcut</option><option value="auto">auto</option><option value="birefnet">birefnet</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto RouteMatte</option><option value="direct-worker">direct-worker</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
       <button id="submit" type="submit">抠图</button>
+      <details class="settings" id="corridorkey-settings" open>
+        <summary>[设置]</summary>
+        <div class="settings-grid">
+          <input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">
+          <label class="inline-label">预设<select id="ck-preset" name="corridorkey_preset"><option value="auto" selected>自动</option><option value="detail_safe">细节保护</option><option value="spill_safe">强去溢色</option><option value="manual">手动参数</option></select></label>
+          <label class="inline-label">硬 UI Hint<select id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled><option value="all_white">全白</option><option value="bbox_2px" selected>bbox 2px</option><option value="boundary_2px">边界 2px</option><option value="boundary_2px_shadow_safe">边界 2px shadow-safe</option><option value="boundary_2px_shadow_safe_edge_floor">边界 2px edge floor</option><option value="translucent_button">玻璃/半透明</option></select></label>
+          <label class="inline-label">色彩空间<select id="ck-gamma-space" name="corridorkey_gamma_space"><option value="sRGB" selected>sRGB</option><option value="Linear">Linear</option></select></label>
+          <div class="settings-row">
+            <label>去溢色<input id="ck-despill" name="corridorkey_despill_strength" type="number" min="0" max="1" step="0.01" value="1"></label>
+            <label>精修强度<input id="ck-refiner" name="corridorkey_refiner_strength" type="number" min="0" max="4" step="0.1" value="1"></label>
+          </div>
+          <div class="settings-row">
+            <label>去斑点<select id="ck-auto-despeckle" name="corridorkey_auto_despeckle"><option value="On" selected>开启</option><option value="Off">关闭</option></select></label>
+            <label>斑点尺寸<input id="ck-despeckle-size" name="corridorkey_despeckle_size" type="number" min="0" max="4096" step="1" value="400"></label>
+          </div>
+          <label class="check-label"><span>自动 Mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
+          <label class="check-label"><span>颜色保护</span><input id="ck-color-protection" name="corridorkey_color_protection" type="checkbox" checked></label>
+          <div class="color-range">
+            <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">12 / 28</output></div>
+            <div class="dual-range" id="ck-protect-range">
+              <span class="range-rail"></span>
+              <span class="range-fill"></span>
+              <input id="ck-protect-bg" name="corridorkey_protection_bg_max" type="range" min="0" max="64" step="0.5" value="12" aria-label="背景端点">
+              <input id="ck-protect-fg" name="corridorkey_protection_fg_min" type="range" min="0.5" max="64" step="0.5" value="28" aria-label="保护端点">
+            </div>
+            <div class="range-labels"><span>背景</span><span>过渡</span><span>保护</span></div>
+          </div>
+        </div>
+      </details>
+      <details class="settings" id="pymatting-settings" open>
+        <summary>[PyMatting]</summary>
+        <div class="settings-grid">
+          <label class="check-label"><span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked></label>
+          <div class="settings-row">
+            <label>算法<select id="pm-method" name="pymatting_method"><option value="cf" selected>closed form</option><option value="knn">KNN</option><option value="lbdm">learning based</option><option value="lkm">large kernel</option><option value="rw">random walk</option><option value="sm">shared matting</option></select></label>
+            <label>色彩空间<select id="pm-image-space" name="pymatting_image_space"><option value="linear" selected>linear</option><option value="sRGB">sRGB</option></select></label>
+          </div>
+          <div class="settings-row">
+            <label>背景<select id="pm-bg-source" name="pymatting_bg_source"><option value="auto" selected>auto</option><option value="green">green 0,200,0</option><option value="blue">blue 0,0,200</option><option value="custom">custom</option></select></label>
+            <label>自定义 RGB<input id="pm-bg-color" name="pymatting_bg_color" type="text" value="0,200,0" inputmode="numeric"></label>
+          </div>
+          <details class="settings" id="pymatting-advanced">
+            <summary>[高级]</summary>
+            <div class="settings-grid">
+              <div class="settings-row">
+                <label>unknown 宽度<input id="pm-boundary-band" name="pymatting_boundary_band_px" type="number" min="0" max="16" step="1" value="2"></label>
+                <label>CG maxiter<input id="pm-cg-maxiter" name="pymatting_cg_maxiter" type="number" min="100" max="10000" step="100" value="1000"></label>
+              </div>
+              <div class="settings-row">
+                <label>背景阈值<input id="pm-bg-threshold" name="pymatting_bg_threshold" type="number" min="0" max="32" step="0.1" value="3.5"></label>
+                <label>前景阈值<input id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="30"></label>
+              </div>
+              <label>CG rtol<input id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"></label>
+            </div>
+          </details>
+          <label class="check-label"><span>保留阴影</span><input id="shadow-enabled" name="shadow_enabled" type="checkbox" checked></label>
+        </div>
+      </details>
     </form>
-    <section class="preview" aria-label="result preview">
+    <section class="preview" id="preview-panel" aria-label="result preview">
       <div class="preview-bar">
         <strong>PNG 预览</strong>
         <div class="tabs" role="tablist" aria-label="预览背景">
-          <button class="tab" type="button" role="tab" aria-selected="true" data-bg="checker">棋盘</button>
+          <button class="tab" type="button" role="tab" aria-selected="true" data-view="mask">遮罩</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-bg="checker">棋盘</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="white">白底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="black">黑底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="gray">灰底</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="green">绿幕</button>
           <button class="tab" type="button" role="tab" aria-selected="false" data-bg="blue">蓝底</button>
         </div>
-        <span class="status" id="status">等待上传</span>
       </div>
-      <div class="canvas" id="canvas"><span class="empty">结果会显示在这里</span></div>
+      <div class="mask-toolbar" id="mask-toolbar" aria-label="遮罩工具栏">
+        <div class="mask-tools" id="mask-tools">
+          <button id="sam-mask-button" type="button">Sam3</button>
+          <span class="mask-mode-toggle" role="group" aria-label="画笔模式">
+            <button class="mask-mode-button" type="button" aria-pressed="true" data-mask-mode="keep">保留</button>
+            <button class="mask-mode-button" type="button" aria-pressed="false" data-mask-mode="erase">擦除</button>
+          </span>
+          <label>尺寸<input id="mask-brush-size" type="range" min="4" max="96" step="1" value="28"></label>
+          <div class="mask-actions">
+            <button id="mask-clear-button" type="button">清空</button>
+          </div>
+        </div>
+      </div>
+      <div class="canvas" id="canvas">
+        <div class="preview-stage" id="preview-stage"><span class="empty">结果会显示在这里</span></div>
+        <div class="source-preview mask-stage" id="source-preview" aria-live="polite">
+          <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
+        </div>
+      </div>
       <div class="candidate-panel" aria-label="候选结果">
         <span class="candidate-title">候选</span>
         <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图"><span class="empty">候选会显示在这里</span></div>
       </div>
-      <div class="preview-actions"><span class="status" id="meta">RGBA PNG</span><a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a></div>
+      <div class="preview-actions">
+        <span class="preview-statuses">
+          <span class="status" id="status">等待上传</span>
+        </span>
+        <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
+      </div>
     </section>
   </main>
   <script>
@@ -216,44 +405,113 @@ def _matte_page_html() -> str:
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
+    const previewPanel = document.getElementById("preview-panel");
     const canvas = document.getElementById("canvas");
+    const previewStage = document.getElementById("preview-stage");
     const download = document.getElementById("download");
     const candidateList = document.getElementById("candidate-list");
-    const metaEl = document.getElementById("meta");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
-    const sourceMeta = document.getElementById("source-meta");
-    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const corridorSettings = document.getElementById("corridorkey-settings");
+    const pymattingSettings = document.getElementById("pymatting-settings");
+    const corridorSettingControls = Array.from(document.querySelectorAll("[name^='corridorkey_']"));
+    const pymattingSettingControls = Array.from(document.querySelectorAll("[name^='pymatting_']"));
+    const shadowEnabled = document.getElementById("shadow-enabled");
+    const autoMask = document.getElementById("ck-auto-mask");
+    const hardUiHintMode = document.getElementById("ck-hard-ui-hint-mode");
+    const samMaskButton = document.getElementById("sam-mask-button");
+    const metaEl = statusEl;
+    const sourceMeta = statusEl;
+    const maskStatus = statusEl;
+    const maskBrushModeButtons = Array.from(document.querySelectorAll("[data-mask-mode]"));
+    const maskBrushSize = document.getElementById("mask-brush-size");
+    const maskClearButton = document.getElementById("mask-clear-button");
+    const protectRange = document.getElementById("ck-protect-range");
+    const protectBg = document.getElementById("ck-protect-bg");
+    const protectFg = document.getElementById("ck-protect-fg");
+    const protectRangeValue = document.getElementById("ck-protect-range-value");
+    const backgroundTabs = Array.from(document.querySelectorAll("[data-bg]"));
+    const viewTabs = Array.from(document.querySelectorAll("[data-view]"));
+    const maskToolbarControls = Array.from(document.querySelectorAll("#mask-toolbar input, #mask-toolbar select, #mask-toolbar button"));
     let sourceUrl = null;
     let candidates = [];
     let activeCandidateIndex = -1;
+    let activeView = "mask";
+    let activeBackground = "checker";
     let resultImage = null;
     let previewScale = 1;
     let previewPanX = 0;
     let previewPanY = 0;
     let dragStart = null;
+    let corridorkeyHintMaskFile = null;
+    let sourceImage = null;
+    let maskCanvas = null;
+    let maskCtx = null;
+    let maskDirty = false;
+    let maskPainting = false;
+    let samMaskRequestId = 0;
+    let maskBrushMode = "keep";
+    let maskScale = 1;
+    let maskPanX = 0;
+    let maskPanY = 0;
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; submit.textContent = isBusy ? "处理中" : "抠图"; }
-    function setPreviewBackground(mode) { canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.bg === mode))); }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
+    function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
+    function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
+    function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
+    function syncPreviewMode() { const maskMode = activeView === "mask"; previewPanel.classList.toggle("is-mask-mode", maskMode); canvas.classList.toggle("is-mask-mode", maskMode); viewTabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.view === activeView))); backgroundTabs.forEach((tab) => tab.setAttribute("aria-selected", String(activeView === "preview" && tab.dataset.bg === activeBackground))); if (maskMode) layoutMaskCanvas(); }
+    function setPreviewView(view) { activeView = view; syncPreviewMode(); }
+    function setPreviewBackground(mode) { activeBackground = mode; activeView = "preview"; canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); syncPreviewMode(); }
     function resetPreviewTransform() { previewScale = 1; previewPanX = 0; previewPanY = 0; dragStart = null; applyPreviewTransform(); }
     function applyPreviewTransform() { if (resultImage) resultImage.style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewScale})`; }
-    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); canvas.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
+    function resetMaskTransform() { maskScale = 1; maskPanX = 0; maskPanY = 0; applyMaskTransform(); }
+    function maskTransformCss() { return `translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})`; }
+    function applyMaskTransform() { const transform = maskTransformCss(); if (sourceImage) sourceImage.style.transform = transform; if (maskCanvas) maskCanvas.style.transform = transform; }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
+    function clearMaskState() { corridorkeyHintMaskFile = null; maskDirty = false; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
+    function layoutMaskCanvas() { if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) return; const frameRect = sourceFrame.getBoundingClientRect(); if (frameRect.width <= 0 || frameRect.height <= 0) { requestAnimationFrame(layoutMaskCanvas); return; } const fit = Math.min(frameRect.width / sourceImage.naturalWidth, frameRect.height / sourceImage.naturalHeight); if (!Number.isFinite(fit) || fit <= 0) return; const displayWidth = Math.max(1, sourceImage.naturalWidth * fit); const displayHeight = Math.max(1, sourceImage.naturalHeight * fit); const transform = maskTransformCss(); sourceImage.style.width = `${displayWidth}px`; sourceImage.style.height = `${displayHeight}px`; sourceImage.style.maxWidth = "none"; sourceImage.style.maxHeight = "none"; sourceImage.style.left = "50%"; sourceImage.style.top = "50%"; sourceImage.style.transform = transform; if (maskCanvas) { maskCanvas.style.left = "50%"; maskCanvas.style.top = "50%"; maskCanvas.style.width = `${displayWidth}px`; maskCanvas.style.height = `${displayHeight}px`; maskCanvas.style.transform = transform; } }
+    function ensureMaskCanvas(width, height) { if (!maskCanvas) { maskCanvas = document.createElement("canvas"); maskCanvas.className = "mask-overlay"; sourceFrame.appendChild(maskCanvas); maskCanvas.addEventListener("pointerdown", beginMaskPaint); maskCanvas.addEventListener("pointermove", paintMask); maskCanvas.addEventListener("pointerup", endMaskPaint); maskCanvas.addEventListener("pointercancel", endMaskPaint); } maskCanvas.width = width; maskCanvas.height = height; maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true }); layoutMaskCanvas(); }
+    function exportHintMaskFile() { return new Promise((resolve) => { if (!maskCanvas || !maskCtx) { corridorkeyHintMaskFile = null; resolve(null); return; } const width = maskCanvas.width; const height = maskCanvas.height; const pixels = maskCtx.getImageData(0, 0, width, height); const exportCanvas = document.createElement("canvas"); exportCanvas.width = width; exportCanvas.height = height; const exportCtx = exportCanvas.getContext("2d"); const out = exportCtx.createImageData(width, height); for (let i = 0; i < pixels.data.length; i += 4) { const value = pixels.data[i + 3] > 8 ? 255 : 0; out.data[i] = value; out.data[i + 1] = value; out.data[i + 2] = value; out.data[i + 3] = 255; } exportCtx.putImageData(out, 0, 0); exportCanvas.toBlob((blob) => { if (!blob) { resolve(null); return; } corridorkeyHintMaskFile = new File([blob], "edited_hint_mask.png", { type: "image/png" }); resolve(corridorkeyHintMaskFile); }, "image/png"); }); }
+    function updateHintMaskFile() { exportHintMaskFile(); }
+    function waitForSourceImage() { return new Promise((resolve, reject) => { if (!sourceImage) { reject(new Error("请先选择图片")); return; } if (sourceImage.complete && sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) { resolve(sourceImage); return; } const done = () => { cleanup(); if (sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) resolve(sourceImage); else reject(new Error("图片预览尚未载入")); }; const fail = () => { cleanup(); reject(new Error("图片预览载入失败")); }; const cleanup = () => { sourceImage.removeEventListener("load", done); sourceImage.removeEventListener("error", fail); }; sourceImage.addEventListener("load", done, { once: true }); sourceImage.addEventListener("error", fail, { once: true }); }); }
+    function loadMaskOverlay(dataUrl) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = async () => { try { setPreviewView("mask"); sourcePreview.classList.add("is-visible"); await waitForSourceImage(); const width = sourceImage && sourceImage.naturalWidth > 0 ? sourceImage.naturalWidth : img.naturalWidth; const height = sourceImage && sourceImage.naturalHeight > 0 ? sourceImage.naturalHeight : img.naturalHeight; if (width <= 0 || height <= 0) throw new Error("mask 尺寸无效"); ensureMaskCanvas(width, height); maskCtx.clearRect(0, 0, width, height); maskCtx.globalCompositeOperation = "source-over"; maskCtx.drawImage(img, 0, 0, width, height); const pixels = maskCtx.getImageData(0, 0, width, height); const data = pixels.data; for (let i = 0; i < data.length; i += 4) { const value = data[i]; data[i] = 0; data[i + 1] = 190; data[i + 2] = 255; data[i + 3] = value > 8 ? 190 : 0; } maskCtx.putImageData(pixels, 0, 0); maskDirty = false; corridorkeyHintMaskFile = null; requestAnimationFrame(() => { layoutMaskCanvas(); maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); }); maskStatus.textContent = "已生成 Sam3 mask，可编辑后作为自定义 mask"; resolve(); } catch (error) { reject(error); } }; img.onerror = () => reject(new Error("Sam3 mask 载入失败")); img.src = dataUrl; }); }
+    function canvasPoint(event) { const rect = maskCanvas.getBoundingClientRect(); return { x: ((event.clientX - rect.left) / rect.width) * maskCanvas.width, y: ((event.clientY - rect.top) / rect.height) * maskCanvas.height }; }
+    function setMaskBrushMode(mode) { maskBrushMode = mode === "erase" ? "erase" : "keep"; maskBrushModeButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.maskMode === maskBrushMode))); }
+    function drawMaskBrush(event) { if (!maskCanvas || !maskCtx) return; const p = canvasPoint(event); const radius = Number(maskBrushSize.value || 28); maskCtx.save(); maskCtx.globalCompositeOperation = maskBrushMode === "erase" ? "destination-out" : "source-over"; maskCtx.fillStyle = "rgba(0,190,255,0.62)"; maskCtx.beginPath(); maskCtx.arc(p.x, p.y, radius, 0, Math.PI * 2); maskCtx.fill(); maskCtx.restore(); maskDirty = true; updateHintMaskFile(); maskStatus.textContent = "edited mask"; }
+    function beginMaskPaint(event) { if (!maskCanvas) return; event.preventDefault(); event.stopPropagation(); maskPainting = true; maskCanvas.setPointerCapture(event.pointerId); drawMaskBrush(event); }
+    function paintMask(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); drawMaskBrush(event); }
+    function endMaskPaint(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); maskPainting = false; try { maskCanvas.releasePointerCapture(event.pointerId); } catch (_) {} }
     function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
-    function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); canvas.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); canvas.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); }
+    function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); setPreviewView("preview"); }
     function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
-    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "comfy-ermbg"; sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = pending.rgb; img.alt = "切图预览"; sourceFrame.appendChild(img); sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
+    async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); maskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); maskStatus.textContent = "Sam3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "Sam3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; maskStatus.textContent = elapsed ? `已生成 Sam3 mask · ${elapsed}` : "已生成 Sam3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); maskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); img.src = sourceUrl; img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; }; img.onerror = () => { sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); });
-    tabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
-    canvas.addEventListener("wheel", (event) => { if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
-    canvas.addEventListener("pointerdown", (event) => { if (!resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
+    backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
+    protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
+    protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
+    autoMask.addEventListener("change", () => syncAutoMaskControls());
+    samMaskButton.addEventListener("click", () => generateSamMask());
+    maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
+    maskClearButton.addEventListener("click", () => { if (!maskCanvas || !maskCtx) return; maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); maskDirty = true; updateHintMaskFile(); maskStatus.textContent = "edited mask"; });
+    window.addEventListener("resize", () => layoutMaskCanvas());
+    viewTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewView(tab.dataset.view)));
+    backgroundTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
+    canvas.addEventListener("wheel", (event) => { if (activeView === "mask") { if (!sourceImage) return; event.preventDefault(); const rect = sourceFrame.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = maskScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; maskScale = Math.min(8, Math.max(1, maskScale * factor)); maskPanX = pointerX - ((pointerX - maskPanX) * maskScale) / previousScale; maskPanY = pointerY - ((pointerY - maskPanY) * maskScale) / previousScale; if (maskScale === 1) { maskPanX = 0; maskPanY = 0; } applyMaskTransform(); return; } if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
+    canvas.addEventListener("pointerdown", (event) => { if (activeView === "mask" || !resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
-    canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => resetPreviewTransform());
-    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => { if (activeView !== "mask") resetPreviewTransform(); });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false"); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); const shouldUseCustomMask = backend.value === "comfy-corridorkey" && !autoMask.checked && maskDirty; const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null; if (hintMaskFile) formData.append("corridorkey_hint_mask", hintMaskFile); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    syncColorProtectionRange();
+    syncBackendSettings();
+    syncAutoMaskControls();
+    syncPreviewMode();
     loadPendingSlice();
   </script>
 </body>
@@ -736,11 +994,14 @@ def _matte_page_html() -> str:
       <label>
         后端
         <select id="backend" name="backend">
-          <option value="grabcut">grabcut</option>
-          <option value="comfy-ermbg" selected>comfy-ermbg</option>
-          <option value="auto">auto</option>
-          <option value="birefnet">birefnet</option>
+          <option value="auto" selected>Auto RouteMatte</option>
+          <option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>
+          <option value="pymatting-known-b">pymatting-known-b</option>
+          <option value="comfy-corridorkey">comfy-corridorkey</option>
           <option value="comfy-rmbg">comfy-rmbg</option>
+          
+          
+          
         </select>
       </label>
       <div class="slice-settings" id="slice-settings">
@@ -1570,6 +1831,15 @@ def _rgb_png_data_url(rgb: np.ndarray) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _mask_png_data_url(mask: np.ndarray) -> str:
+    arr = np.clip(mask.astype(np.float32), 0.0, 1.0)
+    u8 = np.clip(arr * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    buf = BytesIO()
+    Image.fromarray(u8, mode="L").save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def _json_safe_debug(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         summary: dict[str, object] = {
@@ -1725,20 +1995,197 @@ def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, result: SliceResult) 
     }
 
 
+@app.post("/api/sam-mask")
+def sam_mask_endpoint(
+    file: Annotated[UploadFile, File()],
+    threshold: Annotated[float, Form()] = 0.5,
+    refine_iterations: Annotated[int, Form()] = 2,
+) -> dict[str, object]:
+    if not 0.0 <= threshold <= 1.0:
+        raise HTTPException(status_code=400, detail="threshold must be between 0 and 1")
+    if not 0 <= refine_iterations <= 5:
+        raise HTTPException(status_code=400, detail="refine_iterations must be between 0 and 5")
+
+    image = _load_upload_image(file)
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    server_started_at = time.perf_counter()
+    try:
+        from .probe.comfyui_sam3_mask import ComfyUISAM3MaskClient
+
+        result = ComfyUISAM3MaskClient().mask(
+            image_rgb,
+            threshold=threshold,
+            refine_iterations=refine_iterations,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SAM3 mask failed: {e}") from e
+
+    return {
+        "backend": "comfy-sam3",
+        "server_elapsed_sec": time.perf_counter() - server_started_at,
+        "mask": _mask_png_data_url(result.mask),
+        "debug": _json_safe_debug(result.debug),
+    }
+
+
+def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
+    auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
+    if requested_backend == "auto" and isinstance(auto_route, dict):
+        selected = auto_route.get("selected_backend")
+        if isinstance(selected, str) and selected:
+            return selected
+    return requested_backend
+
+
+def _route_metadata(result: MatteResponse) -> dict[str, Any]:
+    auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
+    if not isinstance(auto_route, dict):
+        return {}
+    reasons = auto_route.get("reasons")
+    if not isinstance(reasons, list):
+        reason = auto_route.get("reason")
+        reasons = [reason] if isinstance(reason, str) and reason else []
+    return {
+        "route": auto_route.get("route"),
+        "asset_kind": auto_route.get("asset_kind"),
+        "parameter_profile": auto_route.get("parameter_profile"),
+        "execution_profile": auto_route.get("execution_profile"),
+        "route_confidence": auto_route.get("confidence"),
+        "route_reasons": reasons,
+    }
+
+
+def _run_web_backend(
+    image: Image.Image,
+    *,
+    backend: str,
+    shadow_mode: str,
+    corridorkey_screen_mode: str = "auto",
+    corridorkey_preset: str = "auto",
+    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    **kwargs: Any,
+) -> MatteResponse:
+    if backend == "direct-worker":
+        return matte_image_direct_worker(
+            image,
+            direct_worker_url=DEFAULT_DIRECT_WORKER_URL,
+            shadow_mode=shadow_mode,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        )
+    return matte_image(
+        image,
+        backend=backend,
+        qa=False,
+        shadow_mode=shadow_mode,
+        corridorkey_screen_mode=corridorkey_screen_mode,
+        corridorkey_preset=corridorkey_preset,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        **kwargs,
+    )
+
+
+def _parse_rgb_triplet(value: str) -> tuple[int, int, int]:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 3:
+        raise HTTPException(status_code=400, detail="pymatting_bg_color must be R,G,B")
+    try:
+        rgb = tuple(int(part) for part in parts)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="pymatting_bg_color must contain integers") from e
+    if any(c < 0 or c > 255 for c in rgb):
+        raise HTTPException(status_code=400, detail="pymatting_bg_color channels must be between 0 and 255")
+    return rgb  # type: ignore[return-value]
+
+
+def _pymatting_kwargs(
+    *,
+    pymatting_method: str,
+    pymatting_image_space: str,
+    pymatting_bg_source: str,
+    pymatting_bg_color: str,
+    pymatting_bg_threshold: float,
+    pymatting_fg_threshold: float,
+    pymatting_boundary_band_px: int,
+    pymatting_auto_adapt: bool,
+    pymatting_cg_maxiter: int,
+    pymatting_cg_rtol: float,
+) -> dict[str, object]:
+    method = pymatting_method.strip().lower()
+    if method not in {"cf", "knn", "lbdm", "lkm", "rw", "sm"}:
+        raise HTTPException(status_code=400, detail="pymatting_method must be cf, knn, lbdm, lkm, rw, or sm")
+    if pymatting_image_space not in {"linear", "sRGB"}:
+        raise HTTPException(status_code=400, detail="pymatting_image_space must be linear or sRGB")
+    bg_source = pymatting_bg_source.strip().lower()
+    if bg_source not in {"auto", "green", "blue", "custom"}:
+        raise HTTPException(status_code=400, detail="pymatting_bg_source must be auto, green, blue, or custom")
+    if not 0.0 <= pymatting_bg_threshold < pymatting_fg_threshold:
+        raise HTTPException(status_code=400, detail="pymatting_bg_threshold must be >= 0 and less than pymatting_fg_threshold")
+    if not 0 <= pymatting_boundary_band_px <= 16:
+        raise HTTPException(status_code=400, detail="pymatting_boundary_band_px must be between 0 and 16")
+    if not 1 <= pymatting_cg_maxiter <= 10000:
+        raise HTTPException(status_code=400, detail="pymatting_cg_maxiter must be between 1 and 10000")
+    if not 0.0 < pymatting_cg_rtol <= 0.01:
+        raise HTTPException(status_code=400, detail="pymatting_cg_rtol must be between 0 and 0.01")
+    return {
+        "pymatting_method": method,
+        "pymatting_image_space": pymatting_image_space,
+        "pymatting_bg_source": bg_source,
+        "pymatting_bg_color": _parse_rgb_triplet(pymatting_bg_color) if bg_source == "custom" else None,
+        "pymatting_bg_threshold": pymatting_bg_threshold,
+        "pymatting_fg_threshold": pymatting_fg_threshold,
+        "pymatting_boundary_band_px": pymatting_boundary_band_px,
+        "pymatting_auto_adapt": bool(pymatting_auto_adapt),
+        "pymatting_cg_maxiter": pymatting_cg_maxiter,
+        "pymatting_cg_rtol": pymatting_cg_rtol,
+    }
+
+
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
-    backend: Annotated[str, Form()] = "grabcut",
+    backend: Annotated[str, Form()] = "auto",
+    shadow_enabled: Annotated[bool, Form()] = True,
+    pymatting_method: Annotated[str, Form()] = "cf",
+    pymatting_image_space: Annotated[str, Form()] = "linear",
+    pymatting_bg_source: Annotated[str, Form()] = "auto",
+    pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
+    pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
+    pymatting_fg_threshold: Annotated[float, Form()] = 30.0,
+    pymatting_boundary_band_px: Annotated[int, Form()] = 2,
+    pymatting_auto_adapt: Annotated[bool, Form()] = True,
+    pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
+    pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
 ) -> Response:
     if backend not in ALLOWED_BACKENDS:
         raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
 
     image = _load_upload_image(file)
+    shadow_mode = "on" if shadow_enabled else "off"
+    pymatting_params = _pymatting_kwargs(
+        pymatting_method=pymatting_method,
+        pymatting_image_space=pymatting_image_space,
+        pymatting_bg_source=pymatting_bg_source,
+        pymatting_bg_color=pymatting_bg_color,
+        pymatting_bg_threshold=pymatting_bg_threshold,
+        pymatting_fg_threshold=pymatting_fg_threshold,
+        pymatting_boundary_band_px=pymatting_boundary_band_px,
+        pymatting_auto_adapt=pymatting_auto_adapt,
+        pymatting_cg_maxiter=pymatting_cg_maxiter,
+        pymatting_cg_rtol=pymatting_cg_rtol,
+    )
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode=WEB_SHADOW_MODE)
+        result = _run_web_backend(
+            image,
+            backend=backend,
+            shadow_mode=shadow_mode,
+            **pymatting_params,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
+    effective_backend = _effective_backend(backend, result)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     selected_rgba = result.rgba
     local_ownership_used = False
@@ -1747,10 +2194,10 @@ def matte_endpoint(
             image_rgb,
             result.rgba,
             result.background_color,
-            backend=backend,
+            backend=effective_backend,
             soft_mask=result.debug.get("soft_mask"),
-            shadow_mode=WEB_SHADOW_MODE,
-        ) if backend != "comfy-ermbg" else None
+            shadow_mode=shadow_mode,
+        ) if effective_backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception:
         local_candidate = None
     if local_candidate is not None:
@@ -1774,25 +2221,129 @@ def matte_endpoint(
 @app.post("/api/matte-candidates")
 def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
-    backend: Annotated[str, Form()] = "grabcut",
+    corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
+    backend: Annotated[str, Form()] = "auto",
+    shadow_enabled: Annotated[bool, Form()] = True,
+    corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
+    corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
+    corridorkey_despeckle_size: Annotated[int, Form()] = 400,
+    corridorkey_auto_mask: Annotated[bool, Form()] = False,
+    corridorkey_color_protection: Annotated[bool, Form()] = True,
+    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
+    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
+    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
+    corridorkey_preset: Annotated[str, Form()] = "auto",
+    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
+    pymatting_method: Annotated[str, Form()] = "cf",
+    pymatting_image_space: Annotated[str, Form()] = "linear",
+    pymatting_bg_source: Annotated[str, Form()] = "auto",
+    pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
+    pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
+    pymatting_fg_threshold: Annotated[float, Form()] = 30.0,
+    pymatting_boundary_band_px: Annotated[int, Form()] = 2,
+    pymatting_auto_adapt: Annotated[bool, Form()] = True,
+    pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
+    pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
 ) -> dict[str, object]:
     if backend not in ALLOWED_BACKENDS:
         raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
+    if corridorkey_gamma_space not in {"sRGB", "Linear"}:
+        raise HTTPException(status_code=400, detail="corridorkey_gamma_space must be sRGB or Linear")
+    if corridorkey_auto_despeckle not in {"On", "Off"}:
+        raise HTTPException(status_code=400, detail="corridorkey_auto_despeckle must be On or Off")
+    if corridorkey_screen_mode not in {"auto", "green", "blue"}:
+        raise HTTPException(status_code=400, detail="corridorkey_screen_mode must be auto, green, or blue")
+    if corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
+        raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
+    if corridorkey_hard_ui_hint_mode not in {
+        "all_white",
+        "bbox_2px",
+        "boundary_2px",
+        "boundary_2px_shadow_safe",
+        "boundary_2px_shadow_safe_edge_floor",
+        "translucent_button",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "corridorkey_hard_ui_hint_mode must be all_white, bbox_2px, boundary_2px, "
+                "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
+            ),
+        )
+    if not 0.0 <= corridorkey_despill_strength <= 1.0:
+        raise HTTPException(status_code=400, detail="corridorkey_despill_strength must be between 0 and 1")
+    if not 0.0 <= corridorkey_refiner_strength <= 4.0:
+        raise HTTPException(status_code=400, detail="corridorkey_refiner_strength must be between 0 and 4")
+    if not 0 <= corridorkey_despeckle_size <= 4096:
+        raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
+    if corridorkey_protection_fg_min <= corridorkey_protection_bg_max:
+        raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
+    shadow_mode = "on" if shadow_enabled else "off"
+    pymatting_params = _pymatting_kwargs(
+        pymatting_method=pymatting_method,
+        pymatting_image_space=pymatting_image_space,
+        pymatting_bg_source=pymatting_bg_source,
+        pymatting_bg_color=pymatting_bg_color,
+        pymatting_bg_threshold=pymatting_bg_threshold,
+        pymatting_fg_threshold=pymatting_fg_threshold,
+        pymatting_boundary_band_px=pymatting_boundary_band_px,
+        pymatting_auto_adapt=pymatting_auto_adapt,
+        pymatting_cg_maxiter=pymatting_cg_maxiter,
+        pymatting_cg_rtol=pymatting_cg_rtol,
+    )
 
     image = _load_upload_image(file)
+    hint_mask = (
+        _load_upload_image(corridorkey_hint_mask)
+        if corridorkey_hint_mask is not None and not corridorkey_auto_mask
+        else None
+    )
     server_started_at = time.perf_counter()
     try:
-        result = matte_image(image, backend=backend, qa=False, shadow_mode=WEB_SHADOW_MODE)
+        result = _run_web_backend(
+            image,
+            backend=backend,
+            shadow_mode=shadow_mode,
+            corridorkey_gamma_space=corridorkey_gamma_space,
+            corridorkey_despill_strength=corridorkey_despill_strength,
+            corridorkey_refiner_strength=corridorkey_refiner_strength,
+            corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+            corridorkey_despeckle_size=corridorkey_despeckle_size,
+            corridorkey_auto_mask=corridorkey_auto_mask,
+            corridorkey_color_protection=corridorkey_color_protection,
+            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            corridorkey_hint_mask=hint_mask,
+            **pymatting_params,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    if backend == "comfy-ermbg":
+    effective_backend = _effective_backend(backend, result)
+    if effective_backend in REMOTE_DIRECT_BACKENDS:
+        if effective_backend == "comfy-corridorkey":
+            direct_label = "远端 CorridorKey"
+        elif effective_backend == "comfy-pymatting-known-b":
+            direct_label = "远端 PyMatting Known-B"
+        elif effective_backend == "comfy-rmbg":
+            direct_label = "远端 RMBG"
+        elif effective_backend == "direct-worker":
+            direct_label = "Direct Worker"
+        elif effective_backend == "passthrough":
+            direct_label = "远端 Passthrough"
+        else:
+            direct_label = "PyMatting Known-B"
         candidates = [
             MatteCandidate(
                 id="auto",
-                label="远端 ERMBG",
+                label=direct_label,
                 rgba=result.rgba,
                 selected=True,
                 debug={"remote": result.debug},
@@ -1805,10 +2356,10 @@ def matte_candidates_endpoint(
             image_rgb,
             result.rgba,
             result.background_color,
-            backend=backend,
+            backend=effective_backend,
             soft_mask=result.debug.get("soft_mask"),
-            shadow_mode=WEB_SHADOW_MODE,
-        ) if backend != "comfy-ermbg" else None
+            shadow_mode=shadow_mode,
+        ) if effective_backend not in REMOTE_DIRECT_BACKENDS else None
     except Exception as e:
         local_candidate = None
         for candidate in candidates:
@@ -1820,7 +2371,9 @@ def matte_candidates_endpoint(
     return {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
-        "backend": backend,
+        "backend": effective_backend,
+        "requested_backend": backend,
+        **_route_metadata(result),
         "server_elapsed_sec": time.perf_counter() - server_started_at,
         "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
@@ -1987,35 +2540,38 @@ def _candidate_regions(candidate_results: list[dict[str, object]]) -> list[dict[
 
 
 def _game_sample_paths(case_id: str) -> dict[str, str]:
-    case_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / case_id / "case.json"
+    sample_root = _game_sample_root()
+    case_path = sample_root / case_id / "case.json"
+    if not case_path.exists():
+        for category in ("button", "icon", "character"):
+            candidate = sample_root / category / case_id / "case.json"
+            if candidate.exists():
+                case_path = candidate
+                break
     if case_path.exists():
         payload = _load_json(case_path)
         if isinstance(payload, dict):
             paths = {
-                variant: path
-                for variant in ("white", "green")
-                if isinstance(path := payload.get(variant), str)
+                screen: path
+                for screen in GAME_EVAL_SCREENS
+                if isinstance(path := payload.get(screen), str)
             }
             if paths:
                 return paths
-    return {
-        "white": f"samples/vlm_eval_game/{case_id}/white.png",
-        "green": f"samples/vlm_eval_game/{case_id}/green.png",
-    }
+    return {screen: f"{GAME_SAMPLE_REL.as_posix()}/{case_id}/{screen}.png" for screen in GAME_EVAL_SCREENS}
 
 
-def _sample_variant_from_path(path_value: object) -> str | None:
+def _sample_screen_from_path(path_value: object) -> str | None:
     if not isinstance(path_value, str):
         return None
     stem = Path(path_value).stem.lower()
-    if stem in {"white", "green"}:
+    if stem in {"white", "green", "blue"}:
         return stem
     return None
 
 
 def _game_sample_ids() -> dict[str, str]:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    manifest = _load_json(manifest_path)
+    manifest = _load_json(_game_sample_manifest())
     if not isinstance(manifest, dict):
         return {}
     cases = manifest.get("cases")
@@ -2032,10 +2588,9 @@ def _game_sample_ids() -> dict[str, str]:
 
 
 def _game_eval_samples() -> list[dict[str, object]]:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    if not manifest_path.exists():
+    if not _game_sample_manifest().exists():
         return []
-    manifest = _load_json(manifest_path)
+    manifest = _load_json(_game_sample_manifest())
     cases = manifest.get("cases") if isinstance(manifest, dict) else None
     if not isinstance(cases, list):
         return []
@@ -2045,16 +2600,51 @@ def _game_eval_samples() -> list[dict[str, object]]:
             continue
         sample_id = item.get("sample_id")
         sample_id = sample_id if isinstance(sample_id, str) else f"G{index:02d}"
+        sample_paths = _game_sample_paths(item["id"])
+        thumb_url = (
+            _image_url(sample_paths.get("green"))
+            or _image_url(sample_paths.get("white"))
+            or _image_url(sample_paths.get("blue"))
+        )
         samples.append(
             {
                 "sampleId": sample_id,
                 "caseId": item["id"],
                 "category": item.get("category", ""),
+                "family": item.get("family", ""),
+                "screen": item.get("screen", ""),
                 "primaryAmbiguity": item.get("primary_ambiguity", ""),
+                "thumbnailUrl": thumb_url,
                 "defaultSelected": sample_id in FAST_GAME_EVAL_SAMPLE_IDS,
             }
         )
     return samples
+
+
+def _game_eval_manifest_cases() -> list[dict[str, object]]:
+    if not _game_sample_manifest().exists():
+        return []
+    manifest = _load_json(_game_sample_manifest())
+    cases = manifest.get("cases") if isinstance(manifest, dict) else None
+    return [case for case in cases if isinstance(case, dict)] if isinstance(cases, list) else []
+
+
+def _game_eval_case_count(
+    cases: list[dict[str, object]] | None = None,
+    sample_ids: list[str] | None = None,
+) -> int:
+    selected = cases if cases is not None else _game_eval_manifest_cases()
+    if not selected and sample_ids:
+        return len(sample_ids)
+    if sample_ids:
+        wanted = set(sample_ids)
+        selected = [case for case in selected if str(case.get("sample_id", "")) in wanted]
+    return sum(
+        1
+        for case in selected
+        if isinstance(case.get("input"), str)
+        or any(isinstance(case.get(screen), str) for screen in GAME_EVAL_SCREENS)
+    )
 
 
 def _game_report_path(root: Path) -> Path | None:
@@ -2100,12 +2690,32 @@ def _solid_graphic_summary_path(root: Path) -> Path | None:
     return None
 
 
+def _remote_backend_summary_path(root: Path) -> Path | None:
+    path = root / "summary.json"
+    if not path.is_file():
+        return None
+    payload = _load_json(path)
+    if not isinstance(payload, dict):
+        return None
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        return None
+    remote_summary_backends = {"direct-worker"}
+    for item in runs:
+        backend = str(item.get("backend", "")) if isinstance(item, dict) else ""
+        if backend.startswith("comfy-") or backend in remote_summary_backends:
+            return path
+    return None
+
+
 def _game_eval_root_has_data(root: Path) -> bool:
     if _game_report_path(root) is not None:
         return True
     if _game_eval_partial_summary_paths(root):
         return True
     if _solid_graphic_summary_path(root) is not None:
+        return True
+    if _remote_backend_summary_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -2115,7 +2725,14 @@ def _game_eval_root_is_complete(root: Path) -> bool:
     if report_path is None:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is None:
-            return False
+            comfy_path = _remote_backend_summary_path(root)
+            if comfy_path is None:
+                return False
+            report = _load_json(comfy_path)
+            if not isinstance(report, dict):
+                return False
+            runs = report.get("runs")
+            return isinstance(runs, list) and len(runs) >= _game_eval_expected_case_count()
         report = _load_json(solid_path)
         if not isinstance(report, dict):
             return False
@@ -2134,19 +2751,28 @@ def _game_eval_root_is_complete(root: Path) -> bool:
         return False
 
 
-def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
-    out_root = PROJECT_ROOT / "out"
-    roots = []
-    for prefix in GAME_EVAL_RUN_PREFIXES:
-        roots.extend(
-            path
-            for path in sorted(out_root.glob(f"{prefix}*"))
-            if path.is_dir() and _game_eval_root_has_data(path)
-        )
-    roots = sorted(set(roots), key=lambda path: path.name, reverse=True)
-    if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
-        roots.insert(0, DEFAULT_GAME_EVAL_ROOT)
+def _game_eval_root_sort_key(root: Path) -> tuple[float, str]:
+    try:
+        mtime = root.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (mtime, root.name)
 
+
+def _game_eval_data_roots() -> list[Path]:
+    out_root = PROJECT_ROOT / "out"
+    roots = [
+        path
+        for path in out_root.iterdir()
+        if path.is_dir() and _game_eval_root_has_data(path)
+    ] if out_root.exists() else []
+    if DEFAULT_GAME_EVAL_ROOT.exists() and DEFAULT_GAME_EVAL_ROOT not in roots and _game_eval_root_has_data(DEFAULT_GAME_EVAL_ROOT):
+        roots.append(DEFAULT_GAME_EVAL_ROOT)
+    return sorted(set(roots), key=_game_eval_root_sort_key, reverse=True)
+
+
+def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]]:
+    roots = _game_eval_data_roots()
     selected = (selected_root or _default_game_eval_root()).resolve()
     runs: list[dict[str, object]] = []
     for root in roots:
@@ -2161,13 +2787,12 @@ def _game_eval_runs(selected_root: Path | None = None) -> list[dict[str, object]
     return runs
 
 
+def _is_valid_game_eval_run_id(run_id: str) -> bool:
+    return bool(run_id) and "/" not in run_id and "\\" not in run_id and not run_id.startswith(".")
+
+
 def _validate_game_eval_run_id(run_id: str) -> None:
-    if (
-        "/" in run_id
-        or "\\" in run_id
-        or run_id.startswith(".")
-        or not any(run_id.startswith(prefix) for prefix in GAME_EVAL_RUN_PREFIXES)
-    ):
+    if not _is_valid_game_eval_run_id(run_id):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
 
 
@@ -2176,31 +2801,27 @@ def _game_eval_run_path(run_id: str) -> Path:
     root = (PROJECT_ROOT / "out" / run_id).resolve()
     if not _is_relative_to(root, (PROJECT_ROOT / "out").resolve()):
         raise HTTPException(status_code=404, detail="Game eval run not found.")
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="Game eval run not found.")
     return root
 
 
 def _next_game_eval_run_id(prefix: str = LOCAL_OWNERSHIP_EVAL_PREFIX) -> str:
     out_root = PROJECT_ROOT / "out"
-    version_re = re.compile(rf"^{re.escape(prefix)}(?:v)?(\d+)")
+    stamp = datetime.now().strftime("%Y%m%d")
+    version_re = re.compile(rf"^{re.escape(prefix)}{stamp}_v(\d+)$")
     versions = []
-    for path in out_root.glob(f"{prefix}*"):
+    for path in out_root.glob(f"{prefix}{stamp}_v*"):
         match = version_re.match(path.name)
         if match:
             versions.append(int(match.group(1)))
     version = max(versions, default=0) + 1
-    stamp = datetime.now().strftime("%Y%m%d")
-    return f"{LOCAL_OWNERSHIP_EVAL_PREFIX}v{version:03d}_web_{stamp}"
+    return f"{prefix}{stamp}_v{version:03d}"
 
 
 def _game_eval_expected_case_count() -> int:
-    manifest_path = PROJECT_ROOT / "samples" / "vlm_eval_game" / "manifest.json"
-    if not manifest_path.exists():
-        return 18
-    manifest = _load_json(manifest_path)
-    cases = manifest.get("cases") if isinstance(manifest, dict) else None
-    if isinstance(cases, list) and cases:
-        return len(cases) * 2
-    return 18
+    total = _game_eval_case_count()
+    return total if total > 0 else FALLBACK_GAME_EVAL_EXPECTED_TOTAL
 
 
 def _game_eval_batch_progress(
@@ -2221,15 +2842,23 @@ def _game_eval_batch_progress(
             completed = len(rows)
             ok = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "ok")
             errors = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "error")
+        runs = report.get("runs") if isinstance(report, dict) else None
+        if isinstance(runs, list):
+            completed = len(runs)
+            errors = sum(1 for row in runs if isinstance(row, dict) and row.get("status") == "error")
+            ok = completed - errors
         if isinstance(report, dict):
             try:
-                report_total = int(report.get("case_count", 0))
+                if isinstance(runs, list) and isinstance(report.get("run_count"), int):
+                    report_total = int(report["run_count"])
+                else:
+                    report_total = int(report.get("case_count", 0))
                 total = report_total if prefer_report_total and report_total > 0 else max(total, report_total)
             except (TypeError, ValueError):
                 pass
     else:
         # The batch script writes per-case summaries immediately, while the
-        # final eval_report.json appears only after every selected variant
+        # final eval_report.json appears only after every selected input
         # finishes. Counting these partial summaries keeps the UI visibly
         # alive during long local matting/ownership runs.
         for summary_path in _game_eval_partial_summary_paths(root):
@@ -2252,9 +2881,18 @@ def _game_eval_batch_progress(
     }
 
 
+def _game_eval_status_report_path(root: Path) -> Path | None:
+    return (
+        _game_report_path(root)
+        or _solid_graphic_summary_path(root)
+        or _remote_backend_summary_path(root)
+        or _game_matte_summary_path(root)
+    )
+
+
 def _game_eval_batch_status(run_id: str) -> dict[str, object]:
     root = _game_eval_run_path(run_id)
-    report_path = _game_report_path(root)
+    report_path = _game_eval_status_report_path(root)
     with _GAME_EVAL_JOBS_LOCK:
         job = _GAME_EVAL_JOBS.get(run_id)
     process = job.get("process") if isinstance(job, dict) else None
@@ -2300,8 +2938,8 @@ def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
         invalid = sorted(set(sample_ids) - known)
         if invalid:
             raise HTTPException(status_code=400, detail=f"Unknown sample_id: {', '.join(invalid)}")
-    elif any(not re.fullmatch(r"G\d{2}", sample_id) for sample_id in sample_ids):
-        raise HTTPException(status_code=400, detail="sample_ids must look like G01.")
+    elif any(not re.fullmatch(r"[A-Z]\d{3}|G\d{2}", sample_id) for sample_id in sample_ids):
+        raise HTTPException(status_code=400, detail="sample_ids must look like B001.")
     deduped: list[str] = []
     for sample_id in sample_ids:
         if sample_id not in deduped:
@@ -2311,18 +2949,42 @@ def _selected_game_eval_sample_ids(payload: dict[str, Any] | None) -> list[str]:
     return deduped
 
 
-def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, object]:
+def _selected_game_eval_test_path(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return DEFAULT_GAME_EVAL_TEST_PATH
+    raw = payload.get("test_path", payload.get("path", payload.get("backend")))
+    if raw is None:
+        return DEFAULT_GAME_EVAL_TEST_PATH
+    selected = str(raw).strip().lower()
+    backend_to_path = {
+        str(config["backend"]): path_key
+        for path_key, config in GAME_EVAL_TEST_PATHS.items()
+    }
+    selected = backend_to_path.get(selected, selected)
+    if selected not in GAME_EVAL_TEST_PATHS:
+        raise HTTPException(status_code=400, detail=f"Unknown test_path: {raw}")
+    return selected
+
+
+def _start_game_eval_batch(
+    sample_ids: list[str] | None = None,
+    test_path: str = DEFAULT_GAME_EVAL_TEST_PATH,
+) -> dict[str, object]:
     selected_sample_ids = list(sample_ids or [])
-    run_id = _next_game_eval_run_id(LOCAL_OWNERSHIP_EVAL_PREFIX)
+    path_config = GAME_EVAL_TEST_PATHS.get(test_path, GAME_EVAL_TEST_PATHS[DEFAULT_GAME_EVAL_TEST_PATH])
+    backend = str(path_config["backend"])
+    run_id = _next_game_eval_run_id(str(path_config["prefix"]))
     out_dir = PROJECT_ROOT / "out" / run_id
     out_dir.mkdir(parents=True, exist_ok=False)
     log_path = out_dir / "web_batch.log"
-    script_path = PROJECT_ROOT / "scripts" / "10_local_ownership_batch.py"
+    script_path = PROJECT_ROOT / "scripts" / "run_corridorkey_game_eval.py"
     command = [
         sys.executable,
         str(script_path),
         "--out-dir",
         str(out_dir),
+        "--backend",
+        backend,
     ]
     if selected_sample_ids:
         command.extend(["--sample-id", ",".join(selected_sample_ids)])
@@ -2343,6 +3005,9 @@ def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, obj
         "log": str(log_path.relative_to(PROJECT_ROOT)),
         "pid": process.pid,
         "started_at": datetime.now().isoformat(timespec="seconds"),
+        "backend": backend,
+        "test_path": test_path,
+        "test_path_label": path_config["label"],
         "sample_ids": selected_sample_ids,
     }
     (out_dir / "web_launch.json").write_text(json.dumps(launch, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -2350,28 +3015,20 @@ def _start_game_eval_batch(sample_ids: list[str] | None = None) -> dict[str, obj
         _GAME_EVAL_JOBS[run_id] = {
             "process": process,
             "log": log_path,
+            "backend": backend,
+            "test_path": test_path,
             "sample_ids": selected_sample_ids,
-            "expected_total": len(selected_sample_ids) * 2 if selected_sample_ids else _game_eval_expected_case_count(),
+            "expected_total": (
+                _game_eval_case_count(sample_ids=selected_sample_ids)
+                if selected_sample_ids
+                else _game_eval_expected_case_count()
+            ),
         }
     return _game_eval_batch_status(run_id)
 
 
 def _default_game_eval_root() -> Path:
-    roots = [
-        path
-        for path in sorted((PROJECT_ROOT / "out").glob(f"{LOCAL_OWNERSHIP_EVAL_PREFIX}*"), reverse=True)
-        if path.is_dir() and _game_eval_root_has_data(path)
-    ]
-    if not roots:
-        roots = [
-            path
-            for prefix in GAME_EVAL_RUN_PREFIXES
-            for path in sorted((PROJECT_ROOT / "out").glob(f"{prefix}*"), reverse=True)
-            if path.is_dir() and _game_eval_root_has_data(path)
-        ]
-    complete_roots = [root for root in roots if _game_eval_root_is_complete(root)]
-    if complete_roots:
-        return complete_roots[0]
+    roots = _game_eval_data_roots()
     if roots:
         return roots[0]
     return DEFAULT_GAME_EVAL_ROOT
@@ -2421,19 +3078,19 @@ def _game_case_out_dir(row: dict[str, object], root: Path = DEFAULT_GAME_EVAL_RO
     out_dir_value = row.get("out_dir")
     if isinstance(out_dir_value, str):
         return _resolve_project_path(out_dir_value)
-    variant = row.get("sample_variant")
-    if isinstance(variant, str):
-        return _game_vlm_root(root) / case_id / variant
+    screen = row.get("sample_screen")
+    if isinstance(screen, str):
+        return _game_vlm_root(root) / case_id / screen
     return _game_vlm_root(root) / case_id
 
 
-def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, object]) -> str | None:
+def _case_matte_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
     for value in (summary.get("rgba"), summary.get("matte"), summary.get("output")):
         if isinstance(value, str):
             url = _image_url(value)
             if url:
                 return url
-    for name in (f"{sample_variant}_rgba.png", "rgba.png"):
+    for name in (f"{sample_screen}_rgba.png", "rgba.png"):
         url = _image_url(out_dir / name)
         if url:
             return url
@@ -2441,11 +3098,90 @@ def _case_matte_url(out_dir: Path, sample_variant: str, summary: dict[str, objec
     return _image_url(matches[0]) if matches else None
 
 
-def _game_region_url(root: Path, case_id: str, sample_variant: str | None = None) -> str:
+def _case_alpha_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
+    for value in (summary.get("alpha"), summary.get("mask")):
+        if isinstance(value, str):
+            url = _image_url(value)
+            if url:
+                return url
+    for name in (f"{sample_screen}_alpha.png", "alpha.png", "mask.png"):
+        url = _image_url(out_dir / name)
+        if url:
+            return url
+    matches = sorted(out_dir.glob("*_alpha.png"))
+    return _image_url(matches[0]) if matches else None
+
+
+def _case_artifact_url(
+    out_dir: Path,
+    sample_screen: str,
+    summary: dict[str, object],
+    summary_keys: tuple[str, ...],
+    filenames: tuple[str, ...],
+) -> str | None:
+    for key in summary_keys:
+        value = summary.get(key)
+        if isinstance(value, str):
+            url = _image_url(value)
+            if url:
+                return url
+    for name in filenames:
+        url = _image_url(out_dir / name)
+        if url:
+            return url
+
+    stemmed_suffixes = tuple(name.removeprefix(f"{sample_screen}_") for name in filenames)
+    for suffix in stemmed_suffixes:
+        matches = sorted(out_dir.glob(f"*_{suffix}"))
+        if matches:
+            url = _image_url(matches[0])
+            if url:
+                return url
+    return None
+
+
+def _case_mask_hint_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
+    return _case_artifact_url(
+        out_dir,
+        sample_screen,
+        summary,
+        ("hint", "mask_hint", "corridorkey_hint"),
+        (f"{sample_screen}_corridorkey_hint.png", "corridorkey_hint.png"),
+    )
+
+
+def _case_corridorkey_raw_alpha_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
+    return _case_artifact_url(
+        out_dir,
+        sample_screen,
+        summary,
+        ("raw_alpha", "corridorkey_raw_alpha"),
+        (f"{sample_screen}_corridorkey_raw_alpha.png", "corridorkey_raw_alpha.png"),
+    )
+
+
+def _case_foreground_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
+    return _case_artifact_url(
+        out_dir,
+        sample_screen,
+        summary,
+        ("foreground", "corridorkey_foreground"),
+        (f"{sample_screen}_foreground.png", "foreground.png"),
+    )
+
+
+def _sibling_image_url(path_value: object, filename: str) -> str | None:
+    if not isinstance(path_value, str) or not path_value:
+        return None
+    path = _resolve_project_path(path_value)
+    return _image_url(path.with_name(filename))
+
+
+def _game_region_url(root: Path, case_id: str, sample_screen: str | None = None) -> str:
     base = f"/eval/game/regions/{quote(case_id, safe='')}"
     params: list[str] = []
-    if sample_variant:
-        params.append(f"variant={quote(sample_variant, safe='')}")
+    if sample_screen:
+        params.append(f"screen={quote(sample_screen, safe='')}")
     if root.resolve() == DEFAULT_GAME_EVAL_ROOT.resolve():
         return f"{base}?{'&'.join(params)}" if params else base
     params.append(f"run={quote(root.name, safe='')}")
@@ -2467,12 +3203,16 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
         sample_id = sample_ids.get(case_id, f"G{case_index + 1:02d}")
         out_dir = _resolve_project_path(str(row.get("out_dir"))) if isinstance(row.get("out_dir"), str) else root / "matte" / case_id
         input_path = row.get("input")
-        active_variant = _sample_variant_from_path(input_path) or "green"
+        active_screen = _sample_screen_from_path(input_path) or "green"
         sample_paths = _game_sample_paths(case_id)
         shadow_detected = bool(row.get("shadow_detected", False))
         shadow_pixels = int(row.get("shadow_pixels", 0) or 0)
         strategy = str(row.get("strategy", ""))
-        matte_url = _case_matte_url(out_dir, active_variant, row)
+        matte_url = _case_matte_url(out_dir, active_screen, row)
+        alpha_url = _case_alpha_url(out_dir, active_screen, row)
+        mask_hint_url = _case_mask_hint_url(out_dir, active_screen, row)
+        raw_alpha_url = _case_corridorkey_raw_alpha_url(out_dir, active_screen, row)
+        foreground_url = _case_foreground_url(out_dir, active_screen, row)
         candidate = {
             "id": "matte",
             "label": "matte result",
@@ -2482,15 +3222,15 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
             "url": matte_url,
         }
 
-        for sample_variant, sample_path in sample_paths.items():
-            is_active_run = sample_variant == active_variant
-            sample_code = f"{sample_id}-{sample_variant[:1].upper()}"
+        for sample_screen, sample_path in sample_paths.items():
+            is_active_run = sample_screen == active_screen
+            sample_code = f"{sample_id}-{sample_screen[:1].upper()}"
             cases.append(
                 {
                     "caseId": case_id,
                     "sampleId": sample_id,
                     "sampleCode": sample_code,
-                    "sampleVariant": sample_variant,
+                    "sampleScreen": sample_screen,
                     "runStatus": "ran" if is_active_run else "not-run",
                     "category": "matte-rerun" if is_active_run else "",
                     "verdict": strategy if is_active_run else "not-run",
@@ -2501,7 +3241,11 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
                     "primaryAmbiguity": f"shadow mean={float(row.get('shadow_mean_alpha', 0.0) or 0.0):.3f}, p95={float(row.get('shadow_p95_alpha', 0.0) or 0.0):.3f}" if is_active_run else "",
                     "originalUrl": _image_url(sample_path),
                     "regionsUrl": None,
+                    "alphaUrl": alpha_url if is_active_run else None,
                     "matteUrl": matte_url if is_active_run else None,
+                    "maskHintUrl": mask_hint_url if is_active_run else None,
+                    "corridorkeyRawAlphaUrl": raw_alpha_url if is_active_run else None,
+                    "corridorkeyForegroundUrl": foreground_url if is_active_run else None,
                     "candidates": [candidate] if is_active_run and matte_url else [],
                 }
             )
@@ -2535,10 +3279,10 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
         if not isinstance(row, dict):
             continue
         case_id = str(row.get("case_id") or summary_path.parents[1].name)
-        sample_variant = str(row.get("sample_variant") or summary_path.parent.name)
+        sample_screen = str(row.get("sample_screen") or summary_path.parent.name)
         sample_id = str(row.get("sample_id") or sample_ids.get(case_id, case_id))
         sample_paths = _game_sample_paths(case_id)
-        sample_path = sample_paths.get(sample_variant, "")
+        sample_path = sample_paths.get(sample_screen, "")
         status = str(row.get("status", "ok"))
         is_ok = status != "error"
         ok_count += 1 if is_ok else 0
@@ -2554,6 +3298,11 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
             if isinstance(role, str)
         )
         preview_path = row.get("protected_rgba") or row.get("rgba")
+        alpha_url = _sibling_image_url(preview_path, "alpha.png")
+        artifact_dir = _resolve_project_path(preview_path).parent if isinstance(preview_path, str) and preview_path else summary_path.parent
+        mask_hint_url = _case_mask_hint_url(artifact_dir, sample_screen, row)
+        raw_alpha_url = _case_corridorkey_raw_alpha_url(artifact_dir, sample_screen, row)
+        foreground_url = _case_foreground_url(artifact_dir, sample_screen, row)
         candidates = []
         if is_ok and preview_path:
             candidates.append(
@@ -2571,8 +3320,8 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
             {
                 "caseId": case_id,
                 "sampleId": sample_id,
-                "sampleCode": str(row.get("sample_code") or f"{sample_id}-{sample_variant[:1].upper()}"),
-                "sampleVariant": sample_variant,
+                "sampleCode": str(row.get("sample_code") or f"{sample_id}-{sample_screen[:1].upper()}"),
+                "sampleScreen": sample_screen,
                 "runStatus": "ran" if is_ok else "error",
                 "category": row.get("category", ""),
                 "verdict": row.get("diagnosis_verdict", status),
@@ -2588,8 +3337,12 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
                 "selectedTools": top_roles if is_ok else [],
                 "primaryAmbiguity": row.get("expected_role", row.get("error", "")),
                 "originalUrl": _image_url(sample_path),
-                "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_ok else None,
+                "regionsUrl": _game_region_url(root, case_id, sample_screen) if is_ok else None,
+                "alphaUrl": alpha_url if is_ok else None,
                 "matteUrl": _image_url(preview_path) if is_ok else None,
+                "maskHintUrl": mask_hint_url if is_ok else None,
+                "corridorkeyRawAlphaUrl": raw_alpha_url if is_ok else None,
+                "corridorkeyForegroundUrl": foreground_url if is_ok else None,
                 "candidates": candidates,
             }
         )
@@ -2634,9 +3387,9 @@ def _solid_graphic_diff_url(root: Path, row: dict[str, object]) -> str | None:
                 return _image_url(candidate)
     sample_id = str(row.get("sample_id", ""))
     case_id = str(row.get("case_id", ""))
-    variant = str(row.get("variant", ""))
-    if sample_id and case_id and variant:
-        return _image_url(root / f"{sample_id}_{case_id}_{variant}" / "alpha_abs_diff.png")
+    screen = str(row.get("screen", ""))
+    if sample_id and case_id and screen:
+        return _image_url(root / f"{sample_id}_{case_id}_{screen}" / "alpha_abs_diff.png")
     return None
 
 
@@ -2687,8 +3440,8 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
         ok_count += 1 if is_ok else 0
         case_id = str(item.get("case_id") or f"case_{index:02d}")
         sample_id = str(item.get("sample_id") or f"G{index:02d}")
-        variant = str(item.get("variant") or _sample_variant_from_path(item.get("input")) or "green")
-        sample_code = f"{sample_id}-{variant[:1].upper()}"
+        screen = str(item.get("screen") or _sample_screen_from_path(item.get("input")) or "green")
+        sample_code = f"{sample_id}-{screen[:1].upper()}"
         new_branch = item.get("new") if isinstance(item.get("new"), dict) else {}
         old_branch = item.get("old") if isinstance(item.get("old"), dict) else {}
         if not new_branch and isinstance(item.get("outputs"), dict):
@@ -2711,6 +3464,10 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
 
         candidates: list[dict[str, object]] = []
         new_url = _solid_graphic_artifact_url(new_branch, "rgba")
+        new_alpha_url = _solid_graphic_artifact_url(new_branch, "alpha")
+        new_foreground_url = _solid_graphic_artifact_url(new_branch, "foreground")
+        new_mask_hint_url = _solid_graphic_artifact_url(new_branch, "hint")
+        new_raw_alpha_url = _solid_graphic_artifact_url(new_branch, "raw_alpha")
         if new_url:
             candidates.append(
                 {
@@ -2761,7 +3518,7 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
                 "caseId": case_id,
                 "sampleId": sample_id,
                 "sampleCode": sample_code,
-                "sampleVariant": variant,
+                "sampleScreen": screen,
                 "runStatus": "ran" if is_ok else "error",
                 "category": "solid-graphic-compare",
                 "verdict": verdict if is_ok else status,
@@ -2778,7 +3535,11 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
                 "primaryAmbiguity": primary,
                 "originalUrl": _image_url(item.get("input")),
                 "regionsUrl": None,
+                "alphaUrl": new_alpha_url,
                 "matteUrl": new_url,
+                "maskHintUrl": new_mask_hint_url,
+                "corridorkeyRawAlphaUrl": new_raw_alpha_url,
+                "corridorkeyForegroundUrl": new_foreground_url,
                 "candidates": candidates if is_ok else [],
             }
         )
@@ -2796,7 +3557,135 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
         "sampleRows": len(cases),
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str(root.relative_to(PROJECT_ROOT)),
-        "vlmRoot": str((PROJECT_ROOT / "samples" / "vlm_eval_game").relative_to(PROJECT_ROOT)),
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "progress": progress,
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
+def _case_id_from_comfy_run(item: dict[str, object], index: int) -> tuple[str, str, str]:
+    metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
+    input_path = item.get("input")
+    item_screen = item.get("sample_screen")
+    screen = str(item_screen) if isinstance(item_screen, str) and item_screen else (_sample_screen_from_path(input_path) or "green")
+    sample_id = str(metadata.get("sample_id") or "")
+    case_id = str(metadata.get("id") or "")
+    case_label = str(item.get("case") or "")
+    if not sample_id and case_label:
+        parts = case_label.split("_")
+        if parts and re.fullmatch(r"[A-Z]\d{3}|G\d{2}", parts[0]):
+            sample_id = parts[0]
+    if not case_id and isinstance(input_path, str):
+        try:
+            case_id = Path(input_path).parent.name
+        except Exception:
+            case_id = ""
+    if not sample_id:
+        sample_id = f"S{index:03d}"
+    if not case_id:
+        case_id = case_label or f"case_{index:02d}"
+    return sample_id, case_id, screen
+
+
+def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> dict[str, object]:
+    payload = _load_json(summary_path)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Comfy ERMBG summary must be a JSON object.")
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        raise HTTPException(status_code=500, detail="Comfy ERMBG summary is missing runs.")
+
+    cases: list[dict[str, object]] = []
+    ok_count = 0
+    for index, item in enumerate((run for run in runs if isinstance(run, dict)), start=1):
+        status = str(item.get("status", "ok"))
+        is_ok = status != "error"
+        ok_count += 1 if is_ok else 0
+        sample_id, case_id, screen = _case_id_from_comfy_run(item, index)
+        metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
+        outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else {}
+        metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
+        remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
+        timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}
+        strategy = str(item.get("backend") or "auto")
+        elapsed = item.get("elapsed_sec_client")
+        alpha_mean = metrics.get("alpha_mean")
+        alpha_pixels = metrics.get("alpha_nonzero_pixels")
+        reason_parts = []
+        if isinstance(elapsed, (int, float)):
+            reason_parts.append(f"{float(elapsed):.1f}s client")
+        if isinstance(timings.get("total_sec"), (int, float)):
+            reason_parts.append(f"{float(timings['total_sec']):.1f}s server")
+        if isinstance(alpha_mean, (int, float)):
+            reason_parts.append(f"alpha_mean={float(alpha_mean):.3f}")
+        if isinstance(alpha_pixels, int):
+            reason_parts.append(f"alpha_px={alpha_pixels}")
+        candidate_url = _image_url(outputs.get("rgba"))
+        alpha_url = _image_url(outputs.get("alpha")) or _sibling_image_url(outputs.get("rgba"), "alpha.png")
+        mask_hint_url = _image_url(outputs.get("hint")) or _image_url(outputs.get("corridorkey_hint")) or _sibling_image_url(outputs.get("rgba"), "corridorkey_hint.png")
+        raw_alpha_url = _image_url(outputs.get("raw_alpha")) or _image_url(outputs.get("corridorkey_raw_alpha")) or _sibling_image_url(outputs.get("rgba"), "corridorkey_raw_alpha.png")
+        foreground_url = _image_url(outputs.get("foreground")) or _sibling_image_url(outputs.get("rgba"), "foreground.png")
+        candidates = []
+        if is_ok and candidate_url:
+            candidates.append(
+                {
+                    "id": strategy.replace("-", "_"),
+                    "label": strategy,
+                    "selected": True,
+                    "tools": [strategy],
+                    "reason": ", ".join(reason_parts),
+                    "url": candidate_url,
+                }
+            )
+        sample_paths = _game_sample_paths(case_id)
+        sample_path = sample_paths.get(screen) or str(item.get("input", ""))
+        cases.append(
+            {
+                "caseId": case_id,
+                "sampleId": sample_id,
+                "sampleCode": f"{sample_id}-{screen[:1].upper()}",
+                "sampleScreen": screen,
+                "runStatus": "ran" if is_ok else "error",
+                "category": metadata.get("category", strategy),
+                "verdict": strategy if is_ok else status,
+                "expectedHit": is_ok,
+                "expectedAnyHit": is_ok,
+                "harmfulToolSelected": False,
+                "harmfulTools": [],
+                "shadowPolicyRequired": False,
+                "shadowPolicyHit": None,
+                "shadowCandidateCount": 0,
+                "regionCount": int(alpha_pixels) if isinstance(alpha_pixels, int) else 0,
+                "counts": {"alpha_nonzero_pixels": alpha_pixels, "alpha_mean": alpha_mean},
+                "selectedTools": [strategy] if is_ok else [],
+                "primaryAmbiguity": metadata.get("primary_ambiguity", ""),
+                "originalUrl": _image_url(sample_path),
+                "regionsUrl": None,
+                "alphaUrl": alpha_url if is_ok else None,
+                "matteUrl": candidate_url if is_ok else None,
+                "maskHintUrl": mask_hint_url if is_ok else None,
+                "corridorkeyRawAlphaUrl": raw_alpha_url if is_ok else None,
+                "corridorkeyForegroundUrl": foreground_url if is_ok else None,
+                "candidates": candidates,
+            }
+        )
+
+    progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
+    return {
+        "runId": root.name,
+        "model": f"{str(payload.get('backend') or (runs[0].get('backend') if runs and isinstance(runs[0], dict) else 'auto'))} remote",
+        "success": f"{ok_count}/{len(runs)}",
+        "expectedHit": f"{ok_count}/{len(runs)}",
+        "expectedAnyHit": f"{ok_count}/{len(runs)}",
+        "harmfulTools": f"0/{len(runs)}",
+        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str(root.relative_to(PROJECT_ROOT)),
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
         "runs": _game_eval_runs(root),
         "selectedRun": root.name,
         "progress": progress,
@@ -2813,6 +3702,9 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         solid_path = _solid_graphic_summary_path(root)
         if solid_path is not None:
             return _game_eval_data_from_solid_graphic_summary(root, solid_path)
+        comfy_path = _remote_backend_summary_path(root)
+        if comfy_path is not None:
+            return _game_eval_data_from_comfy_ermbg_summary(root, comfy_path)
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name
@@ -2890,23 +3782,32 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
             )
 
         sample_paths = _game_sample_paths(case_id)
-        row_variant = row.get("sample_variant")
-        active_variant = (
-            row_variant
-            if isinstance(row_variant, str) and row_variant in sample_paths
-            else _sample_variant_from_path(summary.get("input")) or "green"
+        row_screen = row.get("sample_screen")
+        active_screen = (
+            row_screen
+            if isinstance(row_screen, str) and row_screen in sample_paths
+            else _sample_screen_from_path(summary.get("input")) or "green"
         )
-        variants = [active_variant] if isinstance(row_variant, str) else list(sample_paths)
-        for sample_variant in variants:
-            sample_path = sample_paths.get(sample_variant, str(summary.get("input", "")))
-            is_active_run = sample_variant == active_variant
-            sample_code = f"{sample_id}-{sample_variant[:1].upper()}"
+        screens = [active_screen] if isinstance(row_screen, str) else list(sample_paths)
+        for sample_screen in screens:
+            sample_path = sample_paths.get(sample_screen, str(summary.get("input", "")))
+            is_active_run = sample_screen == active_screen
+            sample_code = f"{sample_id}-{sample_screen[:1].upper()}"
+            alpha_url = _case_alpha_url(out_dir, active_screen, summary) if is_active_run else None
+            matte_url = (
+                _image_url(summary.get("rgba") or row.get("protected_rgba") or row.get("rgba") or root / "matte" / case_id / "rgba.png")
+                if is_active_run
+                else None
+            )
+            mask_hint_url = _case_mask_hint_url(out_dir, active_screen, summary) if is_active_run else None
+            raw_alpha_url = _case_corridorkey_raw_alpha_url(out_dir, active_screen, summary) if is_active_run else None
+            foreground_url = _case_foreground_url(out_dir, active_screen, summary) if is_active_run else None
             cases.append(
                 {
                     "caseId": case_id,
                     "sampleId": sample_id,
                     "sampleCode": sample_code,
-                    "sampleVariant": sample_variant,
+                    "sampleScreen": sample_screen,
                     "runStatus": "ran" if is_active_run else "not-run",
                     "category": row.get("category", ""),
                     "verdict": row.get("diagnosis_verdict", "") if is_active_run else "not-run",
@@ -2922,10 +3823,12 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "selectedTools": fallback_tools if is_active_run else [],
                     "primaryAmbiguity": row.get("primary_ambiguity", row.get("expected_role", "")),
                     "originalUrl": _image_url(sample_path),
-                    "regionsUrl": _game_region_url(root, case_id, sample_variant) if is_active_run else None,
-                    "matteUrl": _image_url(summary.get("rgba") or row.get("protected_rgba") or row.get("rgba") or root / "matte" / case_id / "rgba.png")
-                    if is_active_run
-                    else None,
+                    "regionsUrl": _game_region_url(root, case_id, sample_screen) if is_active_run else None,
+                    "alphaUrl": alpha_url,
+                    "matteUrl": matte_url,
+                    "maskHintUrl": mask_hint_url,
+                    "corridorkeyRawAlphaUrl": raw_alpha_url,
+                    "corridorkeyForegroundUrl": foreground_url,
                     "candidates": candidates if is_active_run else [],
                 }
             )
@@ -2952,7 +3855,10 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
 
 @app.post("/eval/game/run")
 def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
-    return _start_game_eval_batch(_selected_game_eval_sample_ids(payload))
+    return _start_game_eval_batch(
+        sample_ids=_selected_game_eval_sample_ids(payload),
+        test_path=_selected_game_eval_test_path(payload),
+    )
 
 
 @app.get("/eval/game/run/{run_id}/status")
@@ -3029,7 +3935,7 @@ def _draw_region_overlay(input_path: Path, regions: list[dict[str, object]]) -> 
 def game_eval_regions(
     case_id: str,
     run: str | None = Query(default=None),
-    variant: str | None = Query(default=None),
+    screen: str | None = Query(default=None),
 ) -> Response:
     root = _game_eval_root(run)
     rows = _game_report_rows(root)
@@ -3038,7 +3944,7 @@ def game_eval_regions(
             item
             for item in rows
             if item.get("case_id") == case_id
-            and (variant is None or item.get("sample_variant") == variant)
+            and (screen is None or item.get("sample_screen") == screen)
         ),
         None,
     )
@@ -3053,7 +3959,7 @@ def game_eval_regions(
         input_path = _resolve_project_path(input_path_value)
     else:
         sample_paths = _game_sample_paths(case_id)
-        input_path = _resolve_project_path(sample_paths.get(str(row.get("sample_variant", variant or "")), ""))
+        input_path = _resolve_project_path(sample_paths.get(str(row.get("sample_screen", screen or "")), ""))
     if not _is_relative_to(input_path, (PROJECT_ROOT / "samples").resolve()) or not input_path.exists():
         raise HTTPException(status_code=404, detail="Case input image not found.")
     regions = _candidate_regions(_candidate_result_items(out_dir / "candidate_results.json"))
@@ -3161,7 +4067,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       font: inherit;
       font-weight: 700;
     }}
-    main {{ width: min(1760px, 100%); margin: 0 auto; padding: 18px 20px 28px; }}
+    main {{ width: min(1600px, 100%); margin: 0 auto; padding: 18px 20px 28px; }}
     .summary {{
       display: flex;
       flex-wrap: wrap;
@@ -3191,7 +4097,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       background: #ffffff;
     }}
     table {{
-      width: max(100%, 1220px);
+      width: max(100%, 1280px);
       border-collapse: separate;
       border-spacing: 0;
       table-layout: fixed;
@@ -3211,18 +4117,26 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }}
     td {{ padding: 10px; }}
     tr:last-child td {{ border-bottom: 0; }}
-    .case-col {{ width: 260px; }}
-    .original-col {{ width: 145px; }}
-    .regions-col {{ width: 155px; }}
-    .preview-col {{ width: 132px; }}
-    th.case-col, td:first-child {{
-      position: sticky;
-      left: 0;
-      z-index: 4;
-      background: #ffffff;
-      box-shadow: 1px 0 0 #e2e8df;
+    .compare-col {{ width: 92px; }}
+    .preview-col {{ width: 148px; }}
+    .compare-button {{
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid #176a56;
+      border-radius: 6px;
+      background: #176a56;
+      color: #ffffff;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 900;
+      cursor: pointer;
     }}
-    th.case-col {{ z-index: 6; background: #fbfcfa; }}
+    .compare-button:disabled {{
+      border-color: #cbd5c8;
+      background: #eef3ec;
+      color: #758179;
+      cursor: not-allowed;
+    }}
     .case-name {{ font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }}
     .sample-code {{
       display: inline-flex;
@@ -3258,6 +4172,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .pending {{ color: #6b6258; font-weight: 800; }}
     .tools {{ overflow-wrap: anywhere; }}
     .thumb-button {{
+      position: relative;
       width: 100%;
       min-height: 92px;
       max-height: 220px;
@@ -3269,6 +4184,23 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       border-radius: 6px;
       cursor: zoom-in;
       overflow: hidden;
+    }}
+    .thumb-tag {{
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      max-width: calc(100% - 12px);
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(12, 17, 15, 0.78);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 900;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
     }}
     .thumb-button img {{
       display: block;
@@ -3292,6 +4224,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     .bg-white {{ background: #ffffff; }}
     .bg-black {{ background: #101413; }}
     .bg-purple {{ background: #7c3aed; }}
+    .bg-blue {{ background: #2563eb; }}
     /* Known green-screen reference for judging whether transparent shadows
        match the original source, without white/checker contrast bias. */
     .bg-green {{ background: #00c800; }}
@@ -3368,6 +4301,141 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       user-select: none;
       pointer-events: none;
     }}
+    .compare-modal {{
+      position: fixed;
+      inset: 0;
+      z-index: 70;
+      display: none;
+      grid-template-rows: 64px 1fr;
+      background: rgba(0, 0, 0, 0.96);
+      color: #ffffff;
+    }}
+    .compare-modal.is-open {{ display: grid; }}
+    .compare-bar {{
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    }}
+    .compare-picker {{
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #cdd5d0;
+      font-size: 13px;
+      font-weight: 900;
+    }}
+    .compare-picker select {{
+      width: min(240px, 30vw);
+      min-height: 36px;
+      padding: 0 32px 0 10px;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 6px;
+      background: #111614;
+      color: #ffffff;
+      font: inherit;
+      font-weight: 800;
+    }}
+    .compare-alpha {{
+      min-width: 132px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #cdd5d0;
+      font-size: 12px;
+      font-weight: 900;
+    }}
+    .compare-alpha input {{
+      width: 104px;
+      accent-color: #ffffff;
+      cursor: pointer;
+    }}
+    .compare-close {{
+      position: absolute;
+      top: 14px;
+      right: 16px;
+    }}
+    .compare-stage {{
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      place-items: center;
+      gap: 12px;
+      overflow: hidden;
+      padding: 24px;
+    }}
+    .compare-bg-row {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }}
+    .compare-bg-button {{
+      width: 34px;
+      height: 34px;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 6px;
+      cursor: pointer;
+    }}
+    .compare-bg-button[aria-pressed="true"], .compare-bg-button:focus-visible {{
+      outline: 2px solid #ffffff;
+      outline-offset: 2px;
+    }}
+    .compare-frame {{
+      position: relative;
+      width: min(calc(100vw - 48px), calc(100vh - 172px));
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 6px;
+      background: #070908;
+      cursor: ew-resize;
+    }}
+    .compare-frame.bg-checker {{ background-color: #edf1ea; }}
+    .compare-frame.bg-white {{ background: #ffffff; }}
+    .compare-frame.bg-black {{ background: #101413; }}
+    .compare-frame.bg-green {{ background: #00c800; }}
+    .compare-frame.bg-purple {{ background: #7c3aed; }}
+    .compare-frame.bg-blue {{ background: #2563eb; }}
+    .compare-frame img {{
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+    }}
+    .compare-img-two {{
+      clip-path: inset(0 50% 0 0);
+    }}
+    .compare-divider {{
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 2px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+      transform: translateX(-1px);
+      pointer-events: none;
+    }}
+    .compare-empty {{
+      position: absolute;
+      inset: 0;
+      display: none;
+      place-items: center;
+      color: #aab3ae;
+      font-size: 13px;
+      font-weight: 900;
+      background: #070908;
+    }}
+    .compare-frame.is-empty .compare-empty {{ display: grid; }}
+    .compare-frame.is-empty img, .compare-frame.is-empty .compare-divider {{ display: none; }}
     .eval-panel {{
       position: fixed;
       inset: 0;
@@ -3382,7 +4450,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       width: min(720px, 100%);
       max-height: min(760px, calc(100vh - 40px));
       display: grid;
-      grid-template-rows: auto auto 1fr auto;
+      grid-template-rows: auto auto auto auto 1fr auto;
       overflow: hidden;
       border: 1px solid #d6ddd4;
       border-radius: 8px;
@@ -3418,22 +4486,112 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       cursor: pointer;
     }}
     .eval-tools .selection-count {{ margin-left: auto; color: #53615a; font-size: 12px; font-weight: 800; }}
-    .sample-list {{ min-height: 0; overflow: auto; padding: 8px 16px; }}
+    .path-tools, .screen-tools {{
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 10px 16px;
+      border-bottom: 1px solid #e2e8df;
+      color: #53615a;
+      font-size: 13px;
+      font-weight: 800;
+    }}
+    .path-tools label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+    }}
+    .path-tools select {{
+      min-width: 180px;
+      min-height: 34px;
+      padding: 0 10px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+      font: inherit;
+      font-weight: 800;
+    }}
+    .screen-option {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid #c6d0c3;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17201c;
+    }}
+    .screen-option input {{ width: 15px; height: 15px; min-height: 0; margin: 0; }}
+    .sample-list {{
+      min-height: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+      align-content: start;
+      gap: 10px;
+      overflow: auto;
+      padding: 12px 16px;
+      background: #f7faf6;
+    }}
+    .sample-group {{
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+      margin-top: 4px;
+      color: #53615a;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }}
+    .sample-group:first-child {{ margin-top: 0; }}
     .sample-option {{
       display: grid;
-      grid-template-columns: 22px 72px 1fr;
+      grid-template-columns: 22px 54px minmax(0, 1fr);
       gap: 10px;
-      align-items: start;
-      min-height: 44px;
-      padding: 10px 0;
-      border-bottom: 1px solid #edf1ea;
+      align-items: center;
+      min-height: 74px;
+      padding: 8px;
+      border: 1px solid #dde6da;
+      border-radius: 7px;
+      background: #ffffff;
       color: #17201c;
       font-size: 13px;
       font-weight: 700;
     }}
-    .sample-option:last-child {{ border-bottom: 0; }}
-    .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 2px 0 0; }}
-    .sample-detail {{ color: #5f6c66; font-size: 12px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }}
+    .sample-option:hover {{ border-color: #b8c8b4; background: #fbfdfb; }}
+    .sample-option input {{ width: 16px; height: 16px; min-height: 0; margin: 0; }}
+    .sample-thumb {{
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid #cbd5c8;
+      border-radius: 6px;
+      background: #00c800;
+    }}
+    .sample-thumb img {{
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }}
+    .sample-meta {{ min-width: 0; display: grid; gap: 2px; }}
+    .sample-code {{ margin: 0; font-weight: 900; line-height: 1.1; }}
+    .sample-case, .sample-family {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #617068;
+      font-size: 11px;
+      line-height: 1.15;
+    }}
     .eval-actions {{
       display: flex;
       justify-content: flex-end;
@@ -3462,6 +4620,10 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       main {{ padding: 14px 12px 22px; }}
       .modal-bar {{ min-height: 92px; align-items: flex-start; flex-direction: column; padding: 10px 12px; }}
       .modal {{ grid-template-rows: auto 1fr; }}
+      .compare-modal {{ grid-template-rows: auto 1fr; }}
+      .compare-bar {{ justify-content: flex-start; flex-wrap: wrap; padding-right: 58px; }}
+      .compare-picker select {{ width: min(220px, 62vw); }}
+      .compare-alpha {{ min-width: 124px; }}
     }}
     @media (max-width: 560px) {{
       .run-picker {{ flex-basis: 100%; }}
@@ -3492,14 +4654,15 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <table aria-label="game eval result table">
         <thead>
           <tr>
-            <th class="case-col">case</th>
-            <th class="original-col">original</th>
-            <th class="regions-col">regions</th>
-            <th class="preview-col">checker</th>
-            <th class="preview-col">white</th>
-            <th class="preview-col">black</th>
-            <th class="preview-col">purple</th>
-            <th class="preview-col">green ref</th>
+            <th class="compare-col">比较</th>
+            <th class="preview-col">原图</th>
+            <th class="preview-col">alpha mask</th>
+            <th class="preview-col">白底</th>
+            <th class="preview-col">黑底</th>
+            <th class="preview-col">透明底</th>
+            <th class="preview-col">绿底</th>
+            <th class="preview-col">紫底</th>
+            <th class="preview-col">蓝底</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -3516,6 +4679,16 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         <button type="button" id="clear-all-samples">取消全选</button>
         <span class="selection-count" id="selection-count"></span>
       </div>
+      <div class="path-tools" aria-label="选择测试路径">
+        <label for="eval-test-path">测试路径
+          <select id="eval-test-path" name="eval-test-path">
+            <option value="auto" selected>Auto RouteMatte</option>
+            <option value="direct-worker">Direct Worker</option>
+            <option value="corridorkey">CorridorKey</option>
+            <option value="rmbg">RMBG</option>
+          </select>
+        </label>
+      </div>
       <div class="sample-list" id="sample-list"></div>
       <div class="eval-actions">
         <button type="button" id="cancel-eval-panel">取消</button>
@@ -3523,15 +4696,49 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       </div>
     </section>
   </div>
+  <div class="compare-modal" id="compare-modal" aria-hidden="true">
+    <div class="compare-bar">
+      <label class="compare-alpha" for="compare-alpha-one">Alpha 1
+        <input id="compare-alpha-one" type="range" min="0" max="100" value="100" step="1">
+      </label>
+      <label class="compare-picker" for="compare-view-one">视图1
+        <select id="compare-view-one"></select>
+      </label>
+      <label class="compare-picker" for="compare-view-two">视图2
+        <select id="compare-view-two"></select>
+      </label>
+      <label class="compare-alpha" for="compare-alpha-two">Alpha 2
+        <input id="compare-alpha-two" type="range" min="0" max="100" value="100" step="1">
+      </label>
+      <button class="icon-button compare-close" type="button" id="close-compare" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <div class="compare-stage" id="compare-stage">
+      <div class="compare-bg-row" aria-label="比较背景色">
+        <button class="compare-bg-button bg-black" type="button" data-bg="black" title="黑底" aria-label="黑底"></button>
+        <button class="compare-bg-button bg-white" type="button" data-bg="white" title="白底" aria-label="白底"></button>
+        <button class="compare-bg-button bg-checker" type="button" data-bg="checker" title="透明底" aria-label="透明底"></button>
+        <button class="compare-bg-button bg-green" type="button" data-bg="green" title="绿底" aria-label="绿底"></button>
+        <button class="compare-bg-button bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
+        <button class="compare-bg-button bg-blue" type="button" data-bg="blue" title="蓝底" aria-label="蓝底"></button>
+      </div>
+      <div class="compare-frame bg-black" id="compare-frame">
+        <img class="compare-img-one" id="compare-img-one" alt="">
+        <img class="compare-img-two" id="compare-img-two" alt="">
+        <div class="compare-divider" id="compare-divider"></div>
+        <div class="compare-empty" id="compare-empty">没有可比较的图片</div>
+      </div>
+    </div>
+  </div>
   <div class="modal" id="modal" aria-hidden="true">
     <div class="modal-bar">
       <div class="modal-title" id="modal-title"></div>
       <div class="modal-actions" aria-label="preview controls">
-        <button class="swatch bg-checker" type="button" data-bg="checker" title="棋盘背景" aria-label="棋盘背景"></button>
+        <button class="swatch bg-checker" type="button" data-bg="checker" title="透明底" aria-label="透明底"></button>
         <button class="swatch bg-white" type="button" data-bg="white" title="白底" aria-label="白底"></button>
         <button class="swatch bg-black" type="button" data-bg="black" title="黑底" aria-label="黑底"></button>
-        <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
         <button class="swatch bg-green" type="button" data-bg="green" title="绿幕参照" aria-label="绿幕参照"></button>
+        <button class="swatch bg-purple" type="button" data-bg="purple" title="紫底" aria-label="紫底"></button>
+        <button class="swatch bg-blue" type="button" data-bg="blue" title="蓝底" aria-label="蓝底"></button>
         <button class="icon-button" type="button" id="reset-preview" title="重置视图" aria-label="重置视图">↺</button>
         <button class="icon-button" type="button" id="close-modal" title="关闭" aria-label="关闭">×</button>
       </div>
@@ -3542,7 +4749,24 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
   </div>
   <script>
     const data = {data_json};
-    const backgrounds = ["checker", "white", "black", "purple", "green"];
+    const backgrounds = ["checker", "white", "black", "green", "purple", "blue"];
+    const previewColumns = [
+      {{ label: "原图", urlKey: "originalUrl", bg: "checker" }},
+      {{ label: "alpha mask", urlKey: "alphaUrl", bg: "white" }},
+      {{ label: "白底", urlKey: "matteUrl", bg: "white" }},
+      {{ label: "黑底", urlKey: "matteUrl", bg: "black" }},
+      {{ label: "透明底", urlKey: "matteUrl", bg: "checker" }},
+      {{ label: "绿底", urlKey: "matteUrl", bg: "green" }},
+      {{ label: "紫底", urlKey: "matteUrl", bg: "purple" }},
+      {{ label: "蓝底", urlKey: "matteUrl", bg: "blue" }},
+    ];
+    const compareOptions = [
+      {{ label: "原图", urlKey: "originalUrl" }},
+      {{ label: "Mask Hint", urlKey: "maskHintUrl" }},
+      {{ label: "corridorkey Raw Alpha", urlKey: "corridorkeyRawAlphaUrl" }},
+      {{ label: "corridorkey Forground", urlKey: "corridorkeyForegroundUrl" }},
+      {{ label: "输出 Alpha", urlKey: "alphaUrl" }},
+    ];
     const rowsEl = document.getElementById("rows");
     const summaryEl = document.getElementById("summary");
     const runIdEl = document.getElementById("run-id");
@@ -3553,6 +4777,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const batchStatusEl = document.getElementById("batch-status");
     const evalPanel = document.getElementById("eval-panel");
     const sampleList = document.getElementById("sample-list");
+    const testPathSelect = document.getElementById("eval-test-path");
     const selectAllSamplesButton = document.getElementById("select-all-samples");
     const clearAllSamplesButton = document.getElementById("clear-all-samples");
     const cancelEvalPanelButton = document.getElementById("cancel-eval-panel");
@@ -3565,11 +4790,27 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const closeModalButton = document.getElementById("close-modal");
     const resetPreviewButton = document.getElementById("reset-preview");
     const swatches = Array.from(document.querySelectorAll(".swatch"));
+    const compareModal = document.getElementById("compare-modal");
+    const compareStage = document.getElementById("compare-stage");
+    const compareFrame = document.getElementById("compare-frame");
+    const compareViewOne = document.getElementById("compare-view-one");
+    const compareViewTwo = document.getElementById("compare-view-two");
+    const compareAlphaOne = document.getElementById("compare-alpha-one");
+    const compareAlphaTwo = document.getElementById("compare-alpha-two");
+    const compareImgOne = document.getElementById("compare-img-one");
+    const compareImgTwo = document.getElementById("compare-img-two");
+    const compareDivider = document.getElementById("compare-divider");
+    const closeCompareButton = document.getElementById("close-compare");
+    const compareBgButtons = Array.from(document.querySelectorAll(".compare-bg-button"));
     let scale = 1;
     let panX = 0;
     let panY = 0;
     let dragStart = null;
     let activeBatchStatusUrl = "";
+    let activeCompareCase = null;
+    let comparePosition = 0.5;
+    let compareAlphaOneValue = 1;
+    let compareAlphaTwoValue = 1;
 
     function text(value) {{
       return value === null || value === undefined || value === "" ? "—" : String(value);
@@ -3585,7 +4826,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return Object.entries(counts).map(([key, value]) => `${{key}}=${{value}}`).join(", ");
     }}
 
-    function makePreview(src, label, bg) {{
+    function makePreview(src, label, bg, tag = "") {{
       const button = document.createElement("button");
       button.type = "button";
       button.className = "thumb-button";
@@ -3600,8 +4841,107 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         }}
       }};
       button.appendChild(img);
+      if (tag) {{
+        const badge = document.createElement("span");
+        badge.className = "thumb-tag";
+        badge.textContent = tag;
+        button.appendChild(badge);
+      }}
       button.addEventListener("click", () => openModal(src, label, bg));
       return button;
+    }}
+
+    function availableCompareViews(caseItem) {{
+      return compareOptions
+        .map((option) => ({{ ...option, url: caseItem[option.urlKey] || "" }}))
+        .filter((option) => option.url);
+    }}
+
+    function populateCompareSelect(select, caseItem, preferredKey, fallbackViews) {{
+      select.innerHTML = "";
+      compareOptions.forEach((option) => {{
+        const choice = document.createElement("option");
+        choice.value = option.urlKey;
+        choice.textContent = option.label;
+        choice.disabled = !caseItem[option.urlKey];
+        select.appendChild(choice);
+      }});
+      const preferred = compareOptions.find((option) => option.urlKey === preferredKey && caseItem[option.urlKey]);
+      select.value = preferred ? preferred.urlKey : (fallbackViews[0] ? fallbackViews[0].urlKey : compareOptions[0].urlKey);
+    }}
+
+    function updateCompareImages() {{
+      if (!activeCompareCase) return;
+      const first = compareOptions.find((option) => option.urlKey === compareViewOne.value);
+      const second = compareOptions.find((option) => option.urlKey === compareViewTwo.value);
+      const firstUrl = first ? activeCompareCase[first.urlKey] : "";
+      const secondUrl = second ? activeCompareCase[second.urlKey] : "";
+      compareFrame.classList.toggle("is-empty", !firstUrl || !secondUrl);
+      compareImgOne.src = firstUrl || "";
+      compareImgTwo.src = secondUrl || "";
+      compareImgOne.alt = first ? first.label : "";
+      compareImgTwo.alt = second ? second.label : "";
+      updateComparePosition(comparePosition);
+      updateCompareAlpha();
+    }}
+
+    function updateCompareAlpha() {{
+      compareAlphaOneValue = Math.max(0, Math.min(1, Number(compareAlphaOne.value) / 100));
+      compareAlphaTwoValue = Math.max(0, Math.min(1, Number(compareAlphaTwo.value) / 100));
+      compareImgOne.style.opacity = String(compareAlphaOneValue);
+      compareImgTwo.style.opacity = String(compareAlphaTwoValue);
+    }}
+
+    function resetCompareAlpha() {{
+      compareAlphaOne.value = "100";
+      compareAlphaTwo.value = "100";
+      updateCompareAlpha();
+    }}
+
+    function setCompareBackground(bg) {{
+      setBackground(compareFrame, bg);
+      compareBgButtons.forEach((button) => {{
+        button.setAttribute("aria-pressed", String(button.dataset.bg === bg));
+      }});
+    }}
+
+    function updateComparePosition(value) {{
+      comparePosition = Math.max(0, Math.min(1, value));
+      const pct = comparePosition * 100;
+      compareImgTwo.style.clipPath = `inset(0 ${{100 - pct}}% 0 0)`;
+      compareDivider.style.left = `${{pct}}%`;
+    }}
+
+    function updateCompareFromPointer(event) {{
+      if (!compareModal.classList.contains("is-open")) return;
+      const rect = compareFrame.getBoundingClientRect();
+      if (!rect.width) return;
+      updateComparePosition((event.clientX - rect.left) / rect.width);
+    }}
+
+    function openCompare(caseItem) {{
+      activeCompareCase = caseItem;
+      const views = availableCompareViews(caseItem);
+      populateCompareSelect(compareViewOne, caseItem, "maskHintUrl", views);
+      populateCompareSelect(compareViewTwo, caseItem, "corridorkeyRawAlphaUrl", views.slice(1).length ? views.slice(1) : views);
+      if (compareViewOne.value === compareViewTwo.value && views.length > 1) {{
+        const alternate = views.find((view) => view.urlKey !== compareViewOne.value);
+        if (alternate) compareViewTwo.value = alternate.urlKey;
+      }}
+      updateComparePosition(0.5);
+      resetCompareAlpha();
+      setCompareBackground("black");
+      updateCompareImages();
+      compareModal.classList.add("is-open");
+      compareModal.setAttribute("aria-hidden", "false");
+    }}
+
+    function closeCompare() {{
+      compareModal.classList.remove("is-open");
+      compareModal.setAttribute("aria-hidden", "true");
+      activeCompareCase = null;
+      compareImgOne.removeAttribute("src");
+      compareImgTwo.removeAttribute("src");
     }}
 
     function renderRunSelect() {{
@@ -3634,7 +4974,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         `shadow policy: ${{text(data.shadowPolicyHit)}}`,
         `sample rows: ${{text(data.sampleRows)}}`,
         `report: ${{text(data.reportPath)}}`,
-        `vlm: ${{text(data.vlmRoot)}}`,
+        `samples: ${{text(data.vlmRoot)}}`,
         `matte: ${{text(data.matteRoot)}}`,
       ].forEach((item) => {{
         const pill = document.createElement("span");
@@ -3645,91 +4985,39 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
       rowsEl.innerHTML = "";
       data.cases.forEach((caseItem) => {{
-        const candidates = caseItem.candidates && caseItem.candidates.length ? caseItem.candidates : [null];
-
-        candidates.forEach((candidate, candidateIndex) => {{
-          const row = document.createElement("tr");
-          const caseCell = document.createElement("td");
-          const sampleCode = document.createElement("div");
-          sampleCode.className = "sample-code";
-          sampleCode.textContent = caseItem.sampleCode || "G??";
-          const title = document.createElement("div");
-          title.className = "case-name";
-          title.textContent = caseItem.caseId;
-          const sampleBadge = document.createElement("div");
-          sampleBadge.className = "sample-badge";
-          sampleBadge.textContent = `${{caseItem.sampleVariant || "sample"}} · ${{caseItem.runStatus || "unknown"}}`;
-          const candidateLabel = document.createElement("div");
-          candidateLabel.className = "candidate-label";
-          candidateLabel.textContent = candidate
-            ? candidate.label || candidate.id || `candidate ${{candidateIndex + 1}}`
-            : "not run";
-          if (candidate && candidate.selected) {{
-            const selected = document.createElement("span");
-            selected.className = "selected-mark";
-            selected.textContent = "selected";
-            candidateLabel.appendChild(selected);
-          }}
-          const meta = document.createElement("div");
-          meta.className = "case-meta";
-          const hitClass = caseItem.runStatus === "not-run" ? "pending" : (caseItem.expectedHit ? "hit" : "miss");
-          const hitText = caseItem.runStatus === "not-run" ? "not run" : `expected ${{caseItem.expectedHit ? "hit" : "miss"}}`;
-          const harmfulText = caseItem.harmfulToolSelected ? ` · harmful: ${{(caseItem.harmfulTools || []).join(", ")}}` : "";
-          const shadowText = caseItem.shadowPolicyRequired
-            ? ` · shadow: ${{caseItem.shadowPolicyHit ? "hit" : "miss"}} (${{text(caseItem.shadowCandidateCount)}})`
-            : "";
-          meta.innerHTML = `
-            <span>verdict: ${{text(caseItem.verdict)}} · <span class="${{hitClass}}">${{hitText}}</span></span>
-            <span>regions: ${{text(caseItem.regionCount)}}</span>
-            <span>${{text(caseItem.primaryAmbiguity)}}</span>
-            <span>${{countsText(caseItem.counts)}}</span>
-            <span class="tools">tools: ${{candidate ? (candidate.tools || []).join(", ") || "—" : "—"}}${{harmfulText}}${{shadowText}}</span>
-          `;
-          caseCell.appendChild(sampleCode);
-          caseCell.appendChild(title);
-          caseCell.appendChild(sampleBadge);
-          caseCell.appendChild(candidateLabel);
-          caseCell.appendChild(meta);
-          row.appendChild(caseCell);
-
-          const originalCell = document.createElement("td");
-          if (caseItem.originalUrl) {{
-            originalCell.appendChild(makePreview(caseItem.originalUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} original`, "checker"));
-          }}
-          row.appendChild(originalCell);
-
-          const regionsCell = document.createElement("td");
-          if (caseItem.regionsUrl) {{
-            regionsCell.appendChild(makePreview(caseItem.regionsUrl, `${{caseItem.sampleCode}} · ${{caseItem.caseId}} regions`, "checker"));
+        const row = document.createElement("tr");
+        const compareCell = document.createElement("td");
+        const compareButton = document.createElement("button");
+        const compareViews = availableCompareViews(caseItem);
+        compareButton.type = "button";
+        compareButton.className = "compare-button";
+        compareButton.textContent = "比较";
+        compareButton.disabled = compareViews.length < 2;
+        compareButton.title = compareViews.length < 2 ? "至少需要两张图" : `${{caseItem.sampleCode || ""}} · ${{caseItem.caseId || ""}} · 比较`;
+        compareButton.addEventListener("click", () => openCompare(caseItem));
+        compareCell.appendChild(compareButton);
+        row.appendChild(compareCell);
+        previewColumns.forEach((column) => {{
+          const cell = document.createElement("td");
+          const previewUrl = caseItem[column.urlKey] || "";
+          if (previewUrl) {{
+            cell.appendChild(
+              makePreview(
+                previewUrl,
+                `${{caseItem.sampleCode || ""}} · ${{caseItem.caseId || ""}} · ${{column.label}}`,
+                column.bg,
+                column.urlKey === "originalUrl" ? `${{caseItem.sampleCode || ""}}` : "",
+              ),
+            );
           }} else {{
             const empty = document.createElement("div");
             empty.className = "empty-cell";
-            empty.textContent = "not run";
-            regionsCell.appendChild(empty);
+            empty.textContent = "—";
+            cell.appendChild(empty);
           }}
-          row.appendChild(regionsCell);
-
-          backgrounds.forEach((bg) => {{
-            const cell = document.createElement("td");
-            const previewUrl = candidate && candidate.url ? candidate.url : (caseItem.runStatus === "ran" ? caseItem.matteUrl : "");
-            if (previewUrl) {{
-              cell.appendChild(
-                makePreview(
-                  previewUrl,
-                  `${{caseItem.sampleCode}} · ${{caseItem.caseId}} · ${{caseItem.sampleVariant}} · ${{candidate ? (candidate.label || candidate.id) : "matte"}} · ${{bg}}`,
-                  bg,
-                ),
-              );
-            }} else {{
-              const empty = document.createElement("div");
-              empty.className = "empty-cell";
-              empty.textContent = "not run";
-              cell.appendChild(empty);
-            }}
-            row.appendChild(cell);
-          }});
-          rowsEl.appendChild(row);
+          row.appendChild(cell);
         }});
+        rowsEl.appendChild(row);
       }});
     }}
 
@@ -3787,17 +5075,33 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       return sampleCheckboxes().filter((input) => input.checked).map((input) => input.value);
     }}
 
+    function selectedTestPath() {{
+      return testPathSelect ? testPathSelect.value : "corridorkey";
+    }}
+
     function updateSelectionCount() {{
       const selected = selectedSampleIds().length;
       const total = sampleCheckboxes().length;
-      selectionCountEl.textContent = `${{selected}}/${{total}}`;
+      selectionCountEl.textContent = `${{selected}}/${{total}} samples`;
       confirmStartEvalButton.disabled = selected === 0;
     }}
 
     function renderSampleList() {{
       const samples = Array.isArray(data.samples) ? data.samples : [];
       sampleList.innerHTML = "";
-      samples.forEach((sample) => {{
+      const labels = {{ button: "Button", icon: "Icon / Effect", character: "Character" }};
+      const grouped = samples.reduce((acc, sample) => {{
+        const key = sample.category || "other";
+        if (!acc.has(key)) acc.set(key, []);
+        acc.get(key).push(sample);
+        return acc;
+      }}, new Map());
+      grouped.forEach((groupSamples, category) => {{
+        const group = document.createElement("div");
+        group.className = "sample-group";
+        group.textContent = `${{labels[category] || category}} · ${{groupSamples.length}}`;
+        sampleList.appendChild(group);
+        groupSamples.forEach((sample) => {{
         const label = document.createElement("label");
         label.className = "sample-option";
         const checkbox = document.createElement("input");
@@ -3805,15 +5109,34 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         checkbox.value = sample.sampleId;
         checkbox.checked = sample.defaultSelected === true;
         checkbox.addEventListener("change", updateSelectionCount);
+        const thumb = document.createElement("span");
+        thumb.className = "sample-thumb";
+        if (sample.thumbnailUrl) {{
+          const image = document.createElement("img");
+          image.src = sample.thumbnailUrl;
+          image.alt = sample.sampleId || "";
+          thumb.appendChild(image);
+        }}
         const code = document.createElement("span");
-        code.textContent = sample.sampleId;
-        const detail = document.createElement("span");
-        detail.className = "sample-detail";
-        detail.textContent = `${{sample.caseId || ""}} · ${{sample.category || ""}} · ${{sample.primaryAmbiguity || ""}}`;
+        code.className = "sample-meta";
+        const codeText = document.createElement("span");
+        codeText.className = "sample-code";
+        codeText.textContent = `${{sample.sampleId || ""}} · ${{sample.screen || ""}}`;
+        const caseText = document.createElement("span");
+        caseText.className = "sample-case";
+        caseText.textContent = sample.caseId || "";
+        const familyText = document.createElement("span");
+        familyText.className = "sample-family";
+        familyText.textContent = sample.family || sample.primaryAmbiguity || "";
+        code.appendChild(codeText);
+        code.appendChild(caseText);
+        code.appendChild(familyText);
+        label.title = `${{sample.sampleId || ""}} · ${{sample.caseId || ""}}`;
         label.appendChild(checkbox);
+        label.appendChild(thumb);
         label.appendChild(code);
-        label.appendChild(detail);
         sampleList.appendChild(label);
+      }});
       }});
       updateSelectionCount();
     }}
@@ -3838,6 +5161,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
     async function startSelectedEval() {{
       const sampleIds = selectedSampleIds();
+      const testPath = selectedTestPath();
       if (!sampleIds.length) return;
       setBatchStatus("启动中", true);
       setBatchProgress({{ percent: 0 }});
@@ -3846,7 +5170,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         const response = await fetch("/eval/game/run", {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ sample_ids: sampleIds }}),
+          body: JSON.stringify({{ sample_ids: sampleIds, test_path: testPath }}),
         }});
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
@@ -3938,9 +5262,24 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     closeModalButton.addEventListener("click", closeModal);
     resetPreviewButton.addEventListener("click", resetTransform);
     swatches.forEach((swatch) => swatch.addEventListener("click", () => setModalBackground(swatch.dataset.bg)));
+    closeCompareButton.addEventListener("click", closeCompare);
+    compareViewOne.addEventListener("change", updateCompareImages);
+    compareViewTwo.addEventListener("change", updateCompareImages);
+    compareAlphaOne.addEventListener("input", updateCompareAlpha);
+    compareAlphaTwo.addEventListener("input", updateCompareAlpha);
+    compareBgButtons.forEach((button) => button.addEventListener("click", () => setCompareBackground(button.dataset.bg)));
+    compareFrame.addEventListener("pointermove", updateCompareFromPointer);
+    compareFrame.addEventListener("pointerdown", (event) => {{
+      updateCompareFromPointer(event);
+      compareFrame.setPointerCapture(event.pointerId);
+    }});
+    compareModal.addEventListener("click", (event) => {{
+      if (event.target === compareModal) closeCompare();
+    }});
     startFullEvalButton.addEventListener("click", openEvalPanel);
     selectAllSamplesButton.addEventListener("click", () => setAllSamples(true));
     clearAllSamplesButton.addEventListener("click", () => setAllSamples(false));
+    if (testPathSelect) testPathSelect.addEventListener("change", updateSelectionCount);
     cancelEvalPanelButton.addEventListener("click", closeEvalPanel);
     confirmStartEvalButton.addEventListener("click", startSelectedEval);
     evalPanel.addEventListener("click", (event) => {{
@@ -3953,6 +5292,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     }});
     document.addEventListener("keydown", (event) => {{
       if (event.key === "Escape") closeModal();
+      if (event.key === "Escape") closeCompare();
       if (event.key === "Escape") closeEvalPanel();
     }});
 

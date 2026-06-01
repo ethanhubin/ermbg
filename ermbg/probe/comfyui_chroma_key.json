@@ -1,0 +1,34 @@
+{
+  "_comment": "Remote ComfyUI ordinary chroma key: Load RGB -> ColorToMask with a configurable color range -> save foreground alpha.",
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "20": {
+    "class_type": "ColorToMask",
+    "inputs": {
+      "images": ["10", 0],
+      "invert": true,
+      "red": "${red}",
+      "green": "${green}",
+      "blue": "${blue}",
+      "threshold": "${threshold}",
+      "per_batch": 16
+    }
+  },
+  "30": {
+    "class_type": "Convert Masks to Images",
+    "inputs": {
+      "masks": ["20", 0]
+    }
+  },
+  "40": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["30", 0],
+      "filename_prefix": "${filename_prefix}_alpha"
+    }
+  }
+}

@@ -65,7 +65,7 @@ echo "==> checking SSH: $host"
 
 if [[ "$clean" -eq 1 ]]; then
   echo "==> cleaning remote source subsets under $remote_root"
-  "${ssh_base[@]}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$remote_root' | Out-Null; foreach (\$p in @('ermbg','comfy_nodes','docs','samples/regression')) { \$full = Join-Path '$remote_root' \$p; if (Test-Path \$full) { Remove-Item -Recurse -Force \$full } }\""
+  "${ssh_base[@]}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$remote_root' | Out-Null; foreach (\$p in @('ermbg','comfy_nodes','docs','samples/corridorkey_semantic')) { \$full = Join-Path '$remote_root' \$p; if (Test-Path \$full) { Remove-Item -Recurse -Force \$full } }\""
 else
   "${ssh_base[@]}" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$remote_root' | Out-Null\""
 fi
@@ -82,7 +82,7 @@ tar \
   --exclude='out' \
   --exclude='ermbg.egg-info' \
   -czf - \
-  ermbg comfy_nodes docs samples/regression pyproject.toml README.md DEPLOY.md AGENTS.md \
+  ermbg comfy_nodes docs samples/corridorkey_semantic scripts/benchmark_direct_worker_path.py scripts/smoke_direct_worker_http.py pyproject.toml README.md DEPLOY.md AGENTS.md \
   | "${ssh_base[@]}" "tar -xzf - -C \"$remote_root\""
 
 if [[ "$install_editable" -eq 1 ]]; then
@@ -97,7 +97,7 @@ fi
 
 if [[ "$smoke" -eq 1 ]]; then
   echo "==> remote import/router smoke"
-  "${ssh_base[@]}" "powershell -NoProfile -Command \"cd '$remote_root'; & '$remote_python' -c \\\"from ermbg import classify_image; s=classify_image(r'samples/regression/small_ui_icon_green/input.png'); print(s.name, s.bg_type, s.keyer_mode)\\\"\""
+  "${ssh_base[@]}" "powershell -NoProfile -Command \"cd '$remote_root'; & '$remote_python' -c \\\"from ermbg import classify_image; s=classify_image(r'samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_lite_shadow/green.png'); print(s.name, s.bg_type, s.keyer_mode)\\\"\""
 fi
 
 echo "==> sync complete"

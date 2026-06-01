@@ -35,6 +35,8 @@ _COLOR_BG_PHRASE: dict[tuple[int, int, int], str] = {
     (8, 8, 8): "near-black (#080808)",
     (0, 200, 220): "saturated cyan (#00C8DC)",
     (220, 30, 180): "saturated magenta (#DC1EB4)",
+    (0, 0, 255): "pure saturated blue (#0000FF)",
+    (0, 80, 255): "saturated blue (#0050FF)",
     (0, 200, 60): "saturated green (#00C83C)",
 }
 
@@ -45,6 +47,7 @@ def _instruction(color: tuple[int, int, int]) -> str:
     return (
         f"Replace the masked region with a perfectly flat, uniform {bg} studio backdrop. "
         "The background must be a single solid color across the entire masked area, "
+        "matching the requested RGB/hex value exactly wherever possible, "
         "with absolutely no shadow, no gradient, no texture, no objects, no environment. "
         "Do not modify or repaint anything outside the masked region."
     )

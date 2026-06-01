@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_a02_hard_boundary_unoutlined",
+  "sample_id": "I002",
+  "category": "icon",
+  "family": "a_hard_boundary",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_a02_hard_boundary_unoutlined/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_a02_hard_boundary_unoutlined/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "yellow_orange",
+  "primary_ambiguity": "hard opaque edge, no drawn outline",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-A02",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

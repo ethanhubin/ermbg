@@ -38,7 +38,7 @@ class Trimap:
 
 @dataclass
 class MattingResult:
-    """Final matting output (rich version produced by `ermbg.matting.matte`)."""
+    """Shared rich matting output used by maintained backend helpers."""
 
     rgba: np.ndarray              # H x W x 4 sRGB uint8
     alpha: np.ndarray             # H x W float32 0..1

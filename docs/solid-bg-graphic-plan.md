@@ -74,12 +74,12 @@ and transparent effects.
    - Once an interior hole is proved, it becomes a local background seed. Its
      edge, antialiasing, residual background color, and scalar darkening should
      use the same known-background evidence model as the outer edge. This is the
-     G03 inner-hole rule: hole-side darkening is neutral shadow, not green
+     inner-hole rule: hole-side darkening is neutral shadow, not green
      foreground.
-   - This must be separated from the G02 case: a connected internal
-     background-colored material patch is subject material unless topology
-     proves a true opening or the candidate-selection flow exposes an alternate
-     translucent interpretation.
+   - This must be separated from connected internal background-colored material:
+     such material stays subject-owned unless topology proves a true opening or
+     the candidate-selection flow exposes an alternate translucent
+     interpretation.
 
 5. Resolve soft subject layers.
    - Antialiasing, glow, and translucent material belong to subject when they
@@ -106,7 +106,7 @@ and transparent effects.
      display-visible islands should be rejected by area/topology evidence.
    - Keep clean foreground RGB separate from the RGB companion used for final
      shadow-preserving RGBA.
-   - Visual invariant: compositing the exported RGBA shadow layer back over the
+   - Visual rule: compositing the exported RGBA shadow layer back over the
      original known background should preserve source luminance, not source
      chroma. Exact RGB reconstruction over saturated green can encode green
      into the shadow layer; reusable RGBA should prefer neutral darkening with
@@ -160,9 +160,10 @@ Implementation requirements:
 ## Perceptual Local-Diffusion TODO
 
 Known background color is the physical anchor for solving `C = aF + (1-a)B`,
-but it is not enough as the only execution threshold. G04 shows the failure
-mode: tiny hue/luma changes that are almost invisible on the original green
-screen can become obvious purple/black/grey speckles after inverse compositing.
+but it is not enough as the only execution threshold. Glass/translucent samples
+show the failure mode: tiny hue/luma changes that are almost invisible on the
+original green screen can become obvious purple/black/grey speckles after
+inverse compositing.
 
 For soft glass, glow, antialiasing, holes, and shadows, thresholds should be
 anchored to human-visible local continuity:
@@ -185,8 +186,8 @@ Current implementation status:
   glass speckles. It catches pixels that are not quite close enough to the flat
   screen color globally, but are perceptually continuous with neighboring
   screen-colored glass pixels.
-- G04 regression coverage includes a false-hue guard so inverse solving cannot
-  turn near-background source pixels into exported purple foreground.
+- Regression coverage includes a false-hue guard so inverse solving cannot turn
+  near-background source pixels into exported purple foreground.
 
 Conversation summary, 2026-05-28:
 
@@ -209,17 +210,17 @@ Conversation summary, 2026-05-28:
     though the source pixel is visually continuous with the screen color;
   - internal holes or hole-adjacent soft regions, because a hole is local
     background and should use the same evidence model as the outer edge;
-  - G03-like inner-hole shadows, where darkened background-family pixels inside
-    a proved hole should export as neutral luminance shadow rather than
-    subject-owned green/grey foreground;
+  - inner-hole shadows, where darkened background-family pixels inside a proved
+    hole should export as neutral luminance shadow rather than subject-owned
+    green/grey foreground;
   - soft shadows/glow only when ownership already proves the region belongs to
     background-family evidence rather than subject color.
 - This must not apply to:
-  - real subject-owned green material such as G02's internal connected region;
-  - broad true color gradients such as G10 where green transitions into blue or
-    magenta subject material;
-  - G06-like colored glow unless local ownership and background-family channel
-    direction both support removing a specific residual.
+  - real subject-owned green material such as connected internal UI material;
+  - broad true color gradients where green transitions into blue or magenta
+    subject material;
+  - colored glow unless local ownership and background-family channel direction
+    both support removing a specific residual.
 
 Implementation notes:
 
@@ -244,10 +245,10 @@ Open follow-up:
   "protect as subject material" and "solve as smooth translucent layer" are
   plausible, use the highest-confidence interpretation by default but expose
   the alternate result in Web/API instead of hard-coding one final matte.
-- Add Web/API candidate support for G02-like internal green regions: default to
-  the highest-confidence ownership, but expose "protect as subject material"
-  versus "solve as smooth translucent known-background layer" when both fit the
-  evidence.
+- Add Web/API candidate support for ambiguous internal same-screen-color
+  regions: default to the highest-confidence ownership, but expose "protect as
+  subject material" versus "solve as smooth translucent known-background layer"
+  when both fit the evidence.
 
 ## Tests To Add First
 
@@ -270,8 +271,11 @@ Add synthetic mechanism tests before replacing production routing:
 - Glass button where the interior is translucent subject material, not a hole.
 - Photo or hair-like sample that must fallback to the existing matting path.
 
-Keep `samples/regression/small_ui_icon_green/input.png` as the first real
-production regression, but do not tune the analytic path around that file.
+Use the current `samples/corridorkey_semantic/manifest.json` cases as the
+default production regression surface. Add real user failures under
+`samples/regression/<case_id>/` only when they introduce a mechanism not already
+covered by the semantic set, and do not tune the analytic path around any single
+file.
 
 ## Migration Plan
 
@@ -280,12 +284,10 @@ production regression, but do not tune the analytic path around that file.
 2. Add focused synthetic tests for ownership roles before wiring it into Web.
 3. Teach the router to choose `solid_bg_graphic` only for high-confidence
    stable solid backgrounds and graphic-like assets.
-4. In `matting.py`, try `solid_bg_graphic` before building/running the
-   segmenter; fallback to the existing path when confidence is insufficient.
-5. Update Comfy/Web debug summaries to expose the chosen path and ownership
-   masks.
-6. Run local tests, direct remote `backend="comfy-ermbg"` regression, and real
-   Web HTTP smoke.
+4. This older local prepass is superseded by ERMBG route strategy plus
+   PyMatting Known-B for deterministic hard UI.
+5. Keep the mechanism tests as isolated ownership/analysis guards.
+6. Run local tests, auto-route manifest audit, and real Web HTTP smoke.
 
 ## Pixel-Patch Cleanup TODO
 

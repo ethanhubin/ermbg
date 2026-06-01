@@ -1,0 +1,25 @@
+{
+  "id": "button_blue_green_a_outlined_soft_heavy_shadow",
+  "sample_id": "B020",
+  "category": "button",
+  "family": "solid_button_shadow_matrix",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+  "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+  "image_size": [
+    256,
+    128
+  ],
+  "subject_color_family": "green",
+  "primary_ambiguity": "A Outlined / Soft-Heavy-Shadow / blue_green",
+  "target_route": "opaque_hard_ui",
+  "source_review_id": "A05",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+}

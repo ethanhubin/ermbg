@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_d05_soft_alpha_particle_arcane_purple",
+  "sample_id": "I015",
+  "category": "icon",
+  "family": "d_soft_alpha_effect",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_d05_soft_alpha_particle_arcane_purple/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_d05_soft_alpha_particle_arcane_purple/green.png",
+  "image_size": [
+    256,
+    256
+  ],
+  "subject_color_family": "purple",
+  "primary_ambiguity": "purple arcane particle vortex, no hard core",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-D05",
+  "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+}

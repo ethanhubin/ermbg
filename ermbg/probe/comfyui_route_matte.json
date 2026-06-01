@@ -1,0 +1,65 @@
+{
+  "_comment": "Full ERMBG auto route/matte inside one ComfyUI node. Mac uploads only the input and downloads image outputs plus route metadata.",
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "20": {
+    "class_type": "ErmbgRouteMatte",
+    "inputs": {
+      "image": ["10", 0],
+      "source_mask": ["10", 1],
+      "shadow_mode": "${shadow_mode}",
+      "corridorkey_screen_mode": "${corridorkey_screen_mode}",
+      "corridorkey_preset": "${corridorkey_preset}",
+      "corridorkey_hard_ui_hint_mode": "${corridorkey_hard_ui_hint_mode}",
+      "fallback_bg_color": "${fallback_bg_color}",
+      "pymatting_method": "${pymatting_method}",
+      "pymatting_image_space": "${pymatting_image_space}",
+      "pymatting_bg_source": "${pymatting_bg_source}",
+      "pymatting_bg_color": "${pymatting_bg_color}",
+      "pymatting_bg_threshold": "${pymatting_bg_threshold}",
+      "pymatting_fg_threshold": "${pymatting_fg_threshold}",
+      "pymatting_boundary_band_px": "${pymatting_boundary_band_px}",
+      "pymatting_auto_adapt": "${pymatting_auto_adapt}",
+      "pymatting_cg_maxiter": "${pymatting_cg_maxiter}",
+      "pymatting_cg_rtol": "${pymatting_cg_rtol}"
+    }
+  },
+  "30": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 0],
+      "filename_prefix": "${filename_prefix}_foreground"
+    }
+  },
+  "40": {
+    "class_type": "Convert Masks to Images",
+    "inputs": {
+      "masks": ["20", 1]
+    }
+  },
+  "50": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["40", 0],
+      "filename_prefix": "${filename_prefix}_alpha"
+    }
+  },
+  "60": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 3],
+      "filename_prefix": "${filename_prefix}_rgba_rgb"
+    }
+  },
+  "70": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 4],
+      "filename_prefix": "${filename_prefix}_aux"
+    }
+  }
+}

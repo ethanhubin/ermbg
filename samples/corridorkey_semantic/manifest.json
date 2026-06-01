@@ -1,0 +1,2177 @@
+{
+  "version": 2,
+  "name": "CorridorKey Full Test Samples v1",
+  "status": "phase1_complete_confirmed_full_test_set",
+  "purpose": "Reviewer-approved full CorridorKey/ERMBG test samples covering buttons, icons/effects, and composite characters.",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ],
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "image_contract": {
+    "button": "256x128 user-approved UI button inputs plus 512x512 known-B hole regressions",
+    "icon": "256x256 icon/effect inputs",
+    "character": "1024x1024 composite character inputs"
+  },
+  "phase_status": {
+    "phase1_sample_coverage": "complete",
+    "phase2_next_goal": "Run full recognition/matting evaluation over the confirmed samples, inspect failures by sample family, then tune CorridorKey route selection and per-route parameters."
+  },
+  "category_counts": {
+    "button": 56,
+    "icon": 20,
+    "character": 9
+  },
+  "screen_counts": {
+    "green": 58,
+    "blue": 27
+  },
+  "case_count": 85,
+  "default_screens": [
+    "green",
+    "blue"
+  ],
+  "cases": [
+    {
+      "id": "button_green_yellow_a_outlined_no_shadow",
+      "sample_id": "B001",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "A Outlined / No-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_a_outlined_hard_lite_shadow",
+      "sample_id": "B002",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "A Outlined / Hard-Lite-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_a_outlined_hard_heavy_shadow",
+      "sample_id": "B003",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "A Outlined / Hard-Heavy-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_a_outlined_soft_lite_shadow",
+      "sample_id": "B004",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "A Outlined / Soft-Lite-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_a_outlined_soft_heavy_shadow",
+      "sample_id": "B005",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "A Outlined / Soft-Heavy-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_b_unoutlined_no_shadow",
+      "sample_id": "B006",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "B Unoutlined / No-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_b_unoutlined_hard_lite_shadow",
+      "sample_id": "B007",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "B Unoutlined / Hard-Lite-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_b_unoutlined_hard_heavy_shadow",
+      "sample_id": "B008",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "B Unoutlined / Hard-Heavy-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_b_unoutlined_soft_lite_shadow",
+      "sample_id": "B009",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "B Unoutlined / Soft-Lite-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_b_unoutlined_soft_heavy_shadow",
+      "sample_id": "B010",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_b_unoutlined_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "B Unoutlined / Soft-Heavy-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_c_translucent_no_shadow",
+      "sample_id": "B011",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "C Translucent / No-Shadow / green_yellow",
+      "target_route": "screen_tinted_translucency",
+      "source_review_id": "C01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_c_translucent_hard_lite_shadow",
+      "sample_id": "B012",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "C Translucent / Hard-Lite-Shadow / green_yellow",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_c_translucent_hard_heavy_shadow",
+      "sample_id": "B013",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "C Translucent / Hard-Heavy-Shadow / green_yellow",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_c_translucent_soft_lite_shadow",
+      "sample_id": "B014",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "C Translucent / Soft-Lite-Shadow / green_yellow",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_c_translucent_soft_heavy_shadow",
+      "sample_id": "B015",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_c_translucent_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "C Translucent / Soft-Heavy-Shadow / green_yellow",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_a_outlined_no_shadow",
+      "sample_id": "B016",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_no_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_no_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "A Outlined / No-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_a_outlined_hard_lite_shadow",
+      "sample_id": "B017",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_hard_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_hard_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "A Outlined / Hard-Lite-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_a_outlined_hard_heavy_shadow",
+      "sample_id": "B018",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_hard_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_hard_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "A Outlined / Hard-Heavy-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_a_outlined_soft_lite_shadow",
+      "sample_id": "B019",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "A Outlined / Soft-Lite-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_a_outlined_soft_heavy_shadow",
+      "sample_id": "B020",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "A Outlined / Soft-Heavy-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_b_unoutlined_no_shadow",
+      "sample_id": "B021",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_no_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_no_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "B Unoutlined / No-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_b_unoutlined_hard_lite_shadow",
+      "sample_id": "B022",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_hard_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_hard_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "B Unoutlined / Hard-Lite-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_b_unoutlined_hard_heavy_shadow",
+      "sample_id": "B023",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_hard_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_hard_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "B Unoutlined / Hard-Heavy-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_b_unoutlined_soft_lite_shadow",
+      "sample_id": "B024",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_soft_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_soft_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "B Unoutlined / Soft-Lite-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_b_unoutlined_soft_heavy_shadow",
+      "sample_id": "B025",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_soft_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_b_unoutlined_soft_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "B Unoutlined / Soft-Heavy-Shadow / blue_green",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_c_translucent_no_shadow",
+      "sample_id": "B026",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_no_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_no_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "C Translucent / No-Shadow / blue_green",
+      "target_route": "screen_tinted_translucency",
+      "source_review_id": "C01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_c_translucent_hard_lite_shadow",
+      "sample_id": "B027",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_hard_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_hard_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "C Translucent / Hard-Lite-Shadow / blue_green",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_c_translucent_hard_heavy_shadow",
+      "sample_id": "B028",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_hard_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_hard_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "C Translucent / Hard-Heavy-Shadow / blue_green",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_c_translucent_soft_lite_shadow",
+      "sample_id": "B029",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_soft_lite_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_soft_lite_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "C Translucent / Soft-Lite-Shadow / blue_green",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_blue_green_c_translucent_soft_heavy_shadow",
+      "sample_id": "B030",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_soft_heavy_shadow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_blue_green_c_translucent_soft_heavy_shadow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "C Translucent / Soft-Heavy-Shadow / blue_green",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_a_outlined_no_shadow",
+      "sample_id": "B031",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "A Outlined / No-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_a_outlined_hard_lite_shadow",
+      "sample_id": "B032",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "A Outlined / Hard-Lite-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_a_outlined_hard_heavy_shadow",
+      "sample_id": "B033",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "A Outlined / Hard-Heavy-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_a_outlined_soft_lite_shadow",
+      "sample_id": "B034",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "A Outlined / Soft-Lite-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_a_outlined_soft_heavy_shadow",
+      "sample_id": "B035",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_a_outlined_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "A Outlined / Soft-Heavy-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "A05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_b_unoutlined_no_shadow",
+      "sample_id": "B036",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "B Unoutlined / No-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_b_unoutlined_hard_lite_shadow",
+      "sample_id": "B037",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "B Unoutlined / Hard-Lite-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_b_unoutlined_hard_heavy_shadow",
+      "sample_id": "B038",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "B Unoutlined / Hard-Heavy-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_b_unoutlined_soft_lite_shadow",
+      "sample_id": "B039",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "B Unoutlined / Soft-Lite-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_b_unoutlined_soft_heavy_shadow",
+      "sample_id": "B040",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_b_unoutlined_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "B Unoutlined / Soft-Heavy-Shadow / green_blue",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_c_translucent_no_shadow",
+      "sample_id": "B041",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "C Translucent / No-Shadow / green_blue",
+      "target_route": "screen_tinted_translucency",
+      "source_review_id": "C01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_c_translucent_hard_lite_shadow",
+      "sample_id": "B042",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "C Translucent / Hard-Lite-Shadow / green_blue",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_c_translucent_hard_heavy_shadow",
+      "sample_id": "B043",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "C Translucent / Hard-Heavy-Shadow / green_blue",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_c_translucent_soft_lite_shadow",
+      "sample_id": "B044",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "C Translucent / Soft-Lite-Shadow / green_blue",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_blue_c_translucent_soft_heavy_shadow",
+      "sample_id": "B045",
+      "category": "button",
+      "family": "solid_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_blue_c_translucent_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "C Translucent / Soft-Heavy-Shadow / green_blue",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "C05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_real_glass_green_bg_yellow",
+      "sample_id": "B046",
+      "category": "button",
+      "family": "real_glass_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_real_glass_green_bg_yellow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_real_glass_green_bg_yellow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "real glass button with translucent material",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "MRG01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_real_glass_blue_bg_yellow",
+      "sample_id": "B047",
+      "category": "button",
+      "family": "real_glass_button",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_yellow/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_yellow/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "real glass button with translucent material",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "MRG02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_real_glass_green_bg_blue",
+      "sample_id": "B048",
+      "category": "button",
+      "family": "real_glass_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_real_glass_green_bg_blue/green.png",
+      "input": "samples/corridorkey_semantic/button/button_real_glass_green_bg_blue/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "real glass button with translucent material",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "MRG03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_real_glass_blue_bg_green",
+      "sample_id": "B049",
+      "category": "button",
+      "family": "real_glass_button",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_green/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_real_glass_blue_bg_green/blue.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "real glass button with translucent material",
+      "target_route": "local_color_diffusion_translucency",
+      "source_review_id": "MRG04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/button_confirmed_v001"
+    },
+    {
+      "id": "button_green_yellow_d_white_outline_no_shadow",
+      "sample_id": "B050",
+      "category": "button",
+      "family": "white_outline_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_no_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_no_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "D White Outline / No-Shadow / green_yellow",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B050",
+      "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_green_yellow_d_white_outline_hard_lite_shadow",
+      "sample_id": "B051",
+      "category": "button",
+      "family": "white_outline_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_hard_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_hard_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "D White Outline / Hard-Lite-Shadow / green_yellow",
+      "target_route": "owned_contact_shadow",
+      "source_review_id": "B051",
+      "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_green_yellow_d_white_outline_hard_heavy_shadow",
+      "sample_id": "B052",
+      "category": "button",
+      "family": "white_outline_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_hard_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_hard_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "D White Outline / Hard-Heavy-Shadow / green_yellow",
+      "target_route": "owned_contact_shadow",
+      "source_review_id": "B052",
+      "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_green_yellow_d_white_outline_soft_lite_shadow",
+      "sample_id": "B053",
+      "category": "button",
+      "family": "white_outline_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_lite_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_lite_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "D White Outline / Soft-Lite-Shadow / green_yellow",
+      "target_route": "owned_contact_shadow",
+      "source_review_id": "B053",
+      "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_green_yellow_d_white_outline_soft_heavy_shadow",
+      "sample_id": "B054",
+      "category": "button",
+      "family": "white_outline_button_shadow_matrix",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_heavy_shadow/green.png",
+      "input": "samples/corridorkey_semantic/button/button_green_yellow_d_white_outline_soft_heavy_shadow/green.png",
+      "image_size": [
+        256,
+        128
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "D White Outline / Soft-Heavy-Shadow / green_yellow",
+      "target_route": "owned_contact_shadow",
+      "source_review_id": "B054",
+      "source_batch": "manual_pil_codex_20260530_white_outline_button"
+    },
+    {
+      "id": "button_hole_yellow_ring_green",
+      "sample_id": "B055",
+      "category": "button",
+      "family": "known_b_hole_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+      "input": "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png",
+      "image_size": [
+        512,
+        512
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "yellow ring button with enclosed same-background transparent hole and green-screen shadow residue",
+      "target_route": "known_b_hole_antialias_shadow",
+      "source_review_id": "B055",
+      "source_batch": "manual_user_regression_20260531_pymatting_holes"
+    },
+    {
+      "id": "button_hole_ornate_plate_blue",
+      "sample_id": "B056",
+      "category": "button",
+      "family": "known_b_hole_button",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+      "input": "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png",
+      "image_size": [
+        512,
+        512
+      ],
+      "subject_color_family": "mixed_green_gold_silver",
+      "primary_ambiguity": "ornate plate button on blue screen with small enclosed same-background holes and green subject material",
+      "target_route": "known_b_hole_antialias_shadow",
+      "source_review_id": "B056",
+      "source_batch": "manual_user_regression_20260531_pymatting_holes"
+    },
+    {
+      "id": "icon_icon_a01_hard_boundary_strong_outline",
+      "sample_id": "I001",
+      "category": "icon",
+      "family": "a_hard_boundary",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_a01_hard_boundary_strong_outline/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "gold",
+      "primary_ambiguity": "strong dark outline, hard opaque edge",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-A01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_a02_hard_boundary_unoutlined",
+      "sample_id": "I002",
+      "category": "icon",
+      "family": "a_hard_boundary",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_a02_hard_boundary_unoutlined/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_a02_hard_boundary_unoutlined/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "hard opaque edge, no drawn outline",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-A02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_a03_hard_boundary_weak_contrast",
+      "sample_id": "I003",
+      "category": "icon",
+      "family": "a_hard_boundary",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "same-family weak-contrast hard opaque edge",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-A03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_a04_hard_boundary_complex_interior",
+      "sample_id": "I004",
+      "category": "icon",
+      "family": "a_hard_boundary",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_a04_hard_boundary_complex_interior/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_a04_hard_boundary_complex_interior/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "multicolor",
+      "primary_ambiguity": "hard opaque edge plus complex interior colors",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-A04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_b01_soft_boundary_antialias",
+      "sample_id": "I005",
+      "category": "icon",
+      "family": "b_soft_boundary",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_b01_soft_boundary_antialias/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_b01_soft_boundary_antialias/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "light_feather",
+      "primary_ambiguity": "antialiased organic edge",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-B01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_b02_soft_boundary_feathered",
+      "sample_id": "I006",
+      "category": "icon",
+      "family": "b_soft_boundary",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/icon/icon_icon_b02_soft_boundary_feathered/blue.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_b02_soft_boundary_feathered/blue.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "warm_neutral",
+      "primary_ambiguity": "feathered soft alpha edge",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-B02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_b03_soft_boundary_fragmented_edge",
+      "sample_id": "I007",
+      "category": "icon",
+      "family": "b_soft_boundary",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/icon/icon_icon_b03_soft_boundary_fragmented_edge/blue.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_b03_soft_boundary_fragmented_edge/blue.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "fragmented edge with small protrusions and holes",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-B03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_c01_translucent_glass_crystal",
+      "sample_id": "I008",
+      "category": "icon",
+      "family": "c_translucent",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_c01_translucent_glass_crystal/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_c01_translucent_glass_crystal/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "transparent glass/crystal hard silhouette",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-C01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_c02_translucent_potion_bottle",
+      "sample_id": "I009",
+      "category": "icon",
+      "family": "c_translucent",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_c02_translucent_potion_bottle/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_c02_translucent_potion_bottle/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "transparent potion bottle/liquid",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-C02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_c03_translucent_same_screen_tint",
+      "sample_id": "I010",
+      "category": "icon",
+      "family": "c_translucent",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_c03_translucent_same_screen_tint/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_c03_translucent_same_screen_tint/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "translucent same-screen-family material",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-C03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d01_soft_alpha_glow_hard_core",
+      "sample_id": "I011",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d01_soft_alpha_glow_hard_core/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d01_soft_alpha_glow_hard_core/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "purple",
+      "primary_ambiguity": "hard core plus soft glow",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D01",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d02_soft_alpha_particle_mist",
+      "sample_id": "I012",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d02_soft_alpha_particle_mist/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d02_soft_alpha_particle_mist/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "particle/mist only, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D02",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d03_soft_alpha_particle_fire_orange",
+      "sample_id": "I013",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/icon/icon_icon_d03_soft_alpha_particle_fire_orange/blue.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d03_soft_alpha_particle_fire_orange/blue.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "orange_red",
+      "primary_ambiguity": "orange/red flame particles and wisps, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D03",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d04_soft_alpha_particle_poison_green",
+      "sample_id": "I014",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/icon/icon_icon_d04_soft_alpha_particle_poison_green/blue.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d04_soft_alpha_particle_poison_green/blue.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "green",
+      "primary_ambiguity": "green poison mist particles, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D04",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d05_soft_alpha_particle_arcane_purple",
+      "sample_id": "I015",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d05_soft_alpha_particle_arcane_purple/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d05_soft_alpha_particle_arcane_purple/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "purple",
+      "primary_ambiguity": "purple arcane particle vortex, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D05",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d06_soft_alpha_particle_golden_stardust",
+      "sample_id": "I016",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d06_soft_alpha_particle_golden_stardust/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d06_soft_alpha_particle_golden_stardust/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "golden stardust particles, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D06",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d07_soft_alpha_particle_ice_white_blue",
+      "sample_id": "I017",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d07_soft_alpha_particle_ice_white_blue/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d07_soft_alpha_particle_ice_white_blue/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "blue_cyan",
+      "primary_ambiguity": "white-blue frost particles and mist, no hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D07",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d08_soft_alpha_smooth_glow",
+      "sample_id": "I018",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d08_soft_alpha_smooth_glow/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d08_soft_alpha_smooth_glow/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "purple_blue",
+      "primary_ambiguity": "smooth continuous glow, no particles or hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D08",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d09_soft_alpha_smooth_white_glow_green",
+      "sample_id": "I019",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "white",
+      "primary_ambiguity": "smooth continuous white glow on green screen, no particles or hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D09",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "icon_icon_d10_soft_alpha_smooth_white_glow_blue",
+      "sample_id": "I020",
+      "category": "icon",
+      "family": "d_soft_alpha_effect",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/icon/icon_icon_d10_soft_alpha_smooth_white_glow_blue/blue.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_d10_soft_alpha_smooth_white_glow_blue/blue.png",
+      "image_size": [
+        256,
+        256
+      ],
+      "subject_color_family": "white",
+      "primary_ambiguity": "smooth continuous white glow on blue screen, no particles or hard core",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-D10",
+      "source_batch": "out/corridorkey_semantic_codex_20260530_v001/icon_mechanism_v001"
+    },
+    {
+      "id": "character_char_a01_hair_hard_edge_glass_pendant_green",
+      "sample_id": "C001",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/character/character_char_a01_hair_hard_edge_glass_pendant_green/green.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a01_hair_hard_edge_glass_pendant_green/green.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "fine hair strands, crisp opaque bust, translucent pendant/visor on green screen",
+      "composite_type": "hair + hard opaque clothing + small translucent glass accessory",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A01",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a02_hair_armor_glass_visor_blue",
+      "sample_id": "C002",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/character/character_char_a02_hair_armor_glass_visor_blue/blue.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a02_hair_armor_glass_visor_blue/blue.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "wispy hair, crisp armor edges, semi-transparent visor on blue screen",
+      "composite_type": "hair + hard armor + translucent visor",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A02",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a03_hair_fur_hard_blade_translucent_scarf_green",
+      "sample_id": "C003",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/character/character_char_a03_hair_fur_hard_blade_translucent_scarf_green/green.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a03_hair_fur_hard_blade_translucent_scarf_green/green.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "full-body character with hair/fur edge detail, hard weapon edges, gauze scarf on green screen",
+      "composite_type": "hair/fur + hard blades + translucent scarf",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A03",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a04_hair_transparent_wings_soft_glow_blue",
+      "sample_id": "C004",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/character/character_char_a04_hair_transparent_wings_soft_glow_blue/blue.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a04_hair_transparent_wings_soft_glow_blue/blue.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "fine hair, opaque body, transparent insect wings with soft alpha and faint glow on blue screen",
+      "composite_type": "hair + transparent wings + soft glow",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A04",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a05_hard_armor_hair_glass_shield_green",
+      "sample_id": "C005",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/character/character_char_a05_hard_armor_hair_glass_shield_green/green.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a05_hard_armor_hair_glass_shield_green/green.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "armored character with crisp hard edges, hair/plume strands, translucent shield on green screen",
+      "composite_type": "hard armor + hair/plume + glass shield",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A05",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a06_pale_hair_translucent_sleeves_white_glow_blue",
+      "sample_id": "C006",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "long hair strands, opaque robe, transparent sleeves/ribbons, smooth glow on blue screen",
+      "composite_type": "pale hair + translucent fabric + smooth white glow",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A06",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a07_fur_hair_hard_bow_translucent_cloak_green",
+      "sample_id": "C007",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/character/character_char_a07_fur_hair_hard_bow_translucent_cloak_green/green.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a07_fur_hair_hard_bow_translucent_cloak_green/green.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "ranger with hair and fur edge detail, hard bow/arrow silhouette, translucent cloak on green screen",
+      "composite_type": "hair/fur + hard bow + translucent cloak",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A07",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a08_spiky_hair_hard_mech_translucent_raincoat_blue",
+      "sample_id": "C008",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "blue",
+      "backgrounds": {
+        "blue": [
+          0,
+          0,
+          200
+        ]
+      },
+      "blue": "samples/corridorkey_semantic/character/character_char_a08_spiky_hair_hard_mech_translucent_raincoat_blue/blue.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a08_spiky_hair_hard_mech_translucent_raincoat_blue/blue.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "cyberpunk character with spiky hair, mechanical arm hard edges, translucent plastic panels on blue screen",
+      "composite_type": "spiky hair + hard mech edges + translucent plastic",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A08",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    },
+    {
+      "id": "character_char_a09_hair_hard_costume_translucent_silk_ribbons_green",
+      "sample_id": "C009",
+      "category": "character",
+      "family": "composite_character",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          0,
+          200,
+          0
+        ]
+      },
+      "green": "samples/corridorkey_semantic/character/character_char_a09_hair_hard_costume_translucent_silk_ribbons_green/green.png",
+      "input": "samples/corridorkey_semantic/character/character_char_a09_hair_hard_costume_translucent_silk_ribbons_green/green.png",
+      "image_size": [
+        1024,
+        1024
+      ],
+      "subject_color_family": "mixed",
+      "primary_ambiguity": "dancer/spirit character with fine hair, hard opaque costume, wide translucent silk ribbons on green screen",
+      "composite_type": "hair + hard costume + translucent ribbons",
+      "target_route": "character_composite_review",
+      "source_review_id": "CHAR-A09",
+      "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+    }
+  ]
+}

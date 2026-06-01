@@ -1,0 +1,52 @@
+{
+  "_comment": "PyMatting known-background alpha via remote ERMBG ComfyUI node.",
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "${input_image}"
+    }
+  },
+  "20": {
+    "class_type": "ErmbgPyMattingKnownB",
+    "inputs": {
+      "image": ["10", 0],
+      "method": "${method}",
+      "image_space": "${image_space}",
+      "bg_source": "${bg_source}",
+      "bg_color": "${bg_color}",
+      "bg_threshold": "${bg_threshold}",
+      "fg_threshold": "${fg_threshold}",
+      "boundary_band_px": "${boundary_band_px}",
+      "auto_adapt": "${auto_adapt}",
+      "cg_maxiter": "${cg_maxiter}",
+      "cg_rtol": "${cg_rtol}"
+    }
+  },
+  "30": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 0],
+      "filename_prefix": "${filename_prefix}_fg"
+    }
+  },
+  "40": {
+    "class_type": "Convert Masks to Images",
+    "inputs": {
+      "masks": ["20", 1]
+    }
+  },
+  "50": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["40", 0],
+      "filename_prefix": "${filename_prefix}_alpha"
+    }
+  },
+  "60": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["20", 4],
+      "filename_prefix": "${filename_prefix}_trimap"
+    }
+  }
+}

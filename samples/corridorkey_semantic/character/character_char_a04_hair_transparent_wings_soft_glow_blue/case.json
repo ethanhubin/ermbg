@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a04_hair_transparent_wings_soft_glow_blue",
+  "sample_id": "C004",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      0,
+      200
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/character/character_char_a04_hair_transparent_wings_soft_glow_blue/blue.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a04_hair_transparent_wings_soft_glow_blue/blue.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "fine hair, opaque body, transparent insect wings with soft alpha and faint glow on blue screen",
+  "composite_type": "hair + transparent wings + soft glow",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A04",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}

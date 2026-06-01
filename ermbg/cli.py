@@ -20,16 +20,13 @@ from pathlib import Path
 import numpy as np
 import typer
 from loguru import logger
-from PIL import Image
 
 from . import io
 from .api import matte_image
 from .comfy import DEFAULT_COMFY_URL
 from .diagnose import BackgroundDiagnoser
-from .matting import matte as run_matte
 from .probe.generator import PROBE_COLORS
 from .probe.synthetic import SyntheticProbeGenerator
-from .qa import run_qa
 from .segmenter import build_segmenter, make_bands
 from .slicer import save_slices, slice_image
 
@@ -45,16 +42,6 @@ def _load_object_prompt(json_path: Path) -> str | None:
     except Exception as e:
         logger.warning(f"Could not parse {json_path}: {e}")
         return None
-
-
-def _load_subject_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray:
-    """Load an ownership mask as H×W float32 [0,1]."""
-    mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.float32) / 255.0
-    if mask.shape != shape:
-        raise typer.BadParameter(
-            f"--subject-mask shape must match input image {shape}, got {mask.shape}"
-        )
-    return np.clip(mask, 0.0, 1.0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +108,7 @@ def slice_command(
 def segment(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/smoke"), help="Output directory"),
-    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg | comfy-ermbg"),
+    backend: str = typer.Option("comfy-rmbg", help="comfy-rmbg"),
     comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Run coarse subject segmentation + build a rough trimap."""
@@ -149,7 +136,7 @@ def segment(
 def diagnose(
     input_path: Path = typer.Argument(..., help="Input image path"),
     out_dir: Path = typer.Option(Path("samples/outputs/diagnose"), help="Output directory"),
-    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg"),
+    backend: str = typer.Option("comfy-rmbg", help="comfy-rmbg"),
     comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
 ):
     """Background diagnosis: is the image suitable for direct analytic matting?"""
@@ -176,46 +163,13 @@ def diagnose(
 def matte(
     input_path: Path = typer.Argument(..., help="Input image path (clean solid-bg)"),
     out_dir: Path = typer.Option(Path("samples/outputs/matte"), help="Output directory"),
-    backend: str = typer.Option("auto", help="auto | birefnet | grabcut | comfy-rmbg"),
-    matting_model: str = typer.Option(
-        "ZhengPeng7/BiRefNet-matting",
-        help="HF model id for the matting segmenter (default: BiRefNet-matting)",
-    ),
-    input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
-    despill: str = typer.Option(
-        "auto",
-        help="auto | unmix | chroma_cap | local_borrow | closed_form | none. Overrides router.",
-    ),
-    use_keyer: bool = typer.Option(
-        True,
-        "--keyer/--no-keyer",
-        help="Run chromatic-key on top of matting α to recover small components missed by the matting net (auto-skipped when B is near-grey)",
-    ),
+    backend: str = typer.Option("auto", help="auto | comfy-rmbg | comfy-corridorkey | pymatting-known-b | comfy-pymatting-known-b"),
     shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
     bg_color: str = typer.Option(
         "0,200,0",
         help="Composite background for transparent inputs, as 'R,G,B' (default green screen)",
     ),
-    subject_mask: Path | None = typer.Option(
-        None,
-        "--subject-mask",
-        help="Optional HxW ownership mask. Used only to repair subject-owned low-alpha holes.",
-    ),
-    vlm_prior: bool = typer.Option(
-        False,
-        "--vlm-prior/--no-vlm-prior",
-        help="Use a VLM provider to classify semantic prior regions before despill.",
-    ),
-    vlm_provider: str = typer.Option("openai", help="openai | comfy-qwen"),
-    vlm_model: str = typer.Option("gpt-4o-mini", help="Vision model for --vlm-prior"),
-    vlm_prior_mode: str = typer.Option(
-        "shadow",
-        help="shadow | material | all. Default keeps VLM focused on owned shadow constraints.",
-    ),
-    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg or --vlm-provider comfy-qwen"),
-    legacy_analytic_alpha: bool = typer.Option(
-        False, "--legacy-analytic-alpha", help="Run the old trimap+projection+guided-filter pipeline."
-    ),
+    comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for remote backends"),
     qa: bool = typer.Option(True, help="Composite to multiple backgrounds and score"),
 ):
     """End-to-end analytic matting: produce RGBA + alpha + clean foreground + QA report."""
@@ -225,158 +179,18 @@ def matte(
     if shadow_mode not in {"on", "off", "auto"}:
         raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
-    if backend == "comfy-ermbg":
-        response = matte_image(
-            input_path,
-            output_dir=out_dir,
-            qa=qa,
-            matting_model=matting_model,
-            backend=backend,
-            bg_color=bg_tuple,
-            despill=despill if despill != "auto" else None,
-            use_keyer=False if not use_keyer else None,
-            subject_mask=subject_mask,
-            shadow_mode=shadow_mode,
-            comfy_url=comfy_url,
-        )
-        logger.info(f"Saved remote Comfy ERMBG matte to {response.output_dir}")
-        return
-
-    image, source_alpha = io.load_image_with_alpha(input_path)
-    subject_support = _load_subject_mask(subject_mask, image.shape[:2]) if subject_mask is not None else None
-    object_prompt = _load_object_prompt(input_path.with_suffix(".json"))
-    seg = build_segmenter(
+    if backend in {"birefnet", "grabcut", "comfy-ermbg"}:
+        raise typer.BadParameter("legacy full-matting backends were removed; use auto or a routed backend")
+    response = matte_image(
+        input_path,
+        output_dir=out_dir,
+        qa=qa,
         backend=backend,
-        model_id=matting_model,
-        input_size=input_size,
-        url=comfy_url,
-    )
-
-    # If the source has alpha but the router decides to RE-matte (not pass-through),
-    # the matting net needs to see RGB on a known constant background, otherwise
-    # transparent-region junk biases the segmentation. Pre-composite onto bg_tuple;
-    # the router still sees source_alpha and can pick passthrough independently.
-    if source_alpha is not None:
-        from .router import classify_strategy
-        strat_preview = classify_strategy(image, source_alpha=source_alpha)
-        if not strat_preview.passthrough:
-            image = io.load_rgb(input_path, background=bg_tuple)
-
-    semantic_prior = None
-    if vlm_prior:
-        from .shadow import estimate_shadow_alpha
-        from .vlm_semantic import (
-            ComfyQwenVLMSemanticPriorClient,
-            OpenAIVLMSemanticPriorClient,
-            build_vlm_semantic_request,
-            extract_shadow_candidate_regions,
-            extract_subject_material_candidate_regions,
-        )
-
-        soft_preview = seg.segment(image, object_prompt=object_prompt)
-        diag_preview = BackgroundDiagnoser().diagnose(image, soft_preview)
-        B_preview = np.array(diag_preview.background_color, dtype=np.uint8)
-        shadow_preview, _ = estimate_shadow_alpha(image, soft_preview, B_preview)
-        mode = vlm_prior_mode.strip().lower()
-        if mode not in {"shadow", "material", "all"}:
-            raise typer.BadParameter("--vlm-prior-mode must be shadow, material, or all")
-        regions = []
-        if mode in {"shadow", "all"}:
-            regions.extend(
-                extract_shadow_candidate_regions(
-                    image,
-                    soft_preview,
-                    B_preview,
-                    shadow_alpha=shadow_preview,
-                )
-            )
-        if mode in {"material", "all"}:
-            regions.extend(
-                extract_subject_material_candidate_regions(
-                    image,
-                    soft_preview,
-                    B_preview,
-                    shadow_alpha=shadow_preview,
-                )
-            )
-        logger.info(f"vlm-prior: mode={mode} found {len(regions)} candidate region(s)")
-        if regions:
-            request = build_vlm_semantic_request(
-                image_srgb=image,
-                subject_alpha=soft_preview,
-                background_color=tuple(int(c) for c in B_preview),
-                regions=regions,
-                shadow_alpha=shadow_preview,
-            )
-            if vlm_provider == "openai":
-                client = OpenAIVLMSemanticPriorClient(
-                    model=vlm_model,
-                    env_path=Path(".env"),
-                )
-            elif vlm_provider == "comfy-qwen":
-                client = ComfyQwenVLMSemanticPriorClient(
-                    url=comfy_url,
-                    model=vlm_model if vlm_model != "gpt-4o-mini" else "Qwen3-VL-4B-Instruct-FP8",
-                )
-            else:
-                raise typer.BadParameter("--vlm-provider must be openai or comfy-qwen")
-            semantic_prior = client.classify_request(request, regions, image.shape[:2])
-            prior_dict = semantic_prior.to_dict()
-            logger.info(
-                "vlm-prior: shadow_allowed="
-                f"{prior_dict['shadow_allowed']} shadow_ownership_pixels="
-                f"{prior_dict['shadow_ownership_pixels']} subject_material_pixels="
-                f"{prior_dict['subject_material_pixels']}"
-            )
-
-    result = run_matte(
-        image,
-        source_alpha=source_alpha,
-        object_prompt=object_prompt,
-        segmenter=seg,
-        despill=despill if despill != "auto" else None,
-        use_keyer=False if not use_keyer else None,
-        subject_support=subject_support,
-        semantic_prior=semantic_prior,
-        soft_mask=soft_preview if vlm_prior else None,
+        bg_color=bg_tuple,
         shadow_mode=shadow_mode,
-        legacy_analytic_alpha=legacy_analytic_alpha,
+        comfy_url=comfy_url,
     )
-
-    stem = input_path.stem
-    out_dir.mkdir(parents=True, exist_ok=True)
-    io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
-    io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
-    io.save_mask(out_dir / f"{stem}_shadow.png", result.debug["shadow_alpha"])
-    io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
-    io.save_mask(out_dir / f"{stem}_trimap.png", result.debug["trimap_u8"])
-
-    metrics_payload = {
-        "diagnosis": result.diagnosis.to_dict() if result.diagnosis is not None else None,
-        "background_color": list(result.background_color),
-        "despill_method": result.debug.get("despill_method"),
-        "matting_model": matting_model,
-        "keyer": result.debug.get("keyer", {}),
-        "shadow": result.debug.get("shadow", {}),
-        "semantic_prior": result.debug.get("semantic_prior", {}),
-        "strategy": result.debug.get("strategy", {}),
-    }
-
-    if qa:
-        qa_dir = out_dir / f"{stem}_qa"
-        qa_metrics = run_qa(
-            image_srgb=image,
-            rgba=result.rgba,
-            soft_mask=result.debug["soft_mask"],
-            background_color=result.background_color,
-            out_dir=qa_dir,
-        )
-        metrics_payload["qa"] = qa_metrics
-        (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-
-    (out_dir / f"{stem}.report.json").write_text(json.dumps(metrics_payload, indent=2))
-    verdict = result.diagnosis.verdict if result.diagnosis is not None else "passthrough"
-    logger.info(f"Saved RGBA + QA to {out_dir}; verdict={verdict}")
+    logger.info(f"Saved {response.strategy_name} matte to {response.output_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +203,7 @@ def phase1(
     input_dir: Path = typer.Option(..., help="Directory of input images"),
     out_dir: Path = typer.Option(Path("samples/outputs/phase1"), help="Output root"),
     backend: str = typer.Option("auto"),
-    input_size: int = typer.Option(1024, help="BiRefNet square input size; lower values trade quality for speed."),
+    input_size: int = typer.Option(1024, help="Deprecated compatibility option."),
     shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
     comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
     matte_only_when_ready: bool = typer.Option(
@@ -406,60 +220,27 @@ def phase1(
     if shadow_mode not in {"on", "off", "auto"}:
         raise typer.BadParameter("--shadow-mode must be on, auto, or off")
 
-    seg = build_segmenter(backend=backend, input_size=input_size, url=comfy_url)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary: list[dict] = []
     for p in inputs:
         logger.info(f"=== {p.stem} ===")
-        image = io.load_rgb(p)
         case_dir = out_dir / p.stem
         case_dir.mkdir(parents=True, exist_ok=True)
-        io.save_rgb(case_dir / "original.png", image)
-
-        soft = seg.segment(image)
-        diag = BackgroundDiagnoser().diagnose(image, soft)
-        (case_dir / "diagnose.json").write_text(json.dumps(diag.to_dict(), indent=2))
-        if diag.risk_map is not None:
-            io.save_mask(case_dir / "risk.png", diag.risk_map)
-
-        row = {
-            "image": p.stem,
-            "background_color": list(diag.background_color),
-            "purity_sigma": diag.purity_sigma,
-            "edge_q10": diag.edge_contrast_q10,
-            "verdict": diag.verdict,
-        }
-
-        if matte_only_when_ready and diag.verdict != "ready":
-            logger.info(f"  skipping matte (verdict={diag.verdict})")
-            row["matte_skipped"] = True
-            summary.append(row)
-            continue
 
         try:
-            result = run_matte(image, segmenter=seg, soft_mask=soft, shadow_mode=shadow_mode)
+            result = matte_image(p, output_dir=case_dir, qa=True, backend=backend, shadow_mode=shadow_mode, comfy_url=comfy_url)
         except Exception as e:
             logger.exception(f"matte failed for {p.stem}: {e}")
-            row["error"] = str(e)
-            summary.append(row)
+            summary.append({"image": p.stem, "error": str(e)})
             continue
-
-        io.save_rgba(case_dir / "rgba.png", result.rgba)
-        io.save_mask(case_dir / "alpha.png", result.alpha)
-        io.save_mask(case_dir / "shadow.png", result.debug["shadow_alpha"])
-        io.save_rgb(case_dir / "foreground.png", result.foreground_srgb)
-        io.save_mask(case_dir / "trimap.png", result.debug["trimap_u8"])
-
-        qa_metrics = run_qa(
-            image_srgb=image,
-            rgba=result.rgba,
-            soft_mask=result.debug["soft_mask"],
-            background_color=result.background_color,
-            out_dir=case_dir / "qa",
-        )
-        (case_dir / "qa" / "report.json").write_text(json.dumps(qa_metrics, indent=2))
-        row.update(qa_metrics)
+        row = {
+            "image": p.stem,
+            "background_color": list(result.background_color),
+            "strategy": result.strategy_name,
+            "backend": result.debug.get("auto_route", {}).get("selected_backend", backend),
+        }
+        row.update(result.report.get("qa", {}))
         summary.append(row)
 
     _write_summary(out_dir / "summary.md", summary)
@@ -471,18 +252,17 @@ def _write_summary(path: Path, rows: list[dict]) -> None:
     lines = [
         "# Phase 1 Matting Summary",
         "",
-        "| image | bg | purity_σ | edge_q10 | verdict | recomp_err | halo_mean | α_noise | thin_keep |",
-        "|---|---|---:|---:|---|---:|---:|---:|---:|",
+        "| image | backend | strategy | bg | recomp_err | halo_mean | α_noise | thin_keep |",
+        "|---|---|---|---|---:|---:|---:|---:|",
     ]
     for r in rows:
         bg = r.get("background_color", "")
         lines.append(
-            "| {img} | {bg} | {ps:.2f} | {eq:.2f} | {v} | {re} | {hm} | {an} | {tk} |".format(
+            "| {img} | {backend} | {strategy} | {bg} | {re} | {hm} | {an} | {tk} |".format(
                 img=r["image"],
+                backend=r.get("backend", "-"),
+                strategy=r.get("strategy", "-"),
                 bg=tuple(bg) if bg else "-",
-                ps=r["purity_sigma"],
-                eq=r["edge_q10"],
-                v=r["verdict"],
                 re=f"{r.get('recomposition_error_on_observed_bg', float('nan')):.4f}" if "recomposition_error_on_observed_bg" in r else "-",
                 hm=f"{r.get('edge_halo_score_mean', float('nan')):.2f}" if "edge_halo_score_mean" in r else "-",
                 an=f"{r.get('alpha_noise_p95', float('nan')):.3f}" if "alpha_noise_p95" in r else "-",

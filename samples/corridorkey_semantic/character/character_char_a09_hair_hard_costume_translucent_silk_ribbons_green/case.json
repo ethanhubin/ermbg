@@ -1,0 +1,26 @@
+{
+  "id": "character_char_a09_hair_hard_costume_translucent_silk_ribbons_green",
+  "sample_id": "C009",
+  "category": "character",
+  "family": "composite_character",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      0,
+      200,
+      0
+    ]
+  },
+  "green": "samples/corridorkey_semantic/character/character_char_a09_hair_hard_costume_translucent_silk_ribbons_green/green.png",
+  "input": "samples/corridorkey_semantic/character/character_char_a09_hair_hard_costume_translucent_silk_ribbons_green/green.png",
+  "image_size": [
+    1024,
+    1024
+  ],
+  "subject_color_family": "mixed",
+  "primary_ambiguity": "dancer/spirit character with fine hair, hard opaque costume, wide translucent silk ribbons on green screen",
+  "composite_type": "hair + hard costume + translucent ribbons",
+  "target_route": "character_composite_review",
+  "source_review_id": "CHAR-A09",
+  "source_batch": "out/corridorkey_semantic_character_1024_sources_20260530"
+}

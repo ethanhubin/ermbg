@@ -1,84 +1,61 @@
 # ERMBG ComfyUI Nodes
 
-把 ERMBG 的智能抠图(自动选 saturated / white / black / passthrough 策略)接进 ComfyUI,贴合"AI 出图 → 自动抠干净"的工作流。
+ERMBG Comfy 节点现在提供统一 auto 路由抠图节点、独立路由策略节点和
+已知背景硬边 matting 能力。旧的 `ERMBG AutoMatte` / BiRefNet 全量抠图
+节点已移除。
 
 ## 节点
 
-### `ERMBG AutoMatte`
-端到端,接 KSampler/VAEDecode 的输出,出干净 RGBA。
+### `ERMBG Route Strategy`
 
-输入:
-- `image` (IMAGE,必填) — 要抠的图
-- `source_mask` (MASK,可选) — 已有的 α(比如来自其他分割节点)。给了之后,router 会自动评估它干不干净:干净就直接 pass,脏就重抠。
-- `subject_mask` (MASK,可选) — 独立主体归属 mask,只用于修复主体内部低 α 缺口,不会直接替换最终 α。
-- `despill` — 默认 `auto (router decides)`,需要时可手动覆盖
-- `use_keyer` — 默认 `auto`,可强开/强关
-- `bg_color` — 当源 RGBA 太脏被重抠时用作合成底色,默认绿幕 `0,200,0`
-- `matting_model` — HF 模型 id,默认 BiRefNet-matting
+只做路由决策,不执行抠图。用于调试或手工 graph 分支。
 
 输出:
-- `foreground` (IMAGE) — 去污染后的前景 RGB(直 α,非预乘)
-- `alpha` (MASK) — 最终 α
-- `summary` (STRING) — 一行调试信息,包含策略名 / despill / 说明
+
+- `backend`: `passthrough` / `comfy-pymatting-known-b` / `comfy-corridorkey`
+- `route`: `rgba_passthrough` / `pymatting_known_b` / `pymatting_fallback` / `corridorkey`
+- `asset_kind`: `button` / `icon` / `character` / `known_bg_graphic` / `unknown_fallback`
+- `execution_profile`:最终执行 profile,例如 `pymatting-hard-button`,
+  `corridorkey-transparent-button`, `corridorkey-character`,
+  `corridorkey-effect-icon`, `corridorkey-shaped-icon`, or
+  `pymatting-fallback`
+- `json`: 完整 `RouteDecision` metadata
+
+### `ERMBG Route Matte`
+
+生产 auto 路径。Mac/Web 只上传输入图并提交这个单节点 workflow;节点在
+ComfyUI 进程内完成 route、PyMatting Known-B、CorridorKey、PyMatting fallback、
+shadow patch 和 metadata 输出,避免 Mac 侧后处理和嵌套 Comfy prompt。
+Route Matte 只消费 router 输出的 `execution_profile` 和随附参数;它不再根据
+CorridorKey semantic profile 二次推断 character / glass button / effect icon。
+
+输出:
+
+- `foreground`: 抠图前景 RGB
+- `alpha`: 最终 alpha
+- `summary`: route/report/debug JSON
+- `rgba_rgb`: 与 `alpha` 组合成最终 RGBA 的 RGB 层
+- `aux`: 辅助预览图
+
+### `ERMBG PyMatting Known-B`
+
+已知纯色背景 PyMatting 节点,用于硬边按钮和确定性 UI。它不会跑 BiRefNet,
+也不会提交嵌套 Comfy prompt;只在当前 ComfyUI Python 进程里用 PyMatting
+解 trimap 的未知边界带,再用已知背景色反解边缘前景色。
 
 ### `ERMBG Classify (preview)`
-不跑抠图模型,只跑 router。秒回"我会用什么策略",用来在 ComfyUI 里做条件分支或 debug。
 
-输出 `bg_type` / `image_type` / 完整 JSON。
+保留的轻量诊断节点,用于查看旧 `Strategy` 分类结果。
 
-## 安装
+### `Convert Masks to Images`
 
-依赖要先装到 ComfyUI 的 Python 环境里:
+MASK 到 IMAGE 的小工具节点。
 
-```bash
-# 在 ComfyUI 的 venv 中
-pip install ermbg
+## 推荐工作流
 
-# 或本地 dev 安装
-cd /path/to/ERMBG
-pip install -e ".[torch]"
+```text
+KSampler -> VAEDecode -> ERMBG Route Matte -> foreground/alpha/rgba_rgb
 ```
 
-然后把这个目录链到 ComfyUI:
-
-```bash
-# 软链(开发期推荐,改代码立即生效)
-ln -s /path/to/ERMBG/comfy_nodes ~/ComfyUI/custom_nodes/ermbg
-
-# 或拷贝
-cp -r comfy_nodes ~/ComfyUI/custom_nodes/ermbg
-```
-
-重启 ComfyUI,在节点面板 → ERMBG 分类下应该能看到两个节点。
-
-## 工作流示例
-
-最简单的"出图 → 抠图"链:
-
-```
-KSampler → VAEDecode → ERMBG AutoMatte → Save Image (RGBA)
-                                       ↘ MASK output → Mask preview
-```
-
-带预览(看 router 选了啥):
-
-```
-LoadImage → ERMBG Classify → ShowText (json)
-          ↘ ERMBG AutoMatte → ...
-```
-
-如果你的工作流前面已经有别的分割节点(比如 SAM),把 MASK 接到 AutoMatte 的 `source_mask`。AutoMatte 会自动评估这个 mask 的卫生度:边缘干净就直接用,有 halo / 二值化 / 旧背景泄漏就重抠。
-
-如果本地证据无法稳定判断主体归属,可以把 CLIPSeg / Florence / SAM 生成的粗 ownership mask 接到 `subject_mask`。这条输入只回答"哪些区域属于主体",ERMBG 仍会用 keyer、外轮廓保护和 QA 来决定实际修复范围。
-
-服务器忙时可以先只渲染工作流 JSON,不提交队列:
-
-```bash
-.venv/bin/python scripts/05_comfy_subject_mask_workflow.py \
-  --input input.png \
-  --prompt "the complete object to keep" \
-  --out out/comfy_workflows/subject_mask_ermbg.json \
-  --filename-prefix subject_mask_ermbg
-```
-
-等 ComfyUI 空闲后加 `--submit` 即可上传、排队、等待完成并下载 foreground / alpha / subject mask 三个调试输出;如果只想排队不等待,再加 `--no-wait`。
+`ERMBG Route Strategy` 仍可用于调试和自定义 graph 分支;生产 Web/API 的
+`backend="auto"` 统一提交 `ERMBG Route Matte`。

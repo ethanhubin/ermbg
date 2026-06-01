@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from ermbg import io
-from ermbg.matting import matte
 from ermbg.planner import RiskRegion
 from ermbg.shadow import (
     ShadowPrior,
@@ -232,6 +231,36 @@ def test_estimate_shadow_alpha_rejects_clean_background():
     assert float(shadow_alpha.max()) == 0.0
 
 
+def test_estimate_shadow_alpha_rejects_outline_residue_as_shadow():
+    """Dark semitransparent edge residue is not a cast shadow.
+
+    The residue satisfies the same scalar-darkening equation as a physical
+    shadow, but it is tightly glued to the subject boundary and overlaps the
+    subject's own soft alpha. That geometry identifies antialiasing/outline
+    contamination rather than exterior shadow ownership.
+    """
+    h, w = 96, 160
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.broadcast_to(bg, (h, w, 3)).copy()
+    subject = np.zeros((h, w), dtype=np.float32)
+    subject[28:64, 38:122] = 1.0
+
+    residue = np.zeros((h, w), dtype=bool)
+    residue[24:28, 40:120] = True
+    residue[64:68, 40:120] = True
+    residue[30:64, 34:38] = True
+    residue[30:64, 122:126] = True
+    subject[residue] = 0.12
+    image[residue] = _scaled_background_color(bg, 0.55)
+    image[subject >= 1.0] = (230, 170, 20)
+
+    shadow_alpha, info = estimate_shadow_alpha(image, subject, tuple(int(c) for c in bg))
+
+    assert info["detected"] is False
+    assert info["boundary"]["boundary_residue_rejected"] is True
+    assert float(shadow_alpha[residue].max()) == 0.0
+
+
 def test_subject_prior_prevents_dark_subject_interior_becoming_shadow():
     h, w = 96, 128
     bg = np.array([0, 200, 0], dtype=np.uint8)
@@ -344,33 +373,3 @@ def test_shadow_prior_from_planner_regions_maps_semantic_masks():
     assert int(prior.subject_mask.sum()) == int(subject_mask.sum())
     assert int(prior.shadow_ownership_mask.sum()) == int(shadow_mask.sum())
 
-
-def test_matte_composites_detected_shadow_behind_subject():
-    image, subject, shadow_gt, bg = _green_subject_with_shadow(shadow=True)
-
-    result = matte(image, segmenter=_StubSegmenter(subject))
-    shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
-
-    assert result.debug["shadow"]["detected"] is True
-    assert result.debug["subject_alpha"][shadow_core].mean() < 0.05
-    assert result.debug["shadow_alpha_physical"][shadow_core].mean() > 0.20
-    assert result.debug["shadow_alpha"][shadow_core].mean() < result.debug["shadow_alpha_physical"][shadow_core].mean()
-    assert result.alpha[shadow_core].mean() > 0.20
-
-    bg_arr = np.asarray(bg, dtype=np.float32).reshape(1, 1, 3)
-    rgba = result.rgba.astype(np.float32)
-    a = rgba[..., 3:4] / 255.0
-    viewer_comp = rgba[..., :3] * a + bg_arr * (1.0 - a)
-    assert np.abs(viewer_comp[shadow_core] - image.astype(np.float32)[shadow_core]).mean() < 3.0
-
-
-def test_matte_shadow_mode_off_skips_shadow_recovery():
-    image, subject, shadow_gt, _ = _green_subject_with_shadow(shadow=True)
-
-    result = matte(image, segmenter=_StubSegmenter(subject), shadow_mode="off")
-    shadow_core = (shadow_gt > 0.25) & (subject < 0.1)
-
-    assert result.debug["shadow"]["detected"] is False
-    assert result.debug["shadow"]["mode"] == "off"
-    assert float(result.debug["shadow_alpha_physical"].max()) == 0.0
-    assert result.alpha[shadow_core].mean() < 0.05

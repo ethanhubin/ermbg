@@ -3,7 +3,7 @@
 ERMBG 不是独立 skill,而是合并进 [openclaw](https://github.com/anthropics/openclaw) 已有的 `comfyui-rmbg` skill,作为 `--mode ermbg` 子模式存在。这样:
 
 - 用户说"抠图 / 去背景 / remove background" → 走 `comfyui-rmbg` 的标准 RMBG 路径(快、够用)。
-- 用户说"**智能抠图 / AI生图抠图 / smart matte / ERMBG**" → 走 `--mode ermbg`,触发 ERMBG 的 router + 多策略管线。
+- 用户说"**智能抠图 / AI生图抠图 / smart matte / ERMBG**" → 走 `--mode ermbg`,触发 ERMBG RouteMatte 单节点管线。
 - 用户说"magic wand / 只去同色边缘" → 走 `--mode edge-wand`(原有)。
 
 一个 skill,多个触发词,意图精准命中。
@@ -24,23 +24,19 @@ python3 ~/.openclaw/workspace/skills/comfyui-rmbg/scripts/comfyui_rmbg.py \
 
 ## 服务器侧依赖
 
-ComfyUI 服务器要先按 [DEPLOY.md](../../DEPLOY.md) 装好 ERMBG 节点。`--mode ermbg` 启动时会先查 `/object_info`,如果 `ErmbgAutoMatte` 节点不存在,直接报错并提示用 `--mode rmbg` 或 `--mode edge-wand`。
+ComfyUI 服务器要先按 [DEPLOY.md](../../DEPLOY.md) 装好 ERMBG 节点。`--mode ermbg` 应提交 `ErmbgRouteMatte`;该节点在 Comfy 进程内完成 route、参数选择、CorridorKey / PyMatting Known-B / PyMatting fallback / passthrough 和 ShadowPatch。Auto 不再调用 RMBG fallback。
 
 ## 内部工作流
 
-`--mode ermbg` 提交给 ComfyUI 的工作流是:
+旧的 `ErmbgAutoMatte` 单节点工作流已移除。`--mode ermbg` 的工作流应是:
 
 ```
-LoadImage → ErmbgAutoMatte → InvertMask → SaveImageWithAlpha
-                ↑                ↑
-                router 决定策略     SaveImageWithAlpha 的 MASK 语义是
-                                  "透明区域",和 ERMBG 的前景 α 相反,
-                                  必须翻转
+LoadImage → ERMBG Route Matte → foreground / alpha / rgba_rgb / metadata
 ```
 
 ## ermbg-matte 子模式选项
 
-所有都是 `--mode ermbg` 才生效;默认全 `auto`,让 router 决策。
+所有都是 `--mode ermbg` 才生效;默认全 `auto`,让 `ErmbgRouteMatte` 决策。
 
 | 选项 | 默认 | 说明 |
 |---|---|---|

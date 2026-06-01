@@ -8,10 +8,12 @@ exercised by tests/test_api.py.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 torch = pytest.importorskip("torch")
 
@@ -19,7 +21,15 @@ torch = pytest.importorskip("torch")
 # as a package. For tests, add the repo root so the import resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from comfy_nodes.ermbg_nodes import ConvertMasksToImages, ErmbgAutoMatte, ErmbgClassify, _dev_reload_ermbg_modules, _mask_to_numpy  # noqa: E402
+from comfy_nodes.ermbg_nodes import (  # noqa: E402
+    ConvertMasksToImages,
+    ErmbgClassify,
+    ErmbgPyMattingKnownB,
+    ErmbgRouteStrategy,
+    _LocalCorridorKeyClient,
+    _dev_reload_ermbg_modules,
+    _mask_to_numpy,
+)
 
 
 def _green_with_red_subject(h=128, w=128):
@@ -32,15 +42,6 @@ def _to_comfy_image(arr_uint8: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(arr_uint8.astype(np.float32) / 255.0).unsqueeze(0)
 
 
-@pytest.fixture
-def _force_grabcut(monkeypatch):
-    """Force the matting backend to grabcut so tests don't download BiRefNet."""
-    import ermbg.api as api
-
-    real = api.build_segmenter
-    monkeypatch.setattr(api, "build_segmenter", lambda backend="auto", **kw: real(backend="grabcut"))
-
-
 def test_classify_node_returns_strings():
     img = _to_comfy_image(_green_with_red_subject())
     node = ErmbgClassify()
@@ -50,25 +51,23 @@ def test_classify_node_returns_strings():
     assert "saturated_bg" in payload_json
 
 
-def test_automatte_returns_image_mask_summary(_force_grabcut):
-    img = _to_comfy_image(_green_with_red_subject())
-    node = ErmbgAutoMatte()
-    fg, alpha, summary, rgba_rgb = node.run(
-        image=img,
-        despill="auto (router decides)",
-        use_keyer="auto (router decides)",
-        bg_color="0,200,0",
-        matting_model="ZhengPeng7/BiRefNet-matting",
-        shadow_mode="off",
+def test_route_strategy_node_runs_server_side_router():
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
     )
-    # IMAGE convention: [B, H, W, C] float
-    assert fg.shape == (1, 128, 128, 3)
-    assert fg.dtype == torch.float32
-    assert rgba_rgb.shape == (1, 128, 128, 3)
-    assert rgba_rgb.dtype == torch.float32
-    # MASK convention: [B, H, W] float
-    assert alpha.shape == (1, 128, 128)
-    assert "saturated_bg" in summary
+    img = _to_comfy_image(np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8))
+    node = ErmbgRouteStrategy()
+    backend, route, asset_kind, payload_json = node.run(
+        image=img,
+        screen_mode="auto",
+        preset="auto",
+        fallback_bg_color="0,200,0",
+    )
+    assert backend == "comfy-pymatting-known-b"
+    assert route == "pymatting_known_b"
+    assert asset_kind == "button"
+    assert '"selected_backend": "comfy-pymatting-known-b"' in payload_json
 
 
 def test_dev_reload_is_opt_in(monkeypatch):
@@ -78,33 +77,63 @@ def test_dev_reload_is_opt_in(monkeypatch):
     monkeypatch.setenv("ERMBG_DEV_RELOAD", "1")
     note = _dev_reload_ermbg_modules()
     assert note.startswith("dev_reload=")
-    assert "matting" in note
+    assert "router" in note
 
 
-def test_automatte_with_source_mask_passes_through(_force_grabcut):
-    """A clean RGBA-style source mask should let the node use passthrough."""
-    h, w = 128, 128
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    cy, cx = h // 2, w // 2
-    rad = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    a = np.clip((40.0 - rad) / 4.0, 0.0, 1.0).astype(np.float32)
-    F = np.array([220, 30, 30], dtype=np.float32)
-    rgb = (a[..., None] * F).astype(np.uint8)
-
-    img = _to_comfy_image(rgb)
-    mask = torch.from_numpy(a).unsqueeze(0)
-
-    node = ErmbgAutoMatte()
-    _, _, summary, _ = node.run(
+def test_pymatting_known_b_node_returns_outputs():
+    img = _to_comfy_image(_green_with_red_subject(64, 64))
+    node = ErmbgPyMattingKnownB()
+    fg, alpha, summary, rgba_rgb, trimap = node.run(
         image=img,
-        despill="auto (router decides)",
-        use_keyer="auto (router decides)",
+        method="cf",
+        image_space="linear",
+        bg_source="custom",
         bg_color="0,200,0",
-        matting_model="ZhengPeng7/BiRefNet-matting",
-        shadow_mode="off",
-        source_mask=mask,
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        auto_adapt=True,
+        cg_maxiter=1000,
+        cg_rtol=1e-6,
     )
-    assert "rgba_passthrough" in summary
+
+    assert fg.shape == (1, 64, 64, 3)
+    assert fg.dtype == torch.float32
+    assert alpha.shape == (1, 64, 64)
+    assert rgba_rgb.shape == (1, 64, 64, 3)
+    assert trimap.shape == (1, 64, 64, 3)
+    assert "pymatting_known_b" in summary
+    assert "method=cf" in summary
+    assert "auto=True" in summary
+    assert float(alpha.max()) == pytest.approx(1.0)
+
+
+def test_comfy_pymatting_known_b_client_renders_workflow():
+    from ermbg.probe.comfyui_pymatting_known_b import ComfyUIPyMattingKnownBClient
+
+    client = ComfyUIPyMattingKnownBClient(url="http://example.invalid")
+    workflow = client._render_workflow(
+        input_image="input.png",
+        method="cf",
+        image_space="linear",
+        bg_source="custom",
+        bg_color="0,200,0",
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        auto_adapt=True,
+        cg_maxiter=1000,
+        cg_rtol=1e-6,
+        filename_prefix="pm",
+    )
+
+    assert workflow["20"]["class_type"] == "ErmbgPyMattingKnownB"
+    assert workflow["20"]["inputs"]["image"] == ["10", 0]
+    assert workflow["20"]["inputs"]["bg_threshold"] == pytest.approx(3.5)
+    assert workflow["20"]["inputs"]["boundary_band_px"] == 2
+    assert workflow["20"]["inputs"]["auto_adapt"] is True
+    assert workflow["50"]["class_type"] == "SaveImage"
+    assert workflow["60"]["inputs"]["images"] == ["20", 4]
 
 
 def test_mask_to_numpy_accepts_batched_and_unbatched_masks():
@@ -123,3 +152,81 @@ def test_convert_masks_to_images_node():
     assert images.shape == (1, 16, 20, 3)
     assert images.dtype == torch.float32
     assert float(images.min()) == pytest.approx(0.5)
+
+
+def test_local_corridorkey_client_reuses_loaded_comfy_node(monkeypatch):
+    calls = []
+
+    class FakeCorridorKeyNode:
+        def run(
+            self,
+            image,
+            mask,
+            gamma_space,
+            screen_color,
+            despill_strength,
+            refiner_strength,
+            auto_despeckle,
+            despeckle_size,
+            unique_id=None,
+        ):
+            calls.append(
+                {
+                    "gamma_space": gamma_space,
+                    "screen_color": screen_color,
+                    "refiner_strength": refiner_strength,
+                    "auto_despeckle": auto_despeckle,
+                    "despeckle_size": despeckle_size,
+                    "unique_id": unique_id,
+                    "mask_mean": float(mask.mean()),
+                }
+            )
+            alpha = torch.ones_like(mask) * 0.25
+            return image, alpha, image, image
+
+    class FakeImageToMaskNode:
+        FUNCTION = "image_to_mask"
+
+        def image_to_mask(self, image, channel):
+            assert channel == "red"
+            return (torch.ones(image.shape[:3], dtype=torch.float32) * 0.30,)
+
+    fake_module = types.SimpleNamespace(
+        NODE_CLASS_MAPPINGS={
+            "CorridorKey": FakeCorridorKeyNode,
+            "ImageToMask": FakeImageToMaskNode,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "nodes", fake_module)
+    monkeypatch.setattr(_LocalCorridorKeyClient, "_corridorkey_node", None)
+
+    image = _green_with_red_subject(16, 16)
+    result = _LocalCorridorKeyClient().matte(
+        image,
+        hint_alpha=np.ones((16, 16), dtype=np.float32),
+        gamma_space="sRGB",
+        screen_color="green",
+        refiner_strength=1.15,
+        auto_despeckle="Off",
+        despeckle_size=64,
+        apply_color_protection=False,
+    )
+
+    assert calls == [
+        {
+            "gamma_space": "sRGB",
+            "screen_color": "green",
+            "refiner_strength": pytest.approx(1.15),
+            "auto_despeckle": "Off",
+            "despeckle_size": 64,
+            "unique_id": None,
+            "mask_mean": pytest.approx(0.30),
+        }
+    ]
+    assert result.debug["settings"]["runner"] == "loaded_comfy_node"
+    assert result.debug["settings"]["runner_module"] == FakeCorridorKeyNode.__module__
+    assert result.debug["corridorkey_mask"]["convention"] == "comfy_image_to_mask_node"
+    assert result.debug["corridorkey_mask"]["source_node"] == (
+        f"{FakeImageToMaskNode.__module__}.{FakeImageToMaskNode.__name__}"
+    )
+    assert float(result.alpha.mean()) == pytest.approx(0.25)

@@ -65,7 +65,7 @@ class BiRefNetSegmenter:
     Defaults to the matting checkpoint (`ZhengPeng7/BiRefNet-matting`) which
     was trained on P3M-10k / AM-2k / AIM-500 / Distinctions-646 / HIM2K and
     directly emits a continuous alpha matte (not a saliency mask). Pass a
-    different ``model_id`` for the saliency variant or BRIA RMBG.
+    different ``model_id`` for the saliency screen or BRIA RMBG.
     """
 
     def __init__(
