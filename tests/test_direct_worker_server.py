@@ -94,6 +94,77 @@ def test_direct_worker_server_health_reports_capabilities():
     assert payload["capabilities"]["batch_matte"] is True
 
 
+def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="comfy-pymatting-known-b",
+            params={"execution_profile": "pymatting-hard-button"},
+            confidence=1.0,
+            reasons=["test"],
+            analysis={"corridorkey_analysis": {"parameter_profile": "opaque_hard_ui_no_shadow"}},
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured["backend"] = prepared.decision.backend
+        captured["route"] = prepared.decision.route
+        captured["params"] = prepared.decision.params
+        result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
+        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["execution_backend"] = "direct-corridorkey"
+        result.metadata["route"] = prepared.decision.route
+        return result
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={
+            "include_image": "false",
+            "execution_backend": "direct-corridorkey",
+            "corridorkey_gamma_space": "Linear",
+            "corridorkey_despill_strength": "0.25",
+            "corridorkey_refiner_strength": "1.5",
+            "corridorkey_auto_despeckle": "Off",
+            "corridorkey_despeckle_size": "64",
+            "corridorkey_auto_mask": "true",
+            "corridorkey_color_protection": "false",
+            "corridorkey_protection_bg_max": "6",
+            "corridorkey_protection_fg_min": "14",
+            "corridorkey_preset": "detail_safe",
+            "corridorkey_hard_ui_hint_mode": "translucent_button",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["backend"] == "comfy-corridorkey"
+    assert captured["route"] == "corridorkey"
+    assert captured["params"]["corridorkey_gamma_space"] == "Linear"
+    assert captured["params"]["corridorkey_despill_strength"] == 0.25
+    assert captured["params"]["corridorkey_refiner_strength"] == 1.5
+    assert captured["params"]["corridorkey_auto_despeckle"] == "Off"
+    assert captured["params"]["corridorkey_despeckle_size"] == 64
+    assert captured["params"]["corridorkey_auto_mask"] is True
+    assert captured["params"]["corridorkey_color_protection"] is False
+    assert captured["params"]["corridorkey_protection_bg_max"] == 6.0
+    assert captured["params"]["corridorkey_protection_fg_min"] == 14.0
+    assert captured["params"]["corridorkey_preset"] == "detail_safe"
+    assert captured["params"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    payload = response.json()
+    assert payload["selected_backend"] == "comfy-corridorkey"
+    assert payload["execution_backend"] == "direct-corridorkey"
+    assert payload["route"] == "corridorkey"
+
+
 def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     decisions = [

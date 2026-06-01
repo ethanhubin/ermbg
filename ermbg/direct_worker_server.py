@@ -14,7 +14,7 @@ import os
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -143,6 +143,66 @@ def _prepare_request(
     )
 
 
+def _apply_execution_backend_override(decision: RouteDecision, execution_backend: str) -> RouteDecision:
+    requested = execution_backend.strip().lower()
+    if requested in {"", "auto", "direct-worker"}:
+        return decision
+    if requested != "direct-corridorkey":
+        raise HTTPException(
+            status_code=400,
+            detail="execution_backend must be auto, direct-worker, or direct-corridorkey",
+        )
+    if not isinstance(decision.analysis.get("corridorkey_analysis"), dict):
+        raise HTTPException(status_code=400, detail="direct-corridorkey requires corridorkey analysis metadata")
+    params = {key: value for key, value in decision.params.items() if not key.startswith("pymatting_")}
+    params["execution_profile"] = "auto"
+    params["corridorkey_execution_profile"] = "auto"
+    return replace(
+        decision,
+        route="corridorkey",
+        backend="comfy-corridorkey",
+        params=params,
+        reasons=[*decision.reasons, "manual_direct_corridorkey_backend"],
+    )
+
+
+def _with_corridorkey_params(decision: RouteDecision, params: dict[str, Any]) -> RouteDecision:
+    if not params:
+        return decision
+    return replace(decision, params={**decision.params, **params})
+
+
+def _corridorkey_form_params(
+    *,
+    corridorkey_gamma_space: str,
+    corridorkey_despill_strength: float,
+    corridorkey_refiner_strength: float,
+    corridorkey_auto_despeckle: str,
+    corridorkey_despeckle_size: int,
+    corridorkey_auto_mask: bool,
+    corridorkey_color_protection: bool,
+    corridorkey_protection_bg_max: float,
+    corridorkey_protection_fg_min: float,
+    corridorkey_screen_mode: str,
+    corridorkey_preset: str,
+    corridorkey_hard_ui_hint_mode: str,
+) -> dict[str, Any]:
+    return {
+        "corridorkey_gamma_space": corridorkey_gamma_space,
+        "corridorkey_despill_strength": float(corridorkey_despill_strength),
+        "corridorkey_refiner_strength": float(corridorkey_refiner_strength),
+        "corridorkey_auto_despeckle": corridorkey_auto_despeckle,
+        "corridorkey_despeckle_size": int(corridorkey_despeckle_size),
+        "corridorkey_auto_mask": bool(corridorkey_auto_mask),
+        "corridorkey_color_protection": bool(corridorkey_color_protection),
+        "corridorkey_protection_bg_max": float(corridorkey_protection_bg_max),
+        "corridorkey_protection_fg_min": float(corridorkey_protection_fg_min),
+        "corridorkey_screen_mode": corridorkey_screen_mode,
+        "corridorkey_preset": corridorkey_preset,
+        "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
+    }
+
+
 def _is_cpu_parallel_route(decision: RouteDecision) -> bool:
     return decision.backend == "comfy-pymatting-known-b"
 
@@ -247,7 +307,17 @@ def health() -> dict[str, Any]:
 @app.post("/matte")
 async def matte_endpoint(
     image: UploadFile = File(...),
+    execution_backend: str = Form("auto"),
     shadow_mode: str = Form("on"),
+    corridorkey_gamma_space: str = Form("sRGB"),
+    corridorkey_despill_strength: float = Form(1.0),
+    corridorkey_refiner_strength: float = Form(1.0),
+    corridorkey_auto_despeckle: str = Form("On"),
+    corridorkey_despeckle_size: int = Form(400),
+    corridorkey_auto_mask: bool = Form(False),
+    corridorkey_color_protection: bool = Form(True),
+    corridorkey_protection_bg_max: float = Form(12.0),
+    corridorkey_protection_fg_min: float = Form(28.0),
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
@@ -256,6 +326,20 @@ async def matte_endpoint(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     bg = _parse_bg_color(fallback_bg_color)
+    ck_params = _corridorkey_form_params(
+        corridorkey_gamma_space=corridorkey_gamma_space,
+        corridorkey_despill_strength=corridorkey_despill_strength,
+        corridorkey_refiner_strength=corridorkey_refiner_strength,
+        corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+        corridorkey_despeckle_size=corridorkey_despeckle_size,
+        corridorkey_auto_mask=corridorkey_auto_mask,
+        corridorkey_color_protection=corridorkey_color_protection,
+        corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+        corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+        corridorkey_screen_mode=corridorkey_screen_mode,
+        corridorkey_preset=corridorkey_preset,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+    )
     data = await image.read()
     try:
         prepared = _prepare_request(
@@ -266,12 +350,16 @@ async def matte_endpoint(
             corridorkey_preset=corridorkey_preset,
             fallback_bg_color=bg,
         )
+        decision = _apply_execution_backend_override(prepared.decision, execution_backend)
+        prepared = replace(prepared, decision=_with_corridorkey_params(decision, ck_params))
         result = _run_prepared_main(
             prepared,
             shadow_mode=shadow_mode,
             corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
             fallback_bg_color=bg,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     payload = _case_payload(
@@ -287,7 +375,17 @@ async def matte_endpoint(
 @app.post("/batch-matte")
 async def batch_matte_endpoint(
     files: list[UploadFile] = File(...),
+    execution_backend: str = Form("auto"),
     shadow_mode: str = Form("on"),
+    corridorkey_gamma_space: str = Form("sRGB"),
+    corridorkey_despill_strength: float = Form(1.0),
+    corridorkey_refiner_strength: float = Form(1.0),
+    corridorkey_auto_despeckle: str = Form("On"),
+    corridorkey_despeckle_size: int = Form(400),
+    corridorkey_auto_mask: bool = Form(False),
+    corridorkey_color_protection: bool = Form(True),
+    corridorkey_protection_bg_max: float = Form(12.0),
+    corridorkey_protection_fg_min: float = Form(28.0),
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
@@ -296,21 +394,35 @@ async def batch_matte_endpoint(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     bg = _parse_bg_color(fallback_bg_color)
+    ck_params = _corridorkey_form_params(
+        corridorkey_gamma_space=corridorkey_gamma_space,
+        corridorkey_despill_strength=corridorkey_despill_strength,
+        corridorkey_refiner_strength=corridorkey_refiner_strength,
+        corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+        corridorkey_despeckle_size=corridorkey_despeckle_size,
+        corridorkey_auto_mask=corridorkey_auto_mask,
+        corridorkey_color_protection=corridorkey_color_protection,
+        corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+        corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+        corridorkey_screen_mode=corridorkey_screen_mode,
+        corridorkey_preset=corridorkey_preset,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+    )
     prepared: list[PreparedRequest] = []
     rows: list[dict[str, Any] | None] = [None] * len(files)
     for index, upload in enumerate(files):
         data = await upload.read()
         try:
-            prepared.append(
-                _prepare_request(
-                    index,
-                    upload.filename or f"image_{index}",
-                    data,
-                    corridorkey_screen_mode=corridorkey_screen_mode,
-                    corridorkey_preset=corridorkey_preset,
-                    fallback_bg_color=bg,
-                )
+            item = _prepare_request(
+                index,
+                upload.filename or f"image_{index}",
+                data,
+                corridorkey_screen_mode=corridorkey_screen_mode,
+                corridorkey_preset=corridorkey_preset,
+                fallback_bg_color=bg,
             )
+            decision = _apply_execution_backend_override(item.decision, execution_backend)
+            prepared.append(replace(item, decision=_with_corridorkey_params(decision, ck_params)))
         except Exception as exc:
             rows[index] = {
                 "status": "error",

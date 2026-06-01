@@ -42,7 +42,17 @@ def matte_image_direct_worker(
     image: ImageLike,
     *,
     direct_worker_url: str = DEFAULT_DIRECT_WORKER_URL,
+    execution_backend: str = "auto",
     shadow_mode: str = "on",
+    corridorkey_gamma_space: str = "sRGB",
+    corridorkey_despill_strength: float = 1.0,
+    corridorkey_refiner_strength: float = 1.0,
+    corridorkey_auto_despeckle: str = "On",
+    corridorkey_despeckle_size: int = 400,
+    corridorkey_auto_mask: bool = False,
+    corridorkey_color_protection: bool = True,
+    corridorkey_protection_bg_max: float = 12.0,
+    corridorkey_protection_fg_min: float = 28.0,
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
@@ -52,7 +62,17 @@ def matte_image_direct_worker(
     """Run one image through the remote direct-worker HTTP backend."""
     files = {"image": ("input.png", _to_png_bytes(image), "image/png")}
     data = {
+        "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
+        "corridorkey_gamma_space": corridorkey_gamma_space,
+        "corridorkey_despill_strength": str(float(corridorkey_despill_strength)),
+        "corridorkey_refiner_strength": str(float(corridorkey_refiner_strength)),
+        "corridorkey_auto_despeckle": corridorkey_auto_despeckle,
+        "corridorkey_despeckle_size": str(int(corridorkey_despeckle_size)),
+        "corridorkey_auto_mask": "true" if corridorkey_auto_mask else "false",
+        "corridorkey_color_protection": "true" if corridorkey_color_protection else "false",
+        "corridorkey_protection_bg_max": str(float(corridorkey_protection_bg_max)),
+        "corridorkey_protection_fg_min": str(float(corridorkey_protection_fg_min)),
         "corridorkey_screen_mode": corridorkey_screen_mode,
         "corridorkey_preset": corridorkey_preset,
         "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
@@ -77,10 +97,11 @@ def matte_image_direct_worker(
         background_color = tuple(int(c) for c in background)
     else:
         background_color = tuple(int(c) for c in fallback_bg_color)
-    execution_backend = str(payload.get("execution_backend") or "direct-worker")
-    strategy_name = execution_backend.replace("-", "_")
+    actual_execution_backend = str(payload.get("execution_backend") or "direct-worker")
+    strategy_name = actual_execution_backend.replace("-", "_")
+    requested_backend = "direct-worker" if execution_backend == "auto" else execution_backend
     auto_route = {
-        "requested_backend": "direct-worker",
+        "requested_backend": requested_backend,
         "selected_backend": payload.get("selected_backend"),
         "execution_backend": payload.get("execution_backend"),
         "route": payload.get("route"),
@@ -89,7 +110,7 @@ def matte_image_direct_worker(
         "execution_profile": payload.get("execution_profile"),
     }
     debug = {
-        "backend": "direct-worker",
+        "backend": requested_backend,
         "direct_worker": payload,
         "auto_route": auto_route,
         "timings": payload.get("timings", {}),

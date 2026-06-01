@@ -442,10 +442,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         start = time.perf_counter()
         result: Any | None = None
         try:
-            if args.backend == "direct-worker":
+            if args.backend in {"direct-worker", "auto"}:
                 result = matte_image_direct_worker(
                     input_path,
                     direct_worker_url=args.direct_worker_url,
+                    execution_backend="auto" if args.backend == "auto" else "direct-worker",
                     shadow_mode="on",
                     corridorkey_preset=args.corridorkey_preset,
                     corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
@@ -466,7 +467,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             elapsed = time.perf_counter() - start
             effective_backend = _effective_backend(args.backend, result)
             stem = input_path.stem
-            if args.backend != "direct-worker":
+            if args.backend not in {"direct-worker", "auto"}:
                 _copy_backend_outputs(case_dir, stem)
             _write_contact_sheet(case_dir)
             background = _case_background(manifest, case, screen)

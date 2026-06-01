@@ -110,6 +110,7 @@ def test_index_serves_upload_ui():
     assert 'data-bg="black"' in response.text
     assert '<option value="auto" selected>Auto Direct Worker</option>' in response.text
     assert '<option value="direct-worker">direct-worker</option>' in response.text
+    assert '<option value="direct-corridorkey">Direct Worker CorridorKey</option>' in response.text
     assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
@@ -131,7 +132,7 @@ def test_index_serves_upload_ui():
     assert 'shadowEnabled.disabled = isBusy' in response.text
     assert 'formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false")' in response.text
     assert "pymattingSettingControls" in response.text
-    assert 'corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey")' in response.text
+    assert 'corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey" || backend.value === "direct-corridorkey")' in response.text
     assert 'pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b")' in response.text
     assert 'pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); })' in response.text
     assert "<summary>[设置]</summary>" in response.text
@@ -1206,6 +1207,83 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     assert payload["debug"]["direct_worker"]["server_elapsed_sec"] == 1.25
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "Direct Worker", True)
+    ]
+
+
+def test_matte_candidates_endpoint_accepts_direct_corridorkey_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_corridorkey",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-corridorkey",
+                "direct_worker": {"server_elapsed_sec": 1.25, "execution_backend": "direct-corridorkey"},
+                "auto_route": {
+                    "requested_backend": "direct-corridorkey",
+                    "selected_backend": "comfy-corridorkey",
+                    "execution_backend": "direct-corridorkey",
+                    "route": "corridorkey",
+                    "asset_kind": "icon",
+                    "parameter_profile": "effect_icon",
+                    "execution_profile": "corridorkey-effect-icon",
+                },
+            },
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "direct-corridorkey",
+            "corridorkey_gamma_space": "Linear",
+            "corridorkey_despill_strength": "0.25",
+            "corridorkey_refiner_strength": "1.5",
+            "corridorkey_auto_despeckle": "Off",
+            "corridorkey_despeckle_size": "64",
+            "corridorkey_auto_mask": "true",
+            "corridorkey_color_protection": "false",
+            "corridorkey_protection_bg_max": "6",
+            "corridorkey_protection_fg_min": "14",
+            "corridorkey_preset": "detail_safe",
+            "corridorkey_hard_ui_hint_mode": "translucent_button",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-corridorkey"
+    assert captured["corridorkey_gamma_space"] == "Linear"
+    assert captured["corridorkey_despill_strength"] == 0.25
+    assert captured["corridorkey_refiner_strength"] == 1.5
+    assert captured["corridorkey_auto_despeckle"] == "Off"
+    assert captured["corridorkey_despeckle_size"] == 64
+    assert captured["corridorkey_auto_mask"] is True
+    assert captured["corridorkey_color_protection"] is False
+    assert captured["corridorkey_protection_bg_max"] == 6.0
+    assert captured["corridorkey_protection_fg_min"] == 14.0
+    assert captured["corridorkey_preset"] == "detail_safe"
+    assert captured["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    payload = response.json()
+    assert payload["backend"] == "direct-corridorkey"
+    assert payload["requested_backend"] == "direct-corridorkey"
+    assert payload["route"] == "corridorkey"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "Direct Worker CorridorKey", True)
     ]
 
 

@@ -440,6 +440,10 @@ def direct_matte_from_decision(
         "parameter_profile": auto_route.get("parameter_profile"),
         "execution_profile": auto_route.get("execution_profile"),
     }
+    if execution_backend == "direct-corridorkey":
+        hard_ui_hint = response.debug.get("hard_ui_hint") if isinstance(response.debug, dict) else None
+        if isinstance(hard_ui_hint, dict) and isinstance(hard_ui_hint.get("execution_profile"), str):
+            metadata["execution_profile"] = hard_ui_hint["execution_profile"]
     return DirectWorkerResult(response=response, timings=timings, metadata=metadata)
 
 

@@ -777,6 +777,22 @@ def _matte_image_pymatting_known_b(
         C_lin[solve] - (1.0 - alpha[solve, None]) * B_lin.reshape(1, 3)
     ) / np.maximum(alpha[solve, None], 1e-3)
     foreground_linear[~solve] = 0.0
+    # Physical-consistency repair before clip. A single-known-background unmix is
+    # underdetermined (3 observations, 4 unknowns), so PyMatting's alpha occasionally
+    # admits an F outside [0,1] -- e.g. an opaque dark-brown outline solved as
+    # alpha~0.78 forces F_g negative, which clip later turns into magenta fringe.
+    # The dirty pixels are flagged by physics, not classification: any F channel
+    # outside [0,1] means the (F, a) pair cannot recomposite onto any background
+    # consistently. We resolve them by borrowing the nearest healthy neighbor's F
+    # and re-projecting C onto the (F_neighbor, B) line to recover a self-consistent
+    # alpha; healthy pixels are not touched.
+    alpha, foreground_linear, consistency_repair = _repair_known_b_unmix_consistency(
+        alpha,
+        foreground_linear,
+        C_lin=C_lin,
+        B_lin=B_lin,
+        solve=solve,
+    )
     foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
     foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
     subject_alpha = alpha
@@ -812,6 +828,7 @@ def _matte_image_pymatting_known_b(
                 "pymatting": pm.debug,
                 "trimap": trimap_info,
                 "alpha_pinhole_repair": alpha_pinhole_repair,
+                "unmix_consistency_repair": consistency_repair,
                 "parameters": {
                     "method": method,
                     "image_space": image_space,
@@ -1235,6 +1252,95 @@ def _matte_image_comfy_rmbg(
         output_dir=out_dir,
         debug=debug,
     )
+
+
+def _repair_known_b_unmix_consistency(
+    alpha: np.ndarray,
+    foreground_linear: np.ndarray,
+    *,
+    C_lin: np.ndarray,
+    B_lin: np.ndarray,
+    solve: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Repair edge pixels whose unmix produced an out-of-gamut foreground.
+
+    Single known-B unmix (3 observations, 4 unknowns) is underdetermined; the
+    matting solver's alpha occasionally yields F outside [0,1]. The dirty set is
+    flagged by physics: if any F channel is < 0 or > 1, the (F, a) pair cannot
+    recomposite onto an arbitrary background consistently, which is exactly the
+    invariant that a transparent matte must hold. Healthy pixels satisfy the
+    invariant by construction and are not modified.
+
+    For each dirty pixel we borrow the nearest healthy neighbor's F and project
+    the source color onto the line through (B, F_neighbor) in linear RGB. The
+    projection coefficient is the alpha that makes the borrowed F consistent
+    with C; F is then re-derived from that alpha so the recovered (F, a) lies
+    inside the gamut. Pixels with no usable healthy neighbor (F too close to B,
+    or no healthy pixel exists) keep their clipped values, which is at least no
+    worse than the current behavior.
+    """
+    a = alpha.astype(np.float32)
+    F = foreground_linear.astype(np.float32)
+    h, w = a.shape
+    tol = 1.0e-3
+    out_low = (F < -tol).any(axis=-1)
+    out_high = (F > 1.0 + tol).any(axis=-1)
+    dirty = solve & (out_low | out_high)
+    info: dict[str, Any] = {
+        "subject_pixels": int(solve.sum()),
+        "dirty_pixels": int(dirty.sum()),
+        "negative_pixels": int((solve & out_low).sum()),
+        "overshoot_pixels": int((solve & out_high).sum()),
+        "repaired_pixels": 0,
+        "alpha_lift_mean": 0.0,
+        "alpha_lift_max": 0.0,
+    }
+    if not bool(dirty.any()):
+        return a, F, info
+
+    # Healthy donor: a subject pixel whose unmixed F already lies in gamut.
+    # Use a small inward erosion-friendly margin so donors are unambiguous.
+    healthy_mask = solve & ~dirty & (F >= 0.0).all(axis=-1) & (F <= 1.0).all(axis=-1)
+    if not bool(healthy_mask.any()):
+        return a, F, info
+
+    from scipy import ndimage
+
+    # Nearest healthy donor for each pixel; only used at dirty positions.
+    _, indices = ndimage.distance_transform_edt(~healthy_mask, return_indices=True)
+    F_donor = F[indices[0], indices[1]]
+    direction = F_donor - B_lin.reshape(1, 1, 3)
+    denom = np.sum(direction * direction, axis=-1)
+    # Donor must point away from B in linear RGB; a degenerate (F_donor ~ B) is
+    # not informative -- leave that pixel alone.
+    usable = dirty & (denom > 1.0e-5)
+    if not bool(usable.any()):
+        return a, F, info
+
+    projected = np.sum((C_lin - B_lin.reshape(1, 1, 3)) * direction, axis=-1) / np.maximum(denom, 1.0e-6)
+    repaired_alpha = np.clip(projected, 0.0, 1.0).astype(np.float32)
+    # Only accept repairs that actually raise alpha; lowering alpha here would
+    # eat into known-good subject seed and is not what the dirty signal proves.
+    accept = usable & (repaired_alpha > a + 1.0e-3)
+    if not bool(accept.any()):
+        return a, F, info
+
+    lift = repaired_alpha[accept] - a[accept]
+    a_new = a.copy()
+    a_new[accept] = repaired_alpha[accept]
+    F_new = F.copy()
+    a_safe = np.maximum(a_new[accept, None], 1.0e-3)
+    F_new[accept] = (C_lin[accept] - (1.0 - a_new[accept, None]) * B_lin.reshape(1, 3)) / a_safe
+
+    info.update(
+        {
+            "repaired_pixels": int(accept.sum()),
+            "alpha_lift_mean": float(lift.mean()),
+            "alpha_lift_max": float(lift.max()),
+        }
+    )
+    return a_new, F_new, info
+
 
 
 def _repair_known_b_alpha_pinholes(

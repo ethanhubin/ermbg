@@ -30,6 +30,9 @@
 - 局部饱和度和色度偏移;
 - 标量变暗拟合,`C_linear ~= scale * B_linear`;
 - 拓扑: 主体支持、边界接触、外部占比;
+- unmix 物理一致性: clip 前的 `F_raw` 是否落在 `[0,1]` 内(越界即该
+  `(F, a)` 对无法一致地重合成到任意背景,详见
+  `docs/ermbg-route-strategy.md` 的 “Unmix 物理一致性修复”);
 - 已有的 risk/debug 区域证据。
 
 规则必须保持基于特征。不要把样本 ID、文件名或一次性坐标写进去。
@@ -49,6 +52,8 @@
 
 - `ermbg/ownership.py`: 信号测量、角色排序、执行掩码仲裁。
 - `ermbg/matting.py`: `subject_material_mask` 执行约束。
+- `ermbg/api.py`: `_repair_known_b_unmix_consistency` 在 unmix clip 之前做
+  物理一致性修复。
 - `ermbg/web.py`: 浏览本地归属和 Game Eval batch。
 
 ## 测试

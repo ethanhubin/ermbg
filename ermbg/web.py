@@ -68,6 +68,7 @@ ALLOWED_BACKENDS = {
     "pymatting-known-b",
     "comfy-pymatting-known-b",
     "direct-worker",
+    "direct-corridorkey",
 }
 REMOTE_DIRECT_BACKENDS = {
     "passthrough",
@@ -76,6 +77,7 @@ REMOTE_DIRECT_BACKENDS = {
     "pymatting-known-b",
     "comfy-pymatting-known-b",
     "direct-worker",
+    "direct-corridorkey",
 }
 WEB_SHADOW_MODE = "on"
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
@@ -514,7 +516,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto Direct Worker</option><option value="direct-worker">direct-worker</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto Direct Worker</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -682,7 +684,7 @@ def _matte_page_html() -> str:
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
     function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
-    function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
+    function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey" || backend.value === "direct-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
     function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
@@ -1221,6 +1223,7 @@ def _matte_page_html() -> str:
         <select id="backend" name="backend">
           <option value="auto" selected>Auto Direct Worker</option>
           <option value="direct-worker">direct-worker</option>
+          <option value="direct-corridorkey">Direct Worker CorridorKey</option>
           <option value="pymatting-known-b">pymatting-known-b</option>
         </select>
       </label>
@@ -2243,15 +2246,15 @@ def sam_mask_endpoint(
 
 
 def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
-    if isinstance(result.debug, dict) and result.debug.get("backend") == "direct-worker":
-        return "direct-worker"
+    if isinstance(result.debug, dict) and result.debug.get("backend") in {"direct-worker", "direct-corridorkey"}:
+        return str(result.debug.get("backend"))
     if requested_backend == "auto" and isinstance(result.debug, dict):
         fallback = result.debug.get("web_auto_fallback_backend")
         if isinstance(fallback, str) and fallback:
             return fallback
     auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
-    if isinstance(auto_route, dict) and auto_route.get("requested_backend") == "direct-worker":
-        return "direct-worker"
+    if isinstance(auto_route, dict) and auto_route.get("requested_backend") in {"direct-worker", "direct-corridorkey"}:
+        return str(auto_route.get("requested_backend"))
     if requested_backend == "auto" and isinstance(auto_route, dict):
         selected = auto_route.get("selected_backend")
         if isinstance(selected, str) and selected:
@@ -2369,12 +2372,22 @@ def _run_web_backend(
             raise ValueError(
                 "ERMBG_WEB_AUTO_BACKEND must be direct-worker, auto-local, or comfy-route-matte"
             )
-    if execution_backend == "direct-worker":
+    if execution_backend in {"direct-worker", "direct-corridorkey"}:
         try:
             return matte_image_direct_worker(
                 image,
                 direct_worker_url=WEB_DIRECT_WORKER_URL,
+                execution_backend="direct-corridorkey" if execution_backend == "direct-corridorkey" else "auto",
                 shadow_mode=shadow_mode,
+                corridorkey_gamma_space=str(kwargs.get("corridorkey_gamma_space", "sRGB")),
+                corridorkey_despill_strength=float(kwargs.get("corridorkey_despill_strength", 1.0)),
+                corridorkey_refiner_strength=float(kwargs.get("corridorkey_refiner_strength", 1.0)),
+                corridorkey_auto_despeckle=str(kwargs.get("corridorkey_auto_despeckle", "On")),
+                corridorkey_despeckle_size=int(kwargs.get("corridorkey_despeckle_size", 400)),
+                corridorkey_auto_mask=bool(kwargs.get("corridorkey_auto_mask", False)),
+                corridorkey_color_protection=bool(kwargs.get("corridorkey_color_protection", True)),
+                corridorkey_protection_bg_max=float(kwargs.get("corridorkey_protection_bg_max", 12.0)),
+                corridorkey_protection_fg_min=float(kwargs.get("corridorkey_protection_fg_min", 28.0)),
                 corridorkey_screen_mode=corridorkey_screen_mode,
                 corridorkey_preset=corridorkey_preset,
                 corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
@@ -2383,7 +2396,7 @@ def _run_web_backend(
             fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
             if not requested_auto or fallback in {"", "none", "off", "disabled"}:
                 raise
-            if fallback not in ALLOWED_BACKENDS or fallback == "direct-worker":
+            if fallback not in ALLOWED_BACKENDS or fallback in {"direct-worker", "direct-corridorkey"}:
                 raise ValueError(
                     "ERMBG_WEB_AUTO_FALLBACK_BACKEND must be a non-direct backend or disabled"
                 ) from exc
@@ -2663,6 +2676,8 @@ def matte_candidates_endpoint(
             direct_label = "远端 RMBG"
         elif effective_backend == "direct-worker":
             direct_label = "Direct Worker"
+        elif effective_backend == "direct-corridorkey":
+            direct_label = "Direct Worker CorridorKey"
         elif effective_backend == "passthrough":
             direct_label = "远端 Passthrough"
         else:
@@ -3120,7 +3135,7 @@ def _remote_backend_summary_path(root: Path) -> Path | None:
     runs = payload.get("runs")
     if not isinstance(runs, list):
         return None
-    remote_summary_backends = {"direct-worker"}
+    remote_summary_backends = {"direct-worker", "direct-corridorkey", "auto"}
     for item in runs:
         backend = str(item.get("backend", "")) if isinstance(item, dict) else ""
         if backend.startswith("comfy-") or backend in remote_summary_backends:
@@ -4988,6 +5003,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       cursor: pointer;
     }}
     .eval-tools .selection-count {{ margin-left: auto; color: #53615a; font-size: 12px; font-weight: 800; }}
+    .eval-tools .category-buttons {{ display: inline-flex; gap: 6px; flex-wrap: wrap; }}
     .path-tools, .screen-tools {{
       display: flex;
       align-items: center;
@@ -5184,6 +5200,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <div class="eval-tools">
         <button type="button" id="select-all-samples">全选</button>
         <button type="button" id="clear-all-samples">取消全选</button>
+        <span class="category-buttons" id="category-buttons"></span>
         <span class="selection-count" id="selection-count"></span>
       </div>
       <div class="path-tools" aria-label="选择测试路径">
@@ -5289,6 +5306,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const cancelEvalPanelButton = document.getElementById("cancel-eval-panel");
     const confirmStartEvalButton = document.getElementById("confirm-start-eval");
     const selectionCountEl = document.getElementById("selection-count");
+    const categoryButtonsEl = document.getElementById("category-buttons");
     const modal = document.getElementById("modal");
     const modalStage = document.getElementById("modal-stage");
     const modalImg = document.getElementById("modal-img");
@@ -5672,6 +5690,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
     function openEvalPanel() {{
       renderSampleList();
+      renderCategoryButtons();
       evalPanel.classList.add("is-open");
       evalPanel.setAttribute("aria-hidden", "false");
     }}
@@ -5686,6 +5705,40 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         input.checked = checked;
       }});
       updateSelectionCount();
+    }}
+
+    function setCategorySamples(category) {{
+      const samples = Array.isArray(data.samples) ? data.samples : [];
+      const targetIds = new Set(
+        samples
+          .filter((sample) => (sample.category || "other") === category)
+          .map((sample) => sample.sampleId)
+      );
+      sampleCheckboxes().forEach((input) => {{
+        input.checked = targetIds.has(input.value);
+      }});
+      updateSelectionCount();
+    }}
+
+    function renderCategoryButtons() {{
+      if (!categoryButtonsEl) return;
+      categoryButtonsEl.innerHTML = "";
+      const samples = Array.isArray(data.samples) ? data.samples : [];
+      const labels = {{ button: "Button", icon: "Icon / Effect", character: "Character" }};
+      const counts = new Map();
+      samples.forEach((sample) => {{
+        const key = sample.category || "other";
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }});
+      counts.forEach((count, category) => {{
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.category = category;
+        button.textContent = `${{labels[category] || category}} (${{count}})`;
+        button.title = `仅选中 ${{labels[category] || category}}`;
+        button.addEventListener("click", () => setCategorySamples(category));
+        categoryButtonsEl.appendChild(button);
+      }});
     }}
 
     async function startSelectedEval() {{
