@@ -3,7 +3,8 @@
 ERMBG Web/API 默认使用 Direct Worker。本文档介绍如何把可选的 ERMBG 节点
 安装到 ComfyUI 环境中。
 
-服务端点在 `ermbg.config.json` 中配置:
+共享服务端点在 `ermbg.config.json` 中配置; 每台机器自己的覆盖写在
+gitignored `ermbg.local.json`:
 
 ```json
 {
@@ -13,7 +14,10 @@ ERMBG Web/API 默认使用 Direct Worker。本文档介绍如何把可选的 ERM
 }
 ```
 
-环境变量 `COMFY_URL` 可在单个 shell 会话内覆盖 `services.comfy_url`。
+环境变量 `COMFY_URL` 可在单个 shell 会话内覆盖 `services.comfy_url`。优先级为
+环境变量 / `.env` > `ermbg.local.json` > `ermbg.config.json` > 代码默认值。
+ComfyUI 不是默认运行路径,因此 `services.comfy_url` 没有代码级 fallback; 使用
+Comfy 节点或 Comfy 后端前必须显式配置地址。
 
 ## 节点
 

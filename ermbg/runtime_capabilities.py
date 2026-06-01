@@ -63,6 +63,21 @@ def inspect_comfy_runtime(
     capability checks and not in latency-sensitive image processing paths.
     """
     base_url = comfy_url.rstrip("/")
+    if not base_url:
+        return {
+            "status": "error",
+            "url": "",
+            "error": "ComfyUI URL is not configured",
+            "error_type": "MissingComfyUrl",
+            "capabilities": {
+                "system_stats": False,
+                "object_info": False,
+                "ermbg_route_matte": False,
+                "ermbg_route_strategy": False,
+                "ermbg_pymatting_known_b": False,
+            },
+            "nodes": {},
+        }
     payload: dict[str, Any] = {
         "status": "unknown",
         "url": base_url,

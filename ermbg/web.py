@@ -106,7 +106,7 @@ FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
 DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
     "auto": {
-        "label": "Auto Direct Worker",
+        "label": "Auto",
         "backend": "auto",
         "prefix": AUTO_EVAL_PREFIX,
     },
@@ -516,7 +516,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto Direct Worker</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -1221,7 +1221,7 @@ def _matte_page_html() -> str:
       <label>
         后端
         <select id="backend" name="backend">
-          <option value="auto" selected>Auto Direct Worker</option>
+          <option value="auto" selected>Auto</option>
           <option value="direct-worker">direct-worker</option>
           <option value="direct-corridorkey">Direct Worker CorridorKey</option>
           <option value="pymatting-known-b">pymatting-known-b</option>
@@ -2373,24 +2373,32 @@ def _run_web_backend(
                 "ERMBG_WEB_AUTO_BACKEND must be direct-worker, auto-local, or comfy-route-matte"
             )
     if execution_backend in {"direct-worker", "direct-corridorkey"}:
+        corridorkey_overrides: dict[str, Any] = {
+            "corridorkey_screen_mode": corridorkey_screen_mode,
+            "corridorkey_preset": corridorkey_preset,
+            "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
+        }
+        if execution_backend == "direct-corridorkey":
+            corridorkey_overrides.update(
+                {
+                    "corridorkey_gamma_space": str(kwargs.get("corridorkey_gamma_space", "sRGB")),
+                    "corridorkey_despill_strength": float(kwargs.get("corridorkey_despill_strength", 1.0)),
+                    "corridorkey_refiner_strength": float(kwargs.get("corridorkey_refiner_strength", 1.0)),
+                    "corridorkey_auto_despeckle": str(kwargs.get("corridorkey_auto_despeckle", "On")),
+                    "corridorkey_despeckle_size": int(kwargs.get("corridorkey_despeckle_size", 400)),
+                    "corridorkey_auto_mask": bool(kwargs.get("corridorkey_auto_mask", False)),
+                    "corridorkey_color_protection": bool(kwargs.get("corridorkey_color_protection", True)),
+                    "corridorkey_protection_bg_max": float(kwargs.get("corridorkey_protection_bg_max", 12.0)),
+                    "corridorkey_protection_fg_min": float(kwargs.get("corridorkey_protection_fg_min", 28.0)),
+                }
+            )
         try:
             return matte_image_direct_worker(
                 image,
                 direct_worker_url=WEB_DIRECT_WORKER_URL,
                 execution_backend="direct-corridorkey" if execution_backend == "direct-corridorkey" else "auto",
                 shadow_mode=shadow_mode,
-                corridorkey_gamma_space=str(kwargs.get("corridorkey_gamma_space", "sRGB")),
-                corridorkey_despill_strength=float(kwargs.get("corridorkey_despill_strength", 1.0)),
-                corridorkey_refiner_strength=float(kwargs.get("corridorkey_refiner_strength", 1.0)),
-                corridorkey_auto_despeckle=str(kwargs.get("corridorkey_auto_despeckle", "On")),
-                corridorkey_despeckle_size=int(kwargs.get("corridorkey_despeckle_size", 400)),
-                corridorkey_auto_mask=bool(kwargs.get("corridorkey_auto_mask", False)),
-                corridorkey_color_protection=bool(kwargs.get("corridorkey_color_protection", True)),
-                corridorkey_protection_bg_max=float(kwargs.get("corridorkey_protection_bg_max", 12.0)),
-                corridorkey_protection_fg_min=float(kwargs.get("corridorkey_protection_fg_min", 28.0)),
-                corridorkey_screen_mode=corridorkey_screen_mode,
-                corridorkey_preset=corridorkey_preset,
-                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                **corridorkey_overrides,
             )
         except Exception as exc:
             fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
@@ -5206,7 +5214,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <div class="path-tools" aria-label="选择测试路径">
         <label for="eval-test-path">测试路径
           <select id="eval-test-path" name="eval-test-path">
-            <option value="auto" selected>Auto Direct Worker</option>
+            <option value="auto" selected>Auto</option>
             <option value="direct-worker">Direct Worker</option>
           </select>
         </label>

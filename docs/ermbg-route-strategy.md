@@ -104,8 +104,8 @@ Direct Worker 和可选 Comfy 节点都调用同一个 runner,以保持 hint 转
 ## Direct Worker 后端
 
 `backend="direct-worker"` 是 Web/API 和 Game Eval 的服务后端。服务 URL 来自
-`ermbg.config.json` 的 `services.direct_worker_url`,并可用 `ERMBG_DIRECT_URL`
-作为环境覆盖。
+配置中的 `services.direct_worker_url`: 共享默认值在 `ermbg.config.json`,本机
+覆盖在 gitignored `ermbg.local.json`,并可用 `ERMBG_DIRECT_URL` 作为环境覆盖。
 
 Direct Worker 报告两层后端元数据:
 
@@ -121,7 +121,8 @@ rounding 级别。
 
 ComfyUI 支持位于 `comfy_nodes/`,用于自定义 Comfy 图。它使用同一套
 route/profile 契约,并通过 `services.comfy_url` 或 `COMFY_URL` 配置。Web 默认
-配置使用 Direct Worker。
+配置使用 Direct Worker。Comfy 不是默认运行路径,没有代码级 URL fallback; 使用
+Comfy 后端前必须在本机配置或环境变量中显式设置地址。
 
 节点细节和安装步骤见 `comfy_nodes/README.md` 和 `DEPLOY.md`。
 
@@ -147,7 +148,7 @@ route/profile 契约,并通过 `services.comfy_url` 或 `COMFY_URL` 配置。Web
 在 Web 侧 route 改动之后:
 
 1. 重启本地 Web 服务。
-2. 验证首页包含 `Auto Direct Worker` 和 `direct-worker`。
+2. 验证首页包含 `Auto` 和 `direct-worker`。
 3. 用 `backend=auto` 向 `/api/matte-candidates` 提交真实样本。
 4. 确认 `requested_backend`、`backend`、`debug.auto_route.selected_backend`、
    `debug.auto_route.route`、`execution_profile` 和 `server_elapsed_sec`。

@@ -10,6 +10,7 @@ dist/
 venv/
 .env
 .envrc
+ermbg.local.json
 
 # IDE
 .vscode/

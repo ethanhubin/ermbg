@@ -74,6 +74,15 @@ def test_inspect_comfy_runtime_can_skip_object_info(monkeypatch: pytest.MonkeyPa
     assert calls == ["http://comfy.test/system_stats"]
 
 
+def test_inspect_comfy_runtime_reports_missing_url() -> None:
+    payload = caps.inspect_comfy_runtime(comfy_url="")
+
+    assert payload["status"] == "error"
+    assert payload["url"] == ""
+    assert payload["error_type"] == "MissingComfyUrl"
+    assert payload["capabilities"]["system_stats"] is False
+
+
 def test_inspect_direct_worker_runtime_passes_health_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get(url: str, *, timeout: float) -> _FakeResponse:
         assert url == "http://worker.test/health"

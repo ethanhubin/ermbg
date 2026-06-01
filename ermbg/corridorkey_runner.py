@@ -214,7 +214,6 @@ class LocalCorridorKeyClient:
         protect_hint_supported_material: bool = False,
         execution_profile: str = "auto",
     ) -> Any:
-        del protect_hint_supported_material
         if hint_alpha is None:
             from .probe.comfyui_corridorkey import build_corridorkey_hint
 
@@ -301,7 +300,7 @@ class LocalCorridorKeyClient:
                     bg_max=float(color_protection_bg_max),
                     fg_min=float(color_protection_fg_min),
                 ),
-                trusted_material_alpha=None,
+                trusted_material_alpha=hint if protect_hint_supported_material else None,
             )
             timings["color_protection_sec"] = time.perf_counter() - step_start
             protection_debug = {"enabled": True, **protection_stats}
@@ -329,6 +328,7 @@ class LocalCorridorKeyClient:
                     "auto_despeckle": auto_despeckle,
                     "despeckle_size": int(despeckle_size),
                     "apply_color_protection": bool(apply_color_protection),
+                    "protect_hint_supported_material": bool(protect_hint_supported_material),
                     "execution_profile": execution_profile,
                     "runner": runner,
                     "runner_module": runner_module,

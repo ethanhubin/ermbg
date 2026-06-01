@@ -165,6 +165,52 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
     assert payload["route"] == "corridorkey"
 
 
+def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="corridorkey",
+            asset_kind="icon",
+            backend="comfy-corridorkey",
+            params={
+                "execution_profile": "corridorkey-shaped-icon",
+                "corridorkey_auto_mask": True,
+                "corridorkey_protection_bg_max": 4.0,
+                "corridorkey_protection_fg_min": 10.0,
+            },
+            confidence=1.0,
+            reasons=["test"],
+            analysis={"corridorkey_analysis": {"parameter_profile": "key_color_material"}},
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured["params"] = prepared.decision.params
+        result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
+        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["execution_backend"] = "direct-corridorkey"
+        result.metadata["route"] = prepared.decision.route
+        return result
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={"include_image": "false"},
+    )
+
+    assert response.status_code == 200
+    assert captured["params"]["corridorkey_auto_mask"] is True
+    assert captured["params"]["corridorkey_protection_bg_max"] == 4.0
+    assert captured["params"]["corridorkey_protection_fg_min"] == 10.0
+
+
 def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     decisions = [

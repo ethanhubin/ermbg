@@ -9,16 +9,36 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "ermbg.config.json"
+LOCAL_CONFIG_PATH = PROJECT_ROOT / "ermbg.local.json"
+DEFAULT_DIRECT_WORKER_URL = "http://192.168.0.8:7871"
+DEFAULT_COMFY_URL = ""
 
 
-def _load_config() -> dict[str, Any]:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_json_config(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     if not isinstance(raw, dict):
         return {}
     return raw
+
+
+def _load_config() -> dict[str, Any]:
+    # Machine-specific service endpoints and Web backend selection live in the
+    # ignored local config so switching between Mac/remote/Windows environments
+    # does not dirty the tracked default config.
+    return _deep_merge(_load_json_config(CONFIG_PATH), _load_json_config(LOCAL_CONFIG_PATH))
 
 
 def _dotenv_paths() -> tuple[Path, ...]:
@@ -70,15 +90,18 @@ def get_bool_setting(path: str, *, env: str | None = None, default: bool = False
 
 
 def get_direct_worker_url() -> str:
-    return get_setting("services.direct_worker_url", env="ERMBG_DIRECT_URL").rstrip("/")
+    return get_setting("services.direct_worker_url", env="ERMBG_DIRECT_URL", default=DEFAULT_DIRECT_WORKER_URL).rstrip("/")
 
 
 def get_comfy_url() -> str:
-    return get_setting("services.comfy_url", env="COMFY_URL").rstrip("/")
+    return get_setting("services.comfy_url", env="COMFY_URL", default=DEFAULT_COMFY_URL).rstrip("/")
 
 
 __all__ = [
     "CONFIG_PATH",
+    "DEFAULT_COMFY_URL",
+    "DEFAULT_DIRECT_WORKER_URL",
+    "LOCAL_CONFIG_PATH",
     "PROJECT_ROOT",
     "get_bool_setting",
     "get_comfy_url",

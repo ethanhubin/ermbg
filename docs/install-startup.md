@@ -28,7 +28,8 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 
 ## 配置
 
-服务端点位于 `ermbg.config.json`:
+共享默认配置位于 `ermbg.config.json`。机器相关覆盖写入 gitignored
+`ermbg.local.json`; 两者结构相同,本机文件只需要写要覆盖的字段:
 
 ```json
 {
@@ -47,6 +48,11 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 环境变量 `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
 `ERMBG_WEB_AUTO_FALLBACK_BACKEND` 和 `ERMBG_ENABLE_COMFY` 可在单个 shell
 会话内覆盖配置。
+
+配置优先级: 环境变量 / `.env` > `ermbg.local.json` > `ermbg.config.json` >
+代码默认值。切换机器或工作环境时优先改 `ermbg.local.json`,不要改共享默认配置。
+ComfyUI 不是默认运行路径; `services.comfy_url` 没有代码级 fallback。需要 Comfy
+路径的机器必须在 `ermbg.local.json`、`.env` 或环境变量里显式配置 `COMFY_URL`。
 
 ## 用本地 Direct Worker 启动 Web
 

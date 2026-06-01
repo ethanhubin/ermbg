@@ -108,7 +108,7 @@ def test_index_serves_upload_ui():
     assert 'sourceFrame.appendChild(img); img.src = pending.rgb;' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>Auto Direct Worker</option>' in response.text
+    assert '<option value="auto" selected>Auto</option>' in response.text
     assert '<option value="direct-worker">direct-worker</option>' in response.text
     assert '<option value="direct-corridorkey">Direct Worker CorridorKey</option>' in response.text
     assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
@@ -212,8 +212,8 @@ def test_runtime_capabilities_endpoint(monkeypatch):
     assert captured == {
         "timeout": 1.25,
         "include_object_info": False,
-        "include_comfy": False,
-        "direct_worker_url": "http://127.0.0.1:7871",
+        "include_comfy": web.WEB_ENABLE_COMFY,
+        "direct_worker_url": web.WEB_DIRECT_WORKER_URL,
     }
 
 
@@ -308,7 +308,7 @@ def test_game_eval_page_serves_result_table():
     assert "选择测试样本" in response.text
     assert "选择测试路径" in response.text
     assert 'id="eval-test-path"' in response.text
-    assert '<option value="auto" selected>Auto Direct Worker</option>' in response.text
+    assert '<option value="auto" selected>Auto</option>' in response.text
     assert '<option value="direct-worker">Direct Worker</option>' in response.text
     assert '<option value="corridorkey">CorridorKey</option>' not in response.text
     assert '<option value="rmbg">RMBG</option>' not in response.text

@@ -174,33 +174,44 @@ def _with_corridorkey_params(decision: RouteDecision, params: dict[str, Any]) ->
 
 def _corridorkey_form_params(
     *,
-    corridorkey_gamma_space: str,
-    corridorkey_despill_strength: float,
-    corridorkey_refiner_strength: float,
-    corridorkey_auto_despeckle: str,
-    corridorkey_despeckle_size: int,
-    corridorkey_auto_mask: bool,
-    corridorkey_color_protection: bool,
-    corridorkey_protection_bg_max: float,
-    corridorkey_protection_fg_min: float,
+    corridorkey_gamma_space: str | None,
+    corridorkey_despill_strength: float | None,
+    corridorkey_refiner_strength: float | None,
+    corridorkey_auto_despeckle: str | None,
+    corridorkey_despeckle_size: int | None,
+    corridorkey_auto_mask: bool | None,
+    corridorkey_color_protection: bool | None,
+    corridorkey_protection_bg_max: float | None,
+    corridorkey_protection_fg_min: float | None,
     corridorkey_screen_mode: str,
     corridorkey_preset: str,
     corridorkey_hard_ui_hint_mode: str,
 ) -> dict[str, Any]:
-    return {
+    params = {
         "corridorkey_gamma_space": corridorkey_gamma_space,
-        "corridorkey_despill_strength": float(corridorkey_despill_strength),
-        "corridorkey_refiner_strength": float(corridorkey_refiner_strength),
+        "corridorkey_despill_strength": None
+        if corridorkey_despill_strength is None
+        else float(corridorkey_despill_strength),
+        "corridorkey_refiner_strength": None
+        if corridorkey_refiner_strength is None
+        else float(corridorkey_refiner_strength),
         "corridorkey_auto_despeckle": corridorkey_auto_despeckle,
-        "corridorkey_despeckle_size": int(corridorkey_despeckle_size),
-        "corridorkey_auto_mask": bool(corridorkey_auto_mask),
-        "corridorkey_color_protection": bool(corridorkey_color_protection),
-        "corridorkey_protection_bg_max": float(corridorkey_protection_bg_max),
-        "corridorkey_protection_fg_min": float(corridorkey_protection_fg_min),
+        "corridorkey_despeckle_size": None if corridorkey_despeckle_size is None else int(corridorkey_despeckle_size),
+        "corridorkey_auto_mask": None if corridorkey_auto_mask is None else bool(corridorkey_auto_mask),
+        "corridorkey_color_protection": None
+        if corridorkey_color_protection is None
+        else bool(corridorkey_color_protection),
+        "corridorkey_protection_bg_max": None
+        if corridorkey_protection_bg_max is None
+        else float(corridorkey_protection_bg_max),
+        "corridorkey_protection_fg_min": None
+        if corridorkey_protection_fg_min is None
+        else float(corridorkey_protection_fg_min),
         "corridorkey_screen_mode": corridorkey_screen_mode,
         "corridorkey_preset": corridorkey_preset,
         "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
     }
+    return {key: value for key, value in params.items() if value is not None}
 
 
 def _is_cpu_parallel_route(decision: RouteDecision) -> bool:
@@ -309,15 +320,15 @@ async def matte_endpoint(
     image: UploadFile = File(...),
     execution_backend: str = Form("auto"),
     shadow_mode: str = Form("on"),
-    corridorkey_gamma_space: str = Form("sRGB"),
-    corridorkey_despill_strength: float = Form(1.0),
-    corridorkey_refiner_strength: float = Form(1.0),
-    corridorkey_auto_despeckle: str = Form("On"),
-    corridorkey_despeckle_size: int = Form(400),
-    corridorkey_auto_mask: bool = Form(False),
-    corridorkey_color_protection: bool = Form(True),
-    corridorkey_protection_bg_max: float = Form(12.0),
-    corridorkey_protection_fg_min: float = Form(28.0),
+    corridorkey_gamma_space: str | None = Form(None),
+    corridorkey_despill_strength: float | None = Form(None),
+    corridorkey_refiner_strength: float | None = Form(None),
+    corridorkey_auto_despeckle: str | None = Form(None),
+    corridorkey_despeckle_size: int | None = Form(None),
+    corridorkey_auto_mask: bool | None = Form(None),
+    corridorkey_color_protection: bool | None = Form(None),
+    corridorkey_protection_bg_max: float | None = Form(None),
+    corridorkey_protection_fg_min: float | None = Form(None),
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
@@ -377,15 +388,15 @@ async def batch_matte_endpoint(
     files: list[UploadFile] = File(...),
     execution_backend: str = Form("auto"),
     shadow_mode: str = Form("on"),
-    corridorkey_gamma_space: str = Form("sRGB"),
-    corridorkey_despill_strength: float = Form(1.0),
-    corridorkey_refiner_strength: float = Form(1.0),
-    corridorkey_auto_despeckle: str = Form("On"),
-    corridorkey_despeckle_size: int = Form(400),
-    corridorkey_auto_mask: bool = Form(False),
-    corridorkey_color_protection: bool = Form(True),
-    corridorkey_protection_bg_max: float = Form(12.0),
-    corridorkey_protection_fg_min: float = Form(28.0),
+    corridorkey_gamma_space: str | None = Form(None),
+    corridorkey_despill_strength: float | None = Form(None),
+    corridorkey_refiner_strength: float | None = Form(None),
+    corridorkey_auto_despeckle: str | None = Form(None),
+    corridorkey_despeckle_size: int | None = Form(None),
+    corridorkey_auto_mask: bool | None = Form(None),
+    corridorkey_color_protection: bool | None = Form(None),
+    corridorkey_protection_bg_max: float | None = Form(None),
+    corridorkey_protection_fg_min: float | None = Form(None),
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),

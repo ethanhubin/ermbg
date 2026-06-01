@@ -230,3 +230,62 @@ def test_local_corridorkey_client_reuses_loaded_comfy_node(monkeypatch):
         f"{FakeImageToMaskNode.__module__}.{FakeImageToMaskNode.__name__}"
     )
     assert float(result.alpha.mean()) == pytest.approx(0.25)
+
+
+def test_local_corridorkey_client_forwards_trusted_material_hint(monkeypatch):
+    import ermbg.probe.comfyui_corridorkey as corridorkey_mod
+
+    captured = {}
+
+    class FakeCorridorKeyNode:
+        def run(
+            self,
+            image,
+            mask,
+            gamma_space,
+            screen_color,
+            despill_strength,
+            refiner_strength,
+            auto_despeckle,
+            despeckle_size,
+            unique_id=None,
+        ):
+            return image, torch.zeros_like(mask), image, image
+
+    def fake_apply_key_color_protection(
+        *,
+        image_srgb,
+        foreground_srgb,
+        alpha,
+        background_color,
+        thresholds,
+        trusted_material_alpha=None,
+    ):
+        captured["trusted_material_alpha"] = trusted_material_alpha
+        floor = (
+            np.clip(trusted_material_alpha.astype(np.float32), 0.0, 1.0)
+            if trusted_material_alpha is not None
+            else np.zeros_like(alpha, dtype=np.float32)
+        )
+        return foreground_srgb, np.maximum(alpha, floor), floor, {"trusted_material_pixels": int((floor > 0).sum())}
+
+    fake_module = types.SimpleNamespace(NODE_CLASS_MAPPINGS={"CorridorKey": FakeCorridorKeyNode})
+    monkeypatch.setitem(sys.modules, "nodes", fake_module)
+    monkeypatch.setattr(_LocalCorridorKeyClient, "_corridorkey_node", None)
+    monkeypatch.setattr(corridorkey_mod, "apply_key_color_protection", fake_apply_key_color_protection)
+
+    image = _green_with_red_subject(16, 16)
+    hint = np.zeros((16, 16), dtype=np.float32)
+    hint[4:12, 5:11] = 0.75
+
+    result = _LocalCorridorKeyClient().matte(
+        image,
+        hint_alpha=hint,
+        apply_color_protection=True,
+        protect_hint_supported_material=True,
+        execution_profile="corridorkey-shaped-icon",
+    )
+
+    assert np.array_equal(captured["trusted_material_alpha"], hint)
+    assert result.debug["settings"]["protect_hint_supported_material"] is True
+    assert float(result.alpha.max()) == pytest.approx(0.75)

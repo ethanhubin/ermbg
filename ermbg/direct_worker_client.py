@@ -44,15 +44,15 @@ def matte_image_direct_worker(
     direct_worker_url: str = DEFAULT_DIRECT_WORKER_URL,
     execution_backend: str = "auto",
     shadow_mode: str = "on",
-    corridorkey_gamma_space: str = "sRGB",
-    corridorkey_despill_strength: float = 1.0,
-    corridorkey_refiner_strength: float = 1.0,
-    corridorkey_auto_despeckle: str = "On",
-    corridorkey_despeckle_size: int = 400,
-    corridorkey_auto_mask: bool = False,
-    corridorkey_color_protection: bool = True,
-    corridorkey_protection_bg_max: float = 12.0,
-    corridorkey_protection_fg_min: float = 28.0,
+    corridorkey_gamma_space: str | None = None,
+    corridorkey_despill_strength: float | None = None,
+    corridorkey_refiner_strength: float | None = None,
+    corridorkey_auto_despeckle: str | None = None,
+    corridorkey_despeckle_size: int | None = None,
+    corridorkey_auto_mask: bool | None = None,
+    corridorkey_color_protection: bool | None = None,
+    corridorkey_protection_bg_max: float | None = None,
+    corridorkey_protection_fg_min: float | None = None,
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
@@ -64,21 +64,30 @@ def matte_image_direct_worker(
     data = {
         "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
-        "corridorkey_gamma_space": corridorkey_gamma_space,
-        "corridorkey_despill_strength": str(float(corridorkey_despill_strength)),
-        "corridorkey_refiner_strength": str(float(corridorkey_refiner_strength)),
-        "corridorkey_auto_despeckle": corridorkey_auto_despeckle,
-        "corridorkey_despeckle_size": str(int(corridorkey_despeckle_size)),
-        "corridorkey_auto_mask": "true" if corridorkey_auto_mask else "false",
-        "corridorkey_color_protection": "true" if corridorkey_color_protection else "false",
-        "corridorkey_protection_bg_max": str(float(corridorkey_protection_bg_max)),
-        "corridorkey_protection_fg_min": str(float(corridorkey_protection_fg_min)),
         "corridorkey_screen_mode": corridorkey_screen_mode,
         "corridorkey_preset": corridorkey_preset,
         "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
         "fallback_bg_color": ",".join(str(int(c)) for c in fallback_bg_color),
         "include_image": "true",
     }
+    if corridorkey_gamma_space is not None:
+        data["corridorkey_gamma_space"] = corridorkey_gamma_space
+    if corridorkey_despill_strength is not None:
+        data["corridorkey_despill_strength"] = str(float(corridorkey_despill_strength))
+    if corridorkey_refiner_strength is not None:
+        data["corridorkey_refiner_strength"] = str(float(corridorkey_refiner_strength))
+    if corridorkey_auto_despeckle is not None:
+        data["corridorkey_auto_despeckle"] = corridorkey_auto_despeckle
+    if corridorkey_despeckle_size is not None:
+        data["corridorkey_despeckle_size"] = str(int(corridorkey_despeckle_size))
+    if corridorkey_auto_mask is not None:
+        data["corridorkey_auto_mask"] = "true" if corridorkey_auto_mask else "false"
+    if corridorkey_color_protection is not None:
+        data["corridorkey_color_protection"] = "true" if corridorkey_color_protection else "false"
+    if corridorkey_protection_bg_max is not None:
+        data["corridorkey_protection_bg_max"] = str(float(corridorkey_protection_bg_max))
+    if corridorkey_protection_fg_min is not None:
+        data["corridorkey_protection_fg_min"] = str(float(corridorkey_protection_fg_min))
     response = requests.post(
         f"{direct_worker_url.rstrip('/')}/matte",
         files=files,

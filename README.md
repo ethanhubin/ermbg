@@ -105,7 +105,7 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 
 ## 部署
 
-ERMBG Web 通过 `ermbg.config.json` 的 `services.direct_worker_url` 连接 Direct Worker。Direct Worker 可以安装在本机,也可以安装在远端服务器。环境变量 `ERMBG_DIRECT_URL` 可用于临时覆盖该配置。
+ERMBG Web 通过配置中的 `services.direct_worker_url` 连接 Direct Worker。共享默认值写在 `ermbg.config.json`; 机器相关覆盖写在 gitignored `ermbg.local.json`。环境变量 `ERMBG_DIRECT_URL` 可用于临时覆盖该配置。
 
 本机单机部署:
 
@@ -131,7 +131,8 @@ $env:ERMBG_WEB_AUTO_BACKEND = "direct-worker"
 .\.venv\Scripts\python.exe -m uvicorn ermbg.web:app --host 127.0.0.1 --port 7860
 ```
 
-默认 Direct Worker 地址写在 `ermbg.config.json` 的 `services.direct_worker_url`。
+默认 Direct Worker 地址写在 `ermbg.config.json` 的 `services.direct_worker_url`。每台机器自己的 Comfy/Direct Worker 地址、`web.auto_backend` 和 `web.enable_comfy` 应写入 `ermbg.local.json`。
+ComfyUI 不是默认运行路径,`COMFY_URL` 没有代码级 fallback; 需要 Comfy 的机器必须显式配置 `services.comfy_url` 或 `COMFY_URL`。
 
 ## 使用
 
@@ -147,7 +148,7 @@ $env:ERMBG_WEB_AUTO_BACKEND = "direct-worker"
 <web-url>
 ```
 
-Web 里默认选择 `Auto Direct Worker`。
+Web 里默认选择 `Auto`; 实际 auto 路径由本机配置的 `web.auto_backend` 决定。
 
 ### CLI 抠图
 

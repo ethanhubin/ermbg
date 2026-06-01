@@ -1,7 +1,7 @@
 {
   "services": {
     "direct_worker_url": "http://127.0.0.1:7871",
-    "comfy_url": "http://127.0.0.1:8000"
+    "comfy_url": ""
   },
   "web": {
     "auto_backend": "direct-worker",
