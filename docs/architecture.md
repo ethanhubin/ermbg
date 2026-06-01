@@ -1,11 +1,10 @@
 # ERMBG Architecture
 
-ERMBG should be treated as a shared matting core with multiple adapters and
-runtime backends. The production default is still local Web/API orchestration
-calling the remote ComfyUI `ErmbgRouteMatte` node, but the system is no longer
-just a Web app plus one Comfy workflow.
+ERMBG is a shared matting core with multiple adapters and runtime backends. The
+production default is local Web/API orchestration calling the ERMBG Direct
+Worker service. ComfyUI provides optional custom nodes for Comfy graphs.
 
-## Current Shape
+## Shape
 
 ```text
 Entry points
@@ -23,15 +22,13 @@ ERMBG core contract
         |
         v
 Runtime backends
-  remote ComfyUI ErmbgRouteMatte
-  remote Direct Worker
+  Direct Worker HTTP service
   local lightweight Python/CV paths
+  optional ComfyUI custom nodes
 ```
 
-The important boundary is that entry points express user intent and pass image
-data. They should not independently decide whether an asset is a character,
-button, icon, transparent material, or fallback case. That decision belongs to
-the shared route/profile contract.
+Entry points express user intent and pass image data. Asset classification
+belongs to the shared route/profile contract.
 
 ## Layers
 
@@ -57,133 +54,88 @@ Adapters translate an external caller into the core contract:
 
 - `ermbg.web`: local FastAPI Web UI, Web API, and Game Eval launcher.
 - CLI/Python API: direct local integration for scripts and tests.
-- `comfy_nodes/ermbg_nodes.py`: ComfyUI custom node wrapper.
+- `comfy_nodes/ermbg_nodes.py`: optional ComfyUI custom node wrapper.
 - `integrations/openclaw`: optional independent OpenClaw `ermbg-matte` skill
-  integration. This is not part of the main production loop.
+  integration.
 
-Adapters should stay thin. They may expose UI controls and choose a requested
-backend, but they should not fork route logic or duplicate execution-profile
-tuning.
+Adapters stay thin. They expose UI controls, choose a requested backend, and
+pass the request into shared route logic.
 
 ### Runtimes
 
 Runtime backends decide where execution happens:
 
-- **Comfy runtime**: production default for `backend=auto`. Local code uploads
-  the image to remote ComfyUI, submits the single-node `ErmbgRouteMatte`
-  workflow, polls history, and downloads foreground/alpha/metadata.
-- **Direct Worker runtime**: remote HTTP worker that bypasses the Comfy prompt
-  queue. It is the speed/parity validation path and must share router/profile
-  and execution code with the Comfy path.
+- **Direct Worker runtime**: default Web/API runtime for `backend=auto`. It is
+  an HTTP worker around the shared router/profile and execution code.
 - **Local runtime**: lightweight deterministic work such as PyMatting,
-  OpenCV/numpy utilities, route debugging, diagnostics, and tests. Mac local
-  execution must not load SDXL/FLUX/Qwen-scale generation models.
+  OpenCV/numpy utilities, route debugging, diagnostics, and tests.
+- **Comfy runtime**: optional graph/node adapter over the shared route/profile
+  and execution code.
 
-## Current Production Contract
+## Production Contract
 
-`backend=auto` means:
+Web `backend=auto` means:
 
 ```text
 local Web/API/CLI
-  -> remote ComfyUI workflow
-  -> ErmbgRouteMatte
+  -> ermbg.direct_worker_server
   -> classify_route()
   -> passthrough / PyMatting Known-B / CorridorKey / PyMatting fallback
   -> foreground + alpha + rgba_rgb + metadata
 ```
 
-The Comfy node executes route analysis, parameter selection, selected matting
-path, ShadowPatch, and metadata generation inside the Comfy process. The local
-Mac side is orchestration and display.
-
-`backend=direct-worker` means:
+`backend=direct-worker` means the same service is requested explicitly:
 
 ```text
 local Web/API/eval client
-  -> remote ermbg.direct_worker_server
+  -> ermbg.direct_worker_server
   -> shared route/profile contract
   -> direct-corridorkey or direct-pymatting-known-b execution
 ```
 
-Direct Worker is not a separate algorithm family. When it differs from
-`backend=auto`, first compare route metadata, execution profile, shared runner
-debug fields, and alpha/RGBA diffs before tuning thresholds.
+Direct Worker consumes the shared route metadata and execution profile.
 
 ## ComfyUI Node Contract
 
 The maintained Comfy node surface is:
 
-- `ERMBG Route Matte`: production auto route and matte node.
+- `ERMBG Route Matte`: optional Comfy graph auto route and matte node.
 - `ERMBG Route Strategy`: route-only debug/branching node.
 - `ERMBG PyMatting Known-B`: deterministic known-background node for hard UI
   and stable known-background graphics.
-- `ERMBG Classify (preview)`: legacy lightweight diagnostic node.
+- `ERMBG Classify (preview)`: lightweight diagnostic node.
 - `Convert Masks to Images`: utility node.
 
-Custom Comfy graphs may use `ERMBG Route Strategy` for branching, but Web/API
-production should submit `ERMBG Route Matte` for `backend=auto`.
+Custom Comfy graphs may use `ERMBG Route Strategy` for branching. Web/API
+production uses Direct Worker for `backend=auto`; explicit Comfy paths are
+debug/extension paths.
 
 ## Optional OpenClaw Adapter
 
-OpenClaw integration is kept as an optional independent `ermbg-matte` skill,
-not a mainline runtime:
+OpenClaw integration is an optional independent `ermbg-matte` skill:
 
 ```bash
 python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
   --image /path/to/input.png
 ```
 
-This path should submit the same remote `ErmbgRouteMatte` workflow used by
-Web/API auto mode and archive `output.png`, `workflow.json`, `manifest.json`,
-and Comfy history metadata. It should not duplicate ERMBG route logic inside
-the skill. It should not be described or routed as a RMBG/rembg sub-mode.
+This path should call the maintained ERMBG service/API and archive `output.png`,
+`manifest.json`, and runtime metadata. Keep ERMBG route logic in the shared
+core.
 
-Do not expand OpenClaw-specific behavior ahead of the main Web/API/Comfy and
-Direct Worker paths. If OpenClaw needs more features later, add them as a thin
-adapter over the same route/matte contract.
+OpenClaw-specific features should remain a thin adapter over the same
+route/matte contract.
 
-## Recommended Direction
+## Operating Rules
 
-1. Keep one source of truth for route/profile decisions.
-   `router.py` should remain the only place that decides asset family and final
-   `execution_profile`.
-
-2. Keep adapters thin.
-   Web, Comfy nodes, CLI, and optional adapters should pass intent and data
-   into the shared contract instead of branching on asset classes themselves.
-
-3. Promote Direct Worker from experiment to first-class runtime only after
-   parity is proven.
-   The useful distinction is not algorithmic behavior; it is scheduling,
-   throughput, and service shape.
-
-4. Add runtime capability checks.
-   Local Web startup and smoke tests should be able to report remote ERMBG
-   version, Comfy node availability, Direct Worker availability, and active
-   capability flags.
-
-   Current Web API entry:
-
-   ```bash
-   curl -sS "http://127.0.0.1:7860/api/runtime-capabilities?include_object_info=false"
-   ```
-
-5. Standardize artifacts.
-   Every adapter should produce a browsable batch or run directory with a
-   predictable manifest, output image, alpha, foreground, route metadata, and
-   runtime timing.
-
-   Current schema: `ermbg.run.v1`. Python API/CLI `output_dir` runs, Web
-   `/api/matte-candidates` runs, and Game Eval case directories write
-   `manifest.json` without replacing their existing `summary.json` /
-   `*.report.json` compatibility files.
-   Web exposes these through `GET /api/artifacts` and
-   `GET /api/artifacts/<artifact_id>`.
-
-6. Treat ComfyUI as the model and graph host, not as the only service boundary.
-   Comfy remains best for custom graphs and GPU model ecosystem work. Direct
-   Worker is the better long-term shape for high-throughput API service once
-   its parity with `ErmbgRouteMatte` is maintained.
+1. `router.py` is the source of truth for asset family,
+   `parameter_profile`, and `execution_profile`.
+2. Adapters stay thin. Web, CLI, Direct Worker, Comfy nodes, and optional
+   integrations pass data into the shared contract.
+3. Direct Worker is the Web/API service boundary.
+4. ComfyUI is an optional graph host for custom Comfy workflows.
+5. Every adapter should write browsable artifacts with output PNGs, route
+   metadata, timing metadata, and an `ermbg.run.v1` manifest where applicable.
 
 ## Anti-Patterns
 
@@ -192,6 +144,7 @@ adapter over the same route/matte contract.
 - Adding a new backend that implies a new profile contract.
 - Fixing a sample by branching on sample IDs, filenames, one-off dimensions, or
   fixed coordinates.
-- Running heavy generation or VLM models locally on the Mac.
-- Treating a local source change as deployed before the remote Comfy node or
-  Direct Worker has been synced and smoke-tested.
+- Running heavy generation or VLM models in the local Web process.
+- Making normal Web startup fail because ComfyUI is unavailable.
+- Treating a local source change as deployed before the relevant Direct Worker
+  or optional Comfy adapter has been restarted and smoke-tested.

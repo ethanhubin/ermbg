@@ -102,9 +102,23 @@ def test_collect_runtime_capabilities_combines_all_layers(monkeypatch: pytest.Mo
     monkeypatch.setattr(caps, "inspect_comfy_runtime", lambda **kwargs: {"status": "ok", "kind": "comfy"})
     monkeypatch.setattr(caps, "inspect_direct_worker_runtime", lambda **kwargs: {"status": "ok", "kind": "worker"})
 
-    payload = caps.collect_runtime_capabilities(timeout=1.0, include_object_info=False)
+    payload = caps.collect_runtime_capabilities(timeout=1.0, include_object_info=False, include_comfy=True)
 
     assert payload["status"] == "ok"
     assert payload["local"]["capabilities"]["router"] is True
     assert payload["comfy"]["kind"] == "comfy"
+    assert payload["direct_worker"]["kind"] == "worker"
+
+
+def test_collect_runtime_capabilities_skips_comfy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_comfy(**kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("Comfy should not be probed by default")
+
+    monkeypatch.setattr(caps, "inspect_comfy_runtime", fail_comfy)
+    monkeypatch.setattr(caps, "inspect_direct_worker_runtime", lambda **kwargs: {"status": "ok", "kind": "worker"})
+
+    payload = caps.collect_runtime_capabilities(timeout=1.0, include_object_info=False)
+
+    assert payload["status"] == "ok"
+    assert payload["comfy"]["status"] == "disabled"
     assert payload["direct_worker"]["kind"] == "worker"

@@ -1,0 +1,11 @@
+{
+  "services": {
+    "direct_worker_url": "http://127.0.0.1:7871",
+    "comfy_url": "http://127.0.0.1:8000"
+  },
+  "web": {
+    "auto_backend": "direct-worker",
+    "auto_fallback_backend": "pymatting-known-b",
+    "enable_comfy": false
+  }
+}

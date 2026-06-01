@@ -45,7 +45,17 @@ remote_comfy_base="${ERMBG_REMOTE_COMFY_BASE:-E:/ComfyUI}"
 remote_python="${ERMBG_REMOTE_PYTHON:-E:/ComfyUI/.venv/Scripts/python.exe}"
 task_name="${ERMBG_COMFY_TASK:-ERMBGComfyOffline}"
 port="${ERMBG_COMFY_PORT:-8000}"
-listen="${ERMBG_COMFY_LISTEN:-192.168.0.8}"
+default_listen="$(
+  python - <<'PY' 2>/dev/null || true
+from urllib.parse import urlparse
+try:
+    from ermbg.settings import get_comfy_url
+    print(urlparse(get_comfy_url()).hostname or "")
+except Exception:
+    print("")
+PY
+)"
+listen="${ERMBG_COMFY_LISTEN:-${default_listen:-127.0.0.1}}"
 
 if [[ -n "${ERMBG_SSH_PASSWORD:-}" ]]; then
   if ! command -v sshpass >/dev/null 2>&1; then

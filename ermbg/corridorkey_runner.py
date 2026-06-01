@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,7 @@ class LocalCorridorKeyClient:
         candidates = [
             Path.cwd() / "custom_nodes" / "ComfyUI-CorridorKey",
             Path(__file__).resolve().parents[1] / "ComfyUI-CorridorKey",
+            Path("C:/ComfyUI/custom_nodes/ComfyUI-CorridorKey"),
             Path("E:/ComfyUI/custom_nodes/ComfyUI-CorridorKey"),
         ]
         for path in candidates:
@@ -244,29 +246,33 @@ class LocalCorridorKeyClient:
             # so profile parity is not split between two call conventions.
             runner = "loaded_comfy_node"
             runner_module = type(loaded_node).__module__
-            foreground_tensor, alpha_tensor, _processed, _qc = loaded_node.run(
-                image=image_tensor,
-                mask=hint_tensor,
-                gamma_space=str(gamma_space),
-                screen_color=str(screen_color),
-                despill_strength=float(despill_strength),
-                refiner_strength=float(refiner_strength),
-                auto_despeckle=str(auto_despeckle),
-                despeckle_size=int(despeckle_size),
-                unique_id=None,
-            )
+            node_kwargs = {
+                "image": image_tensor,
+                "mask": hint_tensor,
+                "gamma_space": str(gamma_space),
+                "despill_strength": float(despill_strength),
+                "refiner_strength": float(refiner_strength),
+                "auto_despeckle": str(auto_despeckle),
+                "despeckle_size": int(despeckle_size),
+                "unique_id": None,
+            }
+            if "screen_color" in inspect.signature(loaded_node.run).parameters:
+                node_kwargs["screen_color"] = str(screen_color)
+            foreground_tensor, alpha_tensor, _processed, _qc = loaded_node.run(**node_kwargs)
         else:
             self._ensure_import_path()
             from corridor_key import CorridorKeySettings  # type: ignore[import-not-found]
 
-            settings = CorridorKeySettings(
-                gamma_space=str(gamma_space),
-                screen_color=str(screen_color),
-                despill_strength=float(despill_strength),
-                refiner_strength=float(refiner_strength),
-                auto_despeckle=str(auto_despeckle),
-                despeckle_size=int(despeckle_size),
-            )
+            settings_kwargs = {
+                "gamma_space": str(gamma_space),
+                "despill_strength": float(despill_strength),
+                "refiner_strength": float(refiner_strength),
+                "auto_despeckle": str(auto_despeckle),
+                "despeckle_size": int(despeckle_size),
+            }
+            if "screen_color" in inspect.signature(CorridorKeySettings).parameters:
+                settings_kwargs["screen_color"] = str(screen_color)
+            settings = CorridorKeySettings(**settings_kwargs)
             runner = "direct_processor_fallback"
             runner_module = "corridor_key.CorridorKeyProcessor"
             foreground_tensor, alpha_tensor, _processed, _qc = self._get_processor().refine(

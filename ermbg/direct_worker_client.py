@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import io
-import os
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,9 @@ import requests
 from PIL import Image
 
 from .api import ImageLike, MatteResponse
+from .settings import get_direct_worker_url
 
-DEFAULT_DIRECT_WORKER_URL = os.environ.get("ERMBG_DIRECT_URL", "http://192.168.0.8:7871")
+DEFAULT_DIRECT_WORKER_URL = get_direct_worker_url()
 
 
 def _to_png_bytes(image: ImageLike) -> bytes:

@@ -153,7 +153,7 @@ candidate set should each sample use?
 Inputs:
 
 - `samples/corridorkey_semantic/manifest.json`
-- Web eval page: `http://127.0.0.1:7860/eval/game`
+- Web eval page: `<web-url>/eval/game`
 - CLI eval:
 
 ```bash

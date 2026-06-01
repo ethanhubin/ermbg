@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import os
 from importlib import metadata
 from typing import Any
 
 import requests
 
 from .comfy import DEFAULT_COMFY_URL
+from .settings import get_direct_worker_url
 
-DEFAULT_DIRECT_WORKER_URL = os.environ.get("ERMBG_DIRECT_URL", "http://192.168.0.8:7871")
+DEFAULT_DIRECT_WORKER_URL = get_direct_worker_url()
 
 ERMBG_COMFY_NODE_KEYS = (
     "ErmbgRouteMatte",
@@ -132,12 +132,28 @@ def inspect_direct_worker_runtime(
     return payload
 
 
+def disabled_comfy_runtime(*, comfy_url: str = DEFAULT_COMFY_URL) -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "url": comfy_url.rstrip("/"),
+        "capabilities": {
+            "system_stats": False,
+            "object_info": False,
+            "ermbg_route_matte": False,
+            "ermbg_route_strategy": False,
+            "ermbg_pymatting_known_b": False,
+        },
+        "nodes": {},
+    }
+
+
 def collect_runtime_capabilities(
     *,
     comfy_url: str = DEFAULT_COMFY_URL,
     direct_worker_url: str = DEFAULT_DIRECT_WORKER_URL,
     timeout: float = 3.0,
     include_object_info: bool = True,
+    include_comfy: bool = False,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -146,7 +162,7 @@ def collect_runtime_capabilities(
             comfy_url=comfy_url,
             timeout=timeout,
             include_object_info=include_object_info,
-        ),
+        ) if include_comfy else disabled_comfy_runtime(comfy_url=comfy_url),
         "direct_worker": inspect_direct_worker_runtime(
             direct_worker_url=direct_worker_url,
             timeout=timeout,
@@ -157,6 +173,7 @@ def collect_runtime_capabilities(
 __all__ = [
     "ERMBG_COMFY_NODE_KEYS",
     "collect_runtime_capabilities",
+    "disabled_comfy_runtime",
     "get_ermbg_version",
     "inspect_comfy_runtime",
     "inspect_direct_worker_runtime",

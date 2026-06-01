@@ -12,6 +12,8 @@ from typing import Any
 
 import requests
 
+from ermbg.direct_worker_client import DEFAULT_DIRECT_WORKER_URL
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
 DEFAULT_SAMPLE_IDS = "B001,B002,I011,C001"
@@ -130,7 +132,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:7871")
+    parser.add_argument("--base-url", default=DEFAULT_DIRECT_WORKER_URL)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--sample-id", default=DEFAULT_SAMPLE_IDS)

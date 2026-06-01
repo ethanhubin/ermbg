@@ -41,10 +41,28 @@ from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
 from .runtime_capabilities import collect_runtime_capabilities
+from .settings import get_bool_setting, get_setting
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+WEB_AUTO_BACKEND = get_setting("web.auto_backend", env="ERMBG_WEB_AUTO_BACKEND", default="direct-worker")
+WEB_AUTO_FALLBACK_BACKEND = get_setting(
+    "web.auto_fallback_backend",
+    env="ERMBG_WEB_AUTO_FALLBACK_BACKEND",
+    default="pymatting-known-b",
+)
+WEB_DIRECT_WORKER_URL = get_setting(
+    "services.direct_worker_url",
+    env="ERMBG_DIRECT_URL",
+    default=DEFAULT_DIRECT_WORKER_URL,
+).rstrip("/")
+WEB_ENABLE_COMFY = get_bool_setting("web.enable_comfy", env="ERMBG_ENABLE_COMFY", default=False)
 
 ALLOWED_BACKENDS = {
     "auto",
+    "auto-local",
     "comfy-rmbg",
     "comfy-corridorkey",
     "pymatting-known-b",
@@ -60,7 +78,6 @@ REMOTE_DIRECT_BACKENDS = {
     "direct-worker",
 }
 WEB_SHADOW_MODE = "on"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
 GAME_SAMPLE_REL = Path("samples") / "corridorkey_semantic"
 LOCAL_OWNERSHIP_EVAL_PREFIX = "local_ownership_"
@@ -87,7 +104,7 @@ FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
 DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
     "auto": {
-        "label": "Auto RouteMatte",
+        "label": "Auto Direct Worker",
         "backend": "auto",
         "prefix": AUTO_EVAL_PREFIX,
     },
@@ -177,16 +194,29 @@ def health() -> dict[str, str]:
 
 @app.get("/api/runtime-capabilities")
 def runtime_capabilities(
+    include_comfy: bool = Query(
+        WEB_ENABLE_COMFY,
+        description="When true, query the optional ComfyUI adapter runtime.",
+    ),
     include_object_info: bool = Query(
         True,
         description="When true, query Comfy /object_info to verify ERMBG custom node availability.",
     ),
     timeout: float = Query(3.0, ge=0.1, le=30.0),
 ) -> dict[str, Any]:
-    return collect_runtime_capabilities(
+    payload = collect_runtime_capabilities(
         timeout=timeout,
         include_object_info=include_object_info,
+        include_comfy=include_comfy,
+        direct_worker_url=WEB_DIRECT_WORKER_URL,
     )
+    payload["web"] = {
+        "auto_backend": WEB_AUTO_BACKEND,
+        "auto_fallback_backend": WEB_AUTO_FALLBACK_BACKEND,
+        "direct_worker_url": WEB_DIRECT_WORKER_URL,
+        "enable_comfy": WEB_ENABLE_COMFY,
+    }
+    return payload
 
 
 @app.get("/api/artifacts")
@@ -476,7 +506,6 @@ def _matte_page_html() -> str:
       <a class="nav-link" href="/artifacts">Artifacts</a>
       <span class="runtime-status" id="runtime-status" aria-live="polite">
         <span class="runtime-pill" data-runtime="local">Local</span>
-        <span class="runtime-pill" data-runtime="comfy">Comfy</span>
         <span class="runtime-pill" data-runtime="direct">Direct</span>
       </span>
       <span class="status" id="strategy">就绪</span>
@@ -485,7 +514,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto RouteMatte</option><option value="direct-worker">direct-worker</option><option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option><option value="pymatting-known-b">pymatting-known-b</option><option value="comfy-corridorkey">comfy-corridorkey</option><option value="comfy-rmbg">comfy-rmbg</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto Direct Worker</option><option value="direct-worker">direct-worker</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -651,7 +680,7 @@ def _matte_page_html() -> str:
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
-    async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const comfyOk = payload.comfy && payload.comfy.status === "ok"; setRuntimePill("comfy", "Comfy", comfyOk ? "ok" : "error", comfyOk ? payload.comfy.url : (payload.comfy && payload.comfy.error) || "Comfy unavailable"); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("comfy", "Comfy", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
+    async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
     function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
@@ -1190,14 +1219,9 @@ def _matte_page_html() -> str:
       <label>
         后端
         <select id="backend" name="backend">
-          <option value="auto" selected>Auto RouteMatte</option>
-          <option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>
+          <option value="auto" selected>Auto Direct Worker</option>
+          <option value="direct-worker">direct-worker</option>
           <option value="pymatting-known-b">pymatting-known-b</option>
-          <option value="comfy-corridorkey">comfy-corridorkey</option>
-          <option value="comfy-rmbg">comfy-rmbg</option>
-          
-          
-          
         </select>
       </label>
       <div class="slice-settings" id="slice-settings">
@@ -2219,7 +2243,15 @@ def sam_mask_endpoint(
 
 
 def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
+    if isinstance(result.debug, dict) and result.debug.get("backend") == "direct-worker":
+        return "direct-worker"
+    if requested_backend == "auto" and isinstance(result.debug, dict):
+        fallback = result.debug.get("web_auto_fallback_backend")
+        if isinstance(fallback, str) and fallback:
+            return fallback
     auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
+    if isinstance(auto_route, dict) and auto_route.get("requested_backend") == "direct-worker":
+        return "direct-worker"
     if requested_backend == "auto" and isinstance(auto_route, dict):
         selected = auto_route.get("selected_backend")
         if isinstance(selected, str) and selected:
@@ -2323,18 +2355,55 @@ def _run_web_backend(
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     **kwargs: Any,
 ) -> MatteResponse:
-    if backend == "direct-worker":
-        return matte_image_direct_worker(
-            image,
-            direct_worker_url=DEFAULT_DIRECT_WORKER_URL,
-            shadow_mode=shadow_mode,
-            corridorkey_screen_mode=corridorkey_screen_mode,
-            corridorkey_preset=corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-        )
+    execution_backend = backend
+    requested_auto = backend == "auto"
+    if backend == "auto":
+        configured = WEB_AUTO_BACKEND.strip().lower()
+        if configured in {"direct-worker", "direct_worker", "direct"}:
+            execution_backend = "direct-worker"
+        elif configured in {"auto-local", "local"}:
+            execution_backend = "auto-local"
+        elif configured in {"auto", "comfy", "comfy-route-matte", "route-matte", "ermbg-route-matte"}:
+            execution_backend = "auto"
+        else:
+            raise ValueError(
+                "ERMBG_WEB_AUTO_BACKEND must be direct-worker, auto-local, or comfy-route-matte"
+            )
+    if execution_backend == "direct-worker":
+        try:
+            return matte_image_direct_worker(
+                image,
+                direct_worker_url=WEB_DIRECT_WORKER_URL,
+                shadow_mode=shadow_mode,
+                corridorkey_screen_mode=corridorkey_screen_mode,
+                corridorkey_preset=corridorkey_preset,
+                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            )
+        except Exception as exc:
+            fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
+            if not requested_auto or fallback in {"", "none", "off", "disabled"}:
+                raise
+            if fallback not in ALLOWED_BACKENDS or fallback == "direct-worker":
+                raise ValueError(
+                    "ERMBG_WEB_AUTO_FALLBACK_BACKEND must be a non-direct backend or disabled"
+                ) from exc
+            result = matte_image(
+                image,
+                backend=fallback,
+                qa=False,
+                shadow_mode=shadow_mode,
+                corridorkey_screen_mode=corridorkey_screen_mode,
+                corridorkey_preset=corridorkey_preset,
+                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                **kwargs,
+            )
+            result.debug.setdefault("web_auto_primary_error", str(exc))
+            result.debug.setdefault("web_auto_primary_backend", "direct-worker")
+            result.debug.setdefault("web_auto_fallback_backend", fallback)
+            return result
     return matte_image(
         image,
-        backend=backend,
+        backend=execution_backend,
         qa=False,
         shadow_mode=shadow_mode,
         corridorkey_screen_mode=corridorkey_screen_mode,
@@ -2727,6 +2796,16 @@ def _load_json(path: Path) -> object:
         raise HTTPException(status_code=500, detail=f"Invalid JSON: {path.relative_to(PROJECT_ROOT)}") from e
 
 
+def _load_optional_game_eval_summary(path: Path) -> object | None:
+    try:
+        return _load_json(path)
+    except HTTPException:
+        # out/ is shared by ad-hoc smoke runs and web artifacts. Game Eval
+        # discovery should ignore unrelated or malformed summaries instead of
+        # making the whole page unavailable before a run is explicitly selected.
+        return None
+
+
 def _resolve_project_path(path_value: str | Path) -> Path:
     path = Path(path_value)
     if not path.is_absolute():
@@ -3017,7 +3096,7 @@ def _solid_graphic_summary_path(root: Path) -> Path | None:
     path = root / "summary.json"
     if not path.is_file():
         return None
-    payload = _load_json(path)
+    payload = _load_optional_game_eval_summary(path)
     if not isinstance(payload, dict):
         return None
     rows = payload.get("rows")
@@ -3035,7 +3114,7 @@ def _remote_backend_summary_path(root: Path) -> Path | None:
     path = root / "summary.json"
     if not path.is_file():
         return None
-    payload = _load_json(path)
+    payload = _load_optional_game_eval_summary(path)
     if not isinstance(payload, dict):
         return None
     runs = payload.get("runs")
@@ -4194,6 +4273,72 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
     }
 
 
+def _empty_game_eval_data() -> dict[str, object]:
+    cases: list[dict[str, object]] = []
+    sample_ids = _game_sample_ids()
+    for index, item in enumerate(_game_eval_manifest_cases(), start=1):
+        if not isinstance(item.get("id"), str):
+            continue
+        case_id = str(item["id"])
+        sample_id = sample_ids.get(case_id, f"G{index:02d}")
+        sample_paths = _game_sample_paths(case_id)
+        for sample_screen, sample_path in sample_paths.items():
+            cases.append(
+                {
+                    "caseId": case_id,
+                    "sampleId": sample_id,
+                    "sampleCode": f"{sample_id}-{sample_screen[:1].upper()}",
+                    "sampleScreen": sample_screen,
+                    "runStatus": "not-run",
+                    "category": item.get("category", ""),
+                    "verdict": "not-run",
+                    "expectedHit": False,
+                    "expectedAnyHit": False,
+                    "harmfulToolSelected": False,
+                    "harmfulTools": [],
+                    "shadowPolicyRequired": False,
+                    "shadowPolicyHit": None,
+                    "shadowCandidateCount": 0,
+                    "regionCount": 0,
+                    "counts": {},
+                    "selectedTools": [],
+                    "primaryAmbiguity": item.get("primary_ambiguity", ""),
+                    "originalUrl": _image_url(sample_path),
+                    "regionsUrl": None,
+                    "alphaUrl": None,
+                    "matteUrl": None,
+                    "maskHintUrl": None,
+                    "corridorkeyRawAlphaUrl": None,
+                    "corridorkeyForegroundUrl": None,
+                    "candidates": [],
+                }
+            )
+    return {
+        "runId": "game eval",
+        "model": "no run selected",
+        "success": "0/0",
+        "expectedHit": "0/0",
+        "expectedAnyHit": "0/0",
+        "harmfulTools": "0/0",
+        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": None,
+        "matteRoot": "",
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
+        "runs": [],
+        "selectedRun": "",
+        "progress": {
+            "completed": 0,
+            "ok": 0,
+            "errors": 0,
+            "total": _game_eval_expected_case_count(),
+            "percent": 0.0,
+        },
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
 @app.post("/eval/game/run")
 def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
     return _start_game_eval_batch(
@@ -4316,8 +4461,18 @@ def game_eval_regions(
 
 @app.get("/eval/game", response_class=HTMLResponse)
 def game_eval_page(run: str | None = Query(default=None)) -> str:
-    root = _game_eval_root(run)
-    data = _game_eval_data(root)
+    if run:
+        root = _game_eval_root(run)
+        data = _game_eval_data(root)
+    else:
+        try:
+            root = _game_eval_root(None)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            data = _empty_game_eval_data()
+        else:
+            data = _game_eval_data(root)
     data_json = json.dumps(data, ensure_ascii=False)
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -4994,7 +5149,6 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <span class="run-status" id="batch-status" aria-live="polite"></span>
       <span class="runtime-status" id="runtime-status" aria-live="polite">
         <span class="runtime-pill" data-runtime="local">Local</span>
-        <span class="runtime-pill" data-runtime="comfy">Comfy</span>
         <span class="runtime-pill" data-runtime="direct">Direct</span>
       </span>
       <a href="/artifacts">Artifacts</a>
@@ -5035,10 +5189,8 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       <div class="path-tools" aria-label="选择测试路径">
         <label for="eval-test-path">测试路径
           <select id="eval-test-path" name="eval-test-path">
-            <option value="auto" selected>Auto RouteMatte</option>
+            <option value="auto" selected>Auto Direct Worker</option>
             <option value="direct-worker">Direct Worker</option>
-            <option value="corridorkey">CorridorKey</option>
-            <option value="rmbg">RMBG</option>
           </select>
         </label>
       </div>
@@ -5407,17 +5559,14 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
 
     async function refreshRuntimeStatus() {{
       try {{
-        const response = await fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5");
+        const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5");
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
         setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${{payload.local && payload.local.version ? payload.local.version : ""}}`);
-        const comfyOk = payload.comfy && payload.comfy.status === "ok";
-        setRuntimePill("comfy", "Comfy", comfyOk ? "ok" : "error", comfyOk ? payload.comfy.url : (payload.comfy && payload.comfy.error) || "Comfy unavailable");
         const directOk = payload.direct_worker && payload.direct_worker.status === "ok";
         setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable");
       }} catch (error) {{
         setRuntimePill("local", "Local", "warn", "capability check failed");
-        setRuntimePill("comfy", "Comfy", "warn", "capability check failed");
         setRuntimePill("direct", "Direct", "warn", "capability check failed");
       }}
     }}

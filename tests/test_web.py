@@ -23,6 +23,7 @@ from ermbg.web import app
 @pytest.fixture(autouse=True)
 def _isolate_web_matte_artifacts(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "_web_matte_batch_root", lambda: tmp_path / "web_matte_runs_test")
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "auto-local")
 
 
 def _png_bytes() -> bytes:
@@ -72,9 +73,9 @@ def test_index_serves_upload_ui():
     assert '"/api/slice-crops"' not in response.text
     assert 'id="runtime-status"' in response.text
     assert 'data-runtime="local"' in response.text
-    assert 'data-runtime="comfy"' in response.text
+    assert 'data-runtime="comfy"' not in response.text
     assert 'data-runtime="direct"' in response.text
-    assert 'fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5")' in response.text
+    assert 'fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5")' in response.text
     assert "confirm-slices" not in response.text
     assert "候选缩略图" in response.text
     assert 'href="/eval/game"' in response.text
@@ -107,12 +108,12 @@ def test_index_serves_upload_ui():
     assert 'sourceFrame.appendChild(img); img.src = pending.rgb;' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
+    assert '<option value="auto" selected>Auto Direct Worker</option>' in response.text
     assert '<option value="direct-worker">direct-worker</option>' in response.text
-    assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' in response.text
     assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
-    assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' in response.text
-    assert '<option value="comfy-rmbg">comfy-rmbg</option>' in response.text
+    assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
+    assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
+    assert '<option value="comfy-rmbg">comfy-rmbg</option>' not in response.text
     assert 'id="corridorkey-settings" open' in response.text
     assert 'id="pymatting-settings" open' in response.text
     assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
@@ -207,7 +208,12 @@ def test_runtime_capabilities_endpoint(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["comfy"]["capabilities"]["ermbg_route_matte"] is True
     assert payload["direct_worker"]["capabilities"]["batch_matte"] is True
-    assert captured == {"timeout": 1.25, "include_object_info": False}
+    assert captured == {
+        "timeout": 1.25,
+        "include_object_info": False,
+        "include_comfy": False,
+        "direct_worker_url": "http://127.0.0.1:7871",
+    }
 
 
 def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
@@ -301,10 +307,10 @@ def test_game_eval_page_serves_result_table():
     assert "选择测试样本" in response.text
     assert "选择测试路径" in response.text
     assert 'id="eval-test-path"' in response.text
-    assert '<option value="auto" selected>Auto RouteMatte</option>' in response.text
+    assert '<option value="auto" selected>Auto Direct Worker</option>' in response.text
     assert '<option value="direct-worker">Direct Worker</option>' in response.text
-    assert '<option value="corridorkey">CorridorKey</option>' in response.text
-    assert '<option value="rmbg">RMBG</option>' in response.text
+    assert '<option value="corridorkey">CorridorKey</option>' not in response.text
+    assert '<option value="rmbg">RMBG</option>' not in response.text
     assert "全选" in response.text
     assert "取消全选" in response.text
     assert "选择测试变体" not in response.text
@@ -316,9 +322,9 @@ def test_game_eval_page_serves_result_table():
     assert 'id="batch-progress"' in response.text
     assert 'id="runtime-status"' in response.text
     assert 'data-runtime="local"' in response.text
-    assert 'data-runtime="comfy"' in response.text
+    assert 'data-runtime="comfy"' not in response.text
     assert 'data-runtime="direct"' in response.text
-    assert 'fetch("/api/runtime-capabilities?include_object_info=false&timeout=1.5")' in response.text
+    assert 'fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5")' in response.text
     assert '"sampleRows":' in response.text
     assert '"sampleId": "B001"' in response.text
     assert '"sampleId": "I001"' in response.text
@@ -363,6 +369,52 @@ def test_game_eval_page_serves_result_table():
     assert 'detail.textContent = `${sample.caseId || ""}' not in response.text
     assert "modalStage.addEventListener(\"wheel\"" in response.text
     assert "modalStage.addEventListener(\"pointerdown\"" in response.text
+
+
+def test_game_eval_page_renders_empty_state_without_runs(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    (tmp_path / "out").mkdir()
+    (tmp_path / "samples" / "corridorkey_semantic").mkdir(parents=True)
+    (tmp_path / "samples" / "corridorkey_semantic" / "manifest.json").write_text(
+        json.dumps({"cases": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", tmp_path / "out" / "missing")
+
+    client = TestClient(app)
+    response = client.get("/eval/game")
+
+    assert response.status_code == 200
+    assert '"runId": "game eval"' in response.text
+    assert '"model": "no run selected"' in response.text
+
+
+def test_game_eval_discovery_ignores_non_eval_summary(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    smoke_root = tmp_path / "out" / "local_deploy_smoke_20260601"
+    smoke_root.mkdir(parents=True)
+    (smoke_root / "summary.json").write_text(
+        json.dumps({"batch": "local_deploy_smoke_20260601", "http_status": "200"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "samples" / "corridorkey_semantic").mkdir(parents=True)
+    (tmp_path / "samples" / "corridorkey_semantic" / "manifest.json").write_text(
+        json.dumps({"cases": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "DEFAULT_GAME_EVAL_ROOT", tmp_path / "out" / "missing")
+
+    assert web._game_eval_data_roots() == []
+
+    client = TestClient(app)
+    response = client.get("/eval/game")
+
+    assert response.status_code == 200
+    assert "local_deploy_smoke_20260601" not in response.text
 
 
 def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
@@ -1124,6 +1176,7 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     import ermbg.web as web
 
     monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+    monkeypatch.setattr(web, "WEB_DIRECT_WORKER_URL", "http://direct.example")
 
     client = TestClient(app)
     response = client.post(
@@ -1138,7 +1191,7 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["direct_worker_url"] == web.DEFAULT_DIRECT_WORKER_URL
+    assert captured["direct_worker_url"] == "http://direct.example"
     assert captured["shadow_mode"] == "off"
     assert captured["corridorkey_preset"] == "detail_safe"
     assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px"
@@ -1154,6 +1207,106 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "Direct Worker", True)
     ]
+
+
+def test_matte_candidates_endpoint_routes_auto_to_configured_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "selected_backend": "comfy-pymatting-known-b",
+                    "execution_backend": "direct-pymatting-known-b",
+                    "route": "pymatting_known_b",
+                    "asset_kind": "button",
+                },
+            },
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "WEB_DIRECT_WORKER_URL", "http://127.0.0.1:7871")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "auto"},
+    )
+
+    assert response.status_code == 200
+    assert captured["direct_worker_url"] == "http://127.0.0.1:7871"
+    payload = response.json()
+    assert payload["backend"] == "direct-worker"
+    assert payload["requested_backend"] == "auto"
+    assert payload["route"] == "pymatting_known_b"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "Direct Worker", True)
+    ]
+
+
+def test_matte_candidates_endpoint_auto_direct_worker_falls_back_to_configured_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        del image, kwargs
+        raise RuntimeError("No module named 'corridor_key'")
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        captured["backend"] = backend
+        captured.update(kwargs)
+        del image, qa
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., 0] = 220
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((16, 16), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={},
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "WEB_AUTO_FALLBACK_BACKEND", "pymatting-known-b")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "auto"},
+    )
+
+    assert response.status_code == 200
+    assert captured["backend"] == "pymatting-known-b"
+    payload = response.json()
+    assert payload["backend"] == "pymatting-known-b"
+    assert payload["requested_backend"] == "auto"
+    assert payload["debug"]["web_auto_primary_backend"] == "direct-worker"
+    assert payload["debug"]["web_auto_fallback_backend"] == "pymatting-known-b"
+    assert "corridor_key" in payload["debug"]["web_auto_primary_error"]
 
 
 def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch):
@@ -1188,6 +1341,7 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
 
     import ermbg.web as web
 
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "comfy-route-matte")
     monkeypatch.setattr(web, "matte_image", fake_matte_image)
 
     client = TestClient(app)
