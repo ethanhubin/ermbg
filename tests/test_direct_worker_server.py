@@ -23,6 +23,7 @@ def _png_bytes(rgb: np.ndarray) -> bytes:
 def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button") -> DirectWorkerResult:
     alpha = np.ones(rgb.shape[:2], dtype=np.float32)
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+    trimap = np.full(rgb.shape[:2], 128, dtype=np.uint8)
     response = MatteResponse(
         rgba=rgba,
         alpha=alpha,
@@ -30,7 +31,15 @@ def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button"
         strategy_name="direct_pymatting_known_b",
         background_color=(0, 200, 0),
         report={"strategy": {"name": "direct_test"}},
-        debug={},
+        debug={
+            "trimap_u8": trimap,
+            "pymatting_known_b": {
+                "background_normalization": {"applied": True},
+                "trimap": {"unknown_pixels": int(trimap.size)},
+                "parameters": {"fg_threshold": 24.0},
+            },
+            "shadow": {"method": "unknown_domain_same_background_reconstruction"},
+        },
     )
     return DirectWorkerResult(
         response=response,
@@ -75,7 +84,10 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["execution_backend"] == "direct-pymatting-known-b"
     assert payload["execution_profile"] == "pymatting-hard-button"
+    assert payload["algorithm_debug"]["git_sha"]
+    assert payload["algorithm_debug"]["pymatting_known_b"]["trimap"]["unknown_pixels"] == 6
     assert "rgba_png_base64" not in payload
+    assert "trimap_png_base64" not in payload
     assert payload["server_elapsed_sec"] >= 0.0
 
 
@@ -88,6 +100,7 @@ def test_direct_worker_server_health_reports_capabilities():
     assert payload["status"] == "ok"
     assert payload["backend"] == "direct-worker"
     assert payload["version"]
+    assert "git_sha" in payload
     assert payload["capabilities"]["route_profile_contract"] is True
     assert payload["capabilities"]["direct_pymatting_known_b"] is True
     assert payload["capabilities"]["direct_corridorkey"] is True

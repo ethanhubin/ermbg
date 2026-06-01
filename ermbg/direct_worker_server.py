@@ -11,6 +11,7 @@ import argparse
 import base64
 import io
 import os
+import subprocess
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -73,11 +74,56 @@ def _encode_rgba_png_base64(rgba: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _encode_gray_png_base64(mask: np.ndarray) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(mask.astype(np.uint8), mode="L").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _git_sha() -> str:
+    env_sha = os.environ.get("ERMBG_BUILD_GIT_SHA")
+    if env_sha:
+        return env_sha
+    try:
+        root = os.path.dirname(os.path.dirname(__file__))
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
+    debug = result.response.debug if isinstance(result.response.debug, dict) else {}
+    known_b = debug.get("pymatting_known_b") if isinstance(debug.get("pymatting_known_b"), dict) else None
+    shadow = debug.get("shadow") if isinstance(debug.get("shadow"), dict) else None
+    algorithm: dict[str, Any] = {
+        "strategy": result.response.strategy_name,
+        "execution_backend": result.metadata.get("execution_backend"),
+        "git_sha": _git_sha(),
+    }
+    if known_b is not None:
+        algorithm["pymatting_known_b"] = {
+            "background_normalization": known_b.get("background_normalization"),
+            "trimap": known_b.get("trimap"),
+            "parameters": known_b.get("parameters"),
+            "alpha_pinhole_repair": known_b.get("alpha_pinhole_repair"),
+        }
+    if shadow is not None:
+        algorithm["shadow"] = shadow
+    return algorithm
+
+
 def _metadata_payload(result: DirectWorkerResult) -> dict[str, Any]:
     payload = dict(result.metadata)
     payload["timings"] = result.timings
     payload["response_strategy"] = result.response.strategy_name
     payload["background"] = list(result.response.background_color)
+    payload["algorithm_debug"] = _algorithm_debug(result)
     if isinstance(result.response.report, dict):
         payload["report"] = result.response.report
     return payload
@@ -106,9 +152,14 @@ def _case_payload(
         "parameter_profile": result.metadata.get("parameter_profile"),
         "execution_profile": result.metadata.get("execution_profile"),
         "timings": timings,
+        "algorithm_debug": _algorithm_debug(result),
     }
     if include_image:
         payload["rgba_png_base64"] = _encode_rgba_png_base64(result.response.rgba)
+        debug = result.response.debug if isinstance(result.response.debug, dict) else {}
+        trimap = debug.get("trimap_u8")
+        if isinstance(trimap, np.ndarray) and trimap.ndim == 2:
+            payload["trimap_png_base64"] = _encode_gray_png_base64(trimap)
     return payload
 
 
@@ -295,6 +346,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "backend": "direct-worker",
         "version": get_ermbg_version(),
+        "git_sha": _git_sha(),
         "cpu_workers": _CPU_WORKERS,
         "gpu_concurrency": 1,
         "capabilities": {

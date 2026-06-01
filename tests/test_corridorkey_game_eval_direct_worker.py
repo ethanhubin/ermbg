@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import importlib.util
 import json
 import sys
@@ -57,13 +59,18 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
         captured["image"] = image
         captured.update(kwargs)
         rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
+        trimap_buf = io.BytesIO()
+        Image.fromarray(np.full(rgb.shape[:2], 128, dtype=np.uint8), mode="L").save(trimap_buf, format="PNG")
         return SimpleNamespace(
             rgba=rgba,
             alpha=np.ones(rgb.shape[:2], dtype=np.float32),
             foreground_srgb=rgb,
             debug={
                 "timings": {"server_elapsed_sec": 0.42},
-                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "direct_worker": {
+                    "execution_backend": "direct-pymatting-known-b",
+                    "trimap_png_base64": base64.b64encode(trimap_buf.getvalue()).decode("ascii"),
+                },
             },
         )
 
@@ -99,6 +106,7 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     assert (case_dir / "rgba.png").exists()
     assert (case_dir / "alpha.png").exists()
     assert (case_dir / "foreground.png").exists()
+    assert (case_dir / "trimap.png").exists()
     assert (case_dir / "contact_sheet.png").exists()
     case_summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
     assert case_summary["status"] == "ok"
@@ -110,6 +118,7 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     assert case_manifest["outputs"]["rgba"] == "rgba.png"
     assert case_manifest["outputs"]["alpha"] == "alpha.png"
     assert case_manifest["outputs"]["foreground"] == "foreground.png"
+    assert case_manifest["outputs"]["trimap"] == "trimap.png"
     assert case_manifest["runtime"]["backend"] == "direct-worker"
     batch_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert batch_manifest["schema"] == "ermbg.run.v1"

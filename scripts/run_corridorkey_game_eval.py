@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import shutil
 import time
@@ -217,6 +219,7 @@ def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
         (f"{stem}_corridorkey_hint.png", "corridorkey_hint.png"),
         (f"{stem}_corridorkey_raw_alpha.png", "corridorkey_raw_alpha.png"),
         (f"{stem}_key_color_protection.png", "key_color_protection.png"),
+        (f"{stem}_trimap.png", "trimap.png"),
     ]:
         src = case_dir / src_name
         if src.exists():
@@ -230,6 +233,12 @@ def _write_direct_worker_outputs(case_dir: Path, result: Any) -> None:
     Image.fromarray(rgba, mode="RGBA").save(case_dir / "rgba.png")
     Image.fromarray(alpha, mode="L").save(case_dir / "alpha.png")
     Image.fromarray(foreground, mode="RGB").save(case_dir / "foreground.png")
+    debug = getattr(result, "debug", {})
+    direct_worker = debug.get("direct_worker") if isinstance(debug, dict) else None
+    encoded_trimap = direct_worker.get("trimap_png_base64") if isinstance(direct_worker, dict) else None
+    if isinstance(encoded_trimap, str):
+        data = base64.b64decode(encoded_trimap)
+        Image.open(io.BytesIO(data)).convert("L").save(case_dir / "trimap.png")
 
 
 def _case_outputs(case_dir: Path) -> dict[str, str]:
@@ -243,6 +252,7 @@ def _case_outputs(case_dir: Path) -> dict[str, str]:
         "shadow_physical": "shadow_physical.png",
         "corridorkey_subject_rgba": "corridorkey_subject_rgba.png",
         "corridorkey_subject_alpha": "corridorkey_subject_alpha.png",
+        "trimap": "trimap.png",
         "hint": "corridorkey_hint.png",
         "raw_alpha": "corridorkey_raw_alpha.png",
         "key_color_protection": "key_color_protection.png",
@@ -271,6 +281,7 @@ def _write_case_manifest(
         "rgba": case_dir / "rgba.png",
         "alpha": case_dir / "alpha.png",
         "foreground": case_dir / "foreground.png",
+        "trimap": case_dir / "trimap.png",
         "shadow": case_dir / "shadow.png",
         "contact_sheet": case_dir / "contact_sheet.png",
     }

@@ -4068,6 +4068,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
             reason_parts.append(f"alpha_px={alpha_pixels}")
         candidate_url = _image_url(outputs.get("rgba"))
         alpha_url = _image_url(outputs.get("alpha")) or _sibling_image_url(outputs.get("rgba"), "alpha.png")
+        trimap_url = _image_url(outputs.get("trimap")) or _sibling_image_url(outputs.get("rgba"), "trimap.png")
         mask_hint_url = _image_url(outputs.get("hint")) or _image_url(outputs.get("corridorkey_hint")) or _sibling_image_url(outputs.get("rgba"), "corridorkey_hint.png")
         raw_alpha_url = _image_url(outputs.get("raw_alpha")) or _image_url(outputs.get("corridorkey_raw_alpha")) or _sibling_image_url(outputs.get("rgba"), "corridorkey_raw_alpha.png")
         foreground_url = _image_url(outputs.get("foreground")) or _sibling_image_url(outputs.get("rgba"), "foreground.png")
@@ -4108,6 +4109,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
                 "originalUrl": _image_url(sample_path),
                 "regionsUrl": None,
                 "alphaUrl": alpha_url if is_ok else None,
+                "trimapUrl": trimap_url if is_ok else None,
                 "matteUrl": candidate_url if is_ok else None,
                 "maskHintUrl": mask_hint_url if is_ok else None,
                 "corridorkeyRawAlphaUrl": raw_alpha_url if is_ok else None,
@@ -5188,6 +5190,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
             <th class="compare-col">比较</th>
             <th class="preview-col">原图</th>
             <th class="preview-col">alpha mask</th>
+            <th class="preview-col">trimap</th>
             <th class="preview-col">白底</th>
             <th class="preview-col">黑底</th>
             <th class="preview-col">透明底</th>
@@ -5283,6 +5286,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     const previewColumns = [
       {{ label: "原图", urlKey: "originalUrl", bg: "checker" }},
       {{ label: "alpha mask", urlKey: "alphaUrl", bg: "white" }},
+      {{ label: "trimap", urlKey: "trimapUrl", bg: "white" }},
       {{ label: "白底", urlKey: "matteUrl", bg: "white" }},
       {{ label: "黑底", urlKey: "matteUrl", bg: "black" }},
       {{ label: "透明底", urlKey: "matteUrl", bg: "checker" }},
@@ -5292,6 +5296,7 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
     ];
     const compareOptions = [
       {{ label: "原图", urlKey: "originalUrl" }},
+      {{ label: "Trimap", urlKey: "trimapUrl" }},
       {{ label: "Mask Hint", urlKey: "maskHintUrl" }},
       {{ label: "corridorkey Raw Alpha", urlKey: "corridorkeyRawAlphaUrl" }},
       {{ label: "corridorkey Forground", urlKey: "corridorkeyForegroundUrl" }},
