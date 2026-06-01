@@ -676,6 +676,11 @@ def _matte_image_pymatting_known_b(
         cg_rtol=float(cg_rtol),
     )
     alpha = np.clip(pm.alpha.astype(np.float32), 0.0, 1.0)
+    alpha, alpha_pinhole_repair = _repair_known_b_alpha_pinholes(
+        rgb,
+        alpha,
+        background_color=selected_bg,
+    )
 
     C_lin = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
     B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
@@ -722,6 +727,7 @@ def _matte_image_pymatting_known_b(
                 "background": bg_info,
                 "pymatting": pm.debug,
                 "trimap": trimap_info,
+                "alpha_pinhole_repair": alpha_pinhole_repair,
                 "parameters": {
                     "method": method,
                     "image_space": image_space,
@@ -788,6 +794,7 @@ def _matte_image_pymatting_known_b(
             "background": bg_info,
             "trimap": trimap_info,
             "pymatting": pm.debug,
+            "alpha_pinhole_repair": alpha_pinhole_repair,
             "parameters": report["strategy"]["extras"]["parameters"],
         },
         "shadow": shadow_info,
@@ -1098,6 +1105,68 @@ def _matte_image_comfy_rmbg(
     )
 
 
+def _repair_known_b_alpha_pinholes(
+    image_srgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fill tiny alpha=0 pinholes inside source-visible hard subject material.
+
+    This is not a hole closer. Real known-B cutouts are handled in the trimap
+    by connected same-background components. This guard only catches isolated
+    PyMatting solver pinpricks where the source pixel is far from the known
+    background but the solved alpha collapses to zero, which produces B056-like
+    black dots inside otherwise opaque hard UI.
+    """
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0).copy()
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("image_srgb must be uint8")
+    from .colorspace import oklab_distance, srgb_to_oklab
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    distance = oklab_distance(srgb_to_oklab(image_srgb), srgb_to_oklab(bg)[0, 0])
+    candidate = (a <= (10.0 / 255.0)) & (distance >= 20.0)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    max_area = int(max(2.0, min(8.0, round(float(a.size) * 0.00002))))
+    high_alpha = a >= 0.95
+    kept = np.zeros(a.shape, dtype=bool)
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        dilated = cv2.dilate(comp.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(bool)
+        ring = dilated & ~comp
+        surrounded = bool(ring.any() and float(high_alpha[ring].mean()) >= 0.60)
+        keep = bool(area <= max_area and surrounded)
+        if keep:
+            kept |= comp
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "surrounded_by_high_alpha": surrounded,
+                "keep": keep,
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    if bool(kept.any()):
+        a[kept] = 1.0
+    return a, {
+        "used": True,
+        "candidate_pixels": int(candidate.sum()),
+        "repaired_pixels": int(kept.sum()),
+        "max_component_area": int(max_area),
+        "components": components[:12],
+        "omitted_components": max(0, len(components) - 12),
+    }
+
+
 def _pymatting_known_b_shadow_patch(
     image_srgb: np.ndarray,
     *,
@@ -1125,10 +1194,23 @@ def _pymatting_known_b_shadow_patch(
         }
         return subject, subject_foreground_srgb, empty, empty, info
 
+    edge_foreground_srgb, edge_subject, shadow_foreground_srgb, edge_ownership = _repair_known_b_edge_ownership(
+        image_srgb,
+        subject_foreground_srgb=subject_foreground_srgb,
+        subject_alpha=subject,
+        background_color=background_color,
+    )
+    foreground_stabilization = edge_ownership.get("foreground_stabilization", {})
+    screen_residue_repair = edge_ownership.get("screen_residue_repair", {})
     shadow_display, objective_info = _pymatting_known_b_objective_shadow_from_source(
         image_srgb,
-        subject_alpha=subject,
-        subject_foreground_srgb=subject_foreground_srgb,
+        subject_alpha=edge_subject,
+        # Edge ownership runs before ShadowPatch so screen-colored residue can
+        # be handed back and source-proved subject AA can use a better local
+        # foreground/alpha split. Use only that source-proved foreground for
+        # the reprojection test; display-only stabilization/borrowing must not
+        # become new shadow evidence.
+        subject_foreground_srgb=shadow_foreground_srgb,
         background_color=background_color,
     )
     # Compatibility/debug metadata for the previous residue-split shadow
@@ -1137,23 +1219,16 @@ def _pymatting_known_b_shadow_patch(
     # scalar known-B residue from colored subject material.
     _residue_shadow_display, residue_info = _pymatting_known_b_shadow_residue_from_source(
         image_srgb,
-        subject_alpha=subject,
-        subject_foreground_srgb=subject_foreground_srgb,
-        background_color=background_color,
-    )
-
-    stabilized_foreground_srgb, foreground_stabilization = _stabilize_pymatting_subject_foreground_for_export(
-        subject_foreground_srgb,
-        subject_alpha=subject,
-        shadow_mask=np.zeros(subject.shape, dtype=bool),
+        subject_alpha=edge_subject,
+        subject_foreground_srgb=shadow_foreground_srgb,
         background_color=background_color,
     )
     from .shadow import composite_subject_with_shadow
 
-    foreground_linear = ermbg_io.srgb_to_linear(stabilized_foreground_srgb)
+    foreground_linear = ermbg_io.srgb_to_linear(edge_foreground_srgb)
     alpha, rgba_rgb_linear = composite_subject_with_shadow(
         foreground_linear,
-        subject,
+        edge_subject,
         shadow_display,
         subject_occlusion_blur_sigma=0.0,
     )
@@ -1175,7 +1250,9 @@ def _pymatting_known_b_shadow_patch(
         "max_alpha": float(shadow_display[shadow_execution].max()) if applied else 0.0,
         "objective_shadow": objective_info,
         "residue_split": residue_info,
+        "edge_ownership": edge_ownership,
         "foreground_stabilization": foreground_stabilization,
+        "screen_residue_repair": screen_residue_repair,
     }
     return (
         alpha.astype(np.float32),
@@ -1184,6 +1261,47 @@ def _pymatting_known_b_shadow_patch(
         shadow_alpha_physical.astype(np.float32),
         info,
     )
+
+
+def _repair_known_b_edge_ownership(
+    image_srgb: np.ndarray,
+    *,
+    subject_foreground_srgb: np.ndarray,
+    subject_alpha: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Resolve the dynamic known-B edge band before ShadowPatch.
+
+    The band is estimated from the matte transition and image scale, not a
+    fixed 1px strip. Inside it we keep the ownership tests in one stage:
+    source-proved colored subject AA is reconstructed against the known
+    background, screen-dominant pinpricks/thin fringes are handed back, and
+    broad source-proved darkening is left to ShadowPatch instead of being
+    decided by residue cleanup.
+    """
+    subject_fg, subject_a, subject_info = _reconstruct_known_b_subject_edge_alpha(
+        image_srgb,
+        subject_foreground_srgb=subject_foreground_srgb,
+        subject_alpha=subject_alpha,
+        background_color=background_color,
+    )
+    stabilized_foreground_srgb, foreground_stabilization = _stabilize_pymatting_subject_foreground_for_export(
+        subject_fg,
+        subject_alpha=subject_a,
+        shadow_mask=np.zeros(subject_a.shape, dtype=bool),
+        background_color=background_color,
+    )
+    repaired_foreground_srgb, repaired_subject, screen_residue_repair = _repair_screen_dominant_edge_residue_foreground(
+        stabilized_foreground_srgb,
+        subject_alpha=subject_a,
+        background_color=background_color,
+    )
+    return repaired_foreground_srgb, repaired_subject, subject_fg, {
+        "used": True,
+        "subject_edge_reconstruction": subject_info,
+        "foreground_stabilization": foreground_stabilization,
+        "screen_residue_repair": screen_residue_repair,
+    }
 
 
 def _pymatting_known_b_objective_shadow_from_source(
@@ -1358,9 +1476,10 @@ def _pymatting_known_b_objective_shadow_from_source(
     # Raw source reprojection can be sparse along antialiased contact shadows:
     # the high-confidence component proves the region is shadow, but individual
     # texels may fail a channel guard due to subpixel subject color or generator
-    # noise. First write source-solved pixels, then close small holes inside the
-    # connected support and borrow nearby opacity with distance falloff. This
-    # completes the shadow matte without handing those pixels back to PyMatting.
+    # noise. First write source-solved pixels, then close only holes that still
+    # have source-solved darkening evidence. This keeps ShadowPatch as a repair
+    # against the original image: morphology may connect support, but it cannot
+    # invent endpoint shadow specks on pixels that reproject as plain background.
     write = (
         support
         & (solved_shadow >= support_alpha_min)
@@ -1372,17 +1491,9 @@ def _pymatting_known_b_objective_shadow_from_source(
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px * 2 + 1, close_px * 2 + 1))
     completed_support = cv2.morphologyEx(write.astype(np.uint8), cv2.MORPH_CLOSE, close_kernel, iterations=1)
     completed_support = completed_support.astype(bool) & support
-    completed_fill = completed_support & ~write
+    completed_fill = completed_support & ~write & (solved_shadow >= support_alpha_min)
     if bool(completed_fill.any()) and bool(write.any()):
-        from scipy import ndimage
-
-        dist_to_written, nearest = ndimage.distance_transform_edt(~write, return_indices=True)
-        borrowed = shadow[nearest[0], nearest[1]]
-        falloff = np.clip(1.0 - dist_to_written / float(close_px + expand_px + 1), 0.0, 1.0)
-        shadow[completed_fill] = np.maximum(
-            shadow[completed_fill],
-            (borrowed * falloff * 0.90).astype(np.float32)[completed_fill],
-        )
+        shadow[completed_fill] = np.maximum(shadow[completed_fill], solved_shadow[completed_fill])
     values = shadow[shadow > 0.0]
     return shadow, {
         "enabled": True,
@@ -1414,6 +1525,151 @@ def _pymatting_known_b_objective_shadow_from_source(
         "support_components": anchored_support_components[:12],
         "omitted_support_components": max(0, len(anchored_support_components) - 12),
         "omitted_components": max(0, len(components) - 12),
+    }
+
+
+def _reconstruct_known_b_subject_edge_alpha(
+    image_srgb: np.ndarray,
+    *,
+    subject_foreground_srgb: np.ndarray,
+    subject_alpha: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Re-solve source-proved colored subject AA inside the edge band.
+
+    The mechanism is the same as the edge cleanup pass, but the winning role is
+    subject rather than background: if a nearby stable subject color and the
+    known background reconstruct the original pixel, the alpha/foreground split
+    is corrected to that local mixture. Empirical tolerances below key on
+    actual same-B reconstruction error; pixels that fit scalar background
+    darkening or screen residue are rejected and left for later roles.
+    """
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("image_srgb must be uint8")
+    fg = subject_foreground_srgb.astype(np.uint8, copy=True)
+    a = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0).copy()
+    if image_srgb.shape[:2] != a.shape:
+        raise ValueError("image_srgb and subject_alpha must share HxW")
+
+    h, w = a.shape
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    bg_max = float(bg.max())
+    off_channels = bg < max(8.0, bg_max * 0.12)
+    if not bool(off_channels.any()):
+        return fg, a, {
+            "used": False,
+            "reason": "background has no off-screen material channels",
+            "candidate_pixels": 0,
+            "reconstructed_pixels": 0,
+        }
+
+    from scipy import ndimage
+
+    exterior = a <= 0.05
+    if bool(exterior.any()):
+        dist_to_exterior = ndimage.distance_transform_edt(~exterior)
+    else:
+        dist_to_exterior = np.full(a.shape, np.inf, dtype=np.float32)
+    local_min = ndimage.minimum_filter(a, size=5, mode="nearest")
+    local_max = ndimage.maximum_filter(a, size=5, mode="nearest")
+    transition = (local_max - local_min) >= max(2.0 / 255.0, float(np.percentile((local_max - local_min), 85.0)) * 0.25)
+    transition_distance = dist_to_exterior[transition & np.isfinite(dist_to_exterior)].astype(np.float32)
+    if transition_distance.size:
+        edge_band_px = float(np.percentile(transition_distance, 90.0) + 1.5)
+    else:
+        edge_band_px = float(round(float(min(h, w)) * 0.055))
+    # The cap prevents broad UI interiors from being re-solved; the lower bound
+    # covers hard assets whose antialiasing is only a few texels after scaling.
+    edge_band_px = float(max(3.0, min(18.0, edge_band_px)))
+    edge_band = dist_to_exterior <= edge_band_px
+
+    fg_float = fg.astype(np.float32)
+    src = image_srgb.astype(np.float32)
+    material_signal = np.where(off_channels.reshape(1, 1, 3), fg_float, 0.0).max(axis=-1)
+    source_material_signal = np.where(off_channels.reshape(1, 1, 3), src, 0.0).max(axis=-1)
+    material_threshold = float(max(48.0, min(120.0, bg_max * 0.35)))
+    seed_interior_px = float(max(2.0, min(8.0, edge_band_px * 0.55)))
+    seeds = (a >= 0.95) & (dist_to_exterior > seed_interior_px) & (material_signal >= material_threshold)
+    if not bool(seeds.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "no stable subject material seed",
+            "candidate_pixels": 0,
+            "reconstructed_pixels": 0,
+            "edge_band_px": float(edge_band_px),
+            "seed_pixels": 0,
+        }
+
+    dist_to_seed, nearest = ndimage.distance_transform_edt(~seeds, return_indices=True)
+    max_seed_distance = float(max(6.0, min(24.0, round(float(min(h, w)) * 0.075))))
+    candidate = (
+        edge_band
+        & (source_material_signal >= max(20.0, material_threshold * 0.35))
+        & (dist_to_seed <= max_seed_distance)
+    )
+    if not bool(candidate.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "no source material inside dynamic edge band",
+            "candidate_pixels": 0,
+            "reconstructed_pixels": 0,
+            "edge_band_px": float(edge_band_px),
+            "seed_pixels": int(seeds.sum()),
+            "max_seed_distance_px": float(max_seed_distance),
+        }
+
+    local_fg = fg_float[nearest[0], nearest[1]]
+    denom = local_fg - bg.reshape(1, 1, 3)
+    valid = np.abs(denom) >= 24.0
+    delta = src - bg.reshape(1, 1, 3)
+    denom_sq = np.where(valid, denom * denom, 0.0).sum(axis=-1)
+    numerator = np.where(valid, delta * denom, 0.0).sum(axis=-1)
+    solved_alpha = np.divide(numerator, np.maximum(denom_sq, 1e-6)).astype(np.float32)
+    solved_alpha = np.clip(solved_alpha, 0.0, 1.0)
+    predicted = bg.reshape(1, 1, 3) + solved_alpha[..., None] * denom
+    abs_error = np.abs(predicted - src)
+    max_error = abs_error.max(axis=-1)
+    mean_error = abs_error.mean(axis=-1)
+    source_shadow = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    model_fit = (
+        candidate
+        & (denom_sq >= 48.0 * 48.0)
+        & (solved_alpha >= 0.025)
+        & (solved_alpha <= 0.995)
+        & (max_error <= 20.0)
+        & (mean_error <= 8.0)
+        & (np.abs(solved_alpha - a) >= 0.035)
+        # Scalar known-B darkening is ShadowPatch ownership, not subject AA.
+        & (source_shadow <= np.maximum(solved_alpha * 0.85, 0.18))
+    )
+    if not bool(model_fit.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "no source-proved subject edge mixture",
+            "candidate_pixels": int(candidate.sum()),
+            "reconstructed_pixels": 0,
+            "edge_band_px": float(edge_band_px),
+            "seed_pixels": int(seeds.sum()),
+            "max_seed_distance_px": float(max_seed_distance),
+            "model_fit_pixels": 0,
+        }
+
+    fg[model_fit] = np.clip(local_fg[model_fit], 0, 255).astype(np.uint8)
+    a[model_fit] = solved_alpha[model_fit]
+    return fg, a, {
+        "used": True,
+        "reason": "",
+        "candidate_pixels": int(candidate.sum()),
+        "model_fit_pixels": int(model_fit.sum()),
+        "reconstructed_pixels": int(model_fit.sum()),
+        "raised_alpha_pixels": int((model_fit & (solved_alpha > subject_alpha.astype(np.float32))).sum()),
+        "lowered_alpha_pixels": int((model_fit & (solved_alpha < subject_alpha.astype(np.float32))).sum()),
+        "edge_band_px": float(edge_band_px),
+        "seed_interior_px": float(seed_interior_px),
+        "seed_pixels": int(seeds.sum()),
+        "max_seed_distance_px": float(max_seed_distance),
+        "mean_abs_error_u8": float(mean_error[model_fit].mean()),
+        "p95_max_error_u8": float(np.percentile(max_error[model_fit], 95.0)),
     }
 
 
@@ -1515,6 +1771,230 @@ def _stabilize_pymatting_subject_foreground_for_export(
     fg[fill] = fg[nearest[0][fill], nearest[1][fill]]
     info["filled_pixels"] = int(fill.sum())
     return fg, info
+
+
+def _repair_screen_dominant_edge_residue_foreground(
+    foreground_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Replace opaque edge pixels still dominated by the screen channel.
+
+    This is the local edge-residue pass in the known-B three-part contract:
+    fg_threshold recalls hard subject anchors, this pass removes/recolors tiny
+    screen-colored edge pinpricks, and ShadowPatch handles only repairs that
+    reproject back to the original image on the same background. The repair is
+    intentionally narrow: it requires a saturated single-channel screen, small
+    pinpricks or a very thin edge fringe, and proximity to transparent support.
+    Large or interior green/blue subject material is preserved by structure,
+    not by sample ids.
+    """
+    fg = foreground_srgb.astype(np.uint8, copy=True)
+    a = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    others = [i for i in range(3) if i != dominant]
+    second = float(np.max(bg[others]))
+    if float(bg[dominant]) < 64.0 or float(bg[dominant]) - second < 48.0:
+        return fg, a, {
+            "used": False,
+            "reason": "background is not a saturated single-channel screen",
+            "candidate_pixels": 0,
+            "repaired_pixels": 0,
+        }
+
+    rgb = fg.astype(np.float32)
+    other_max = np.maximum(rgb[..., others[0]], rgb[..., others[1]])
+    # Screen residue should still look like the screen channel with quiet
+    # off-channels. This keeps B056-like silver/blue-gray metal edges out of
+    # the pinprick repair even when their blue channel is slightly dominant.
+    off_channel_max = max(72.0, second + 64.0)
+    if dominant == 1:
+        # Green-screen residue on warm/yellow hard edges can be olive rather
+        # than pure green because the foreground red channel bleeds into the
+        # source pixel. The small-component and near-transparent gates carry
+        # ownership here; keeping the off-channel cap too low leaves B055-like
+        # edge pinpricks behind. Blue-screen ornate metal is intentionally not
+        # given this wider cap because its real silver edges can also be
+        # blue-dominant, so blue cleanup must remain RGB-only and conservative.
+        off_channel_max = max(off_channel_max, min(128.0, float(bg[dominant]) * 0.62))
+    # Green shadows can be dim while still visibly screen-colored after export;
+    # keep the floor slightly lower for green, but leave blue stricter because
+    # blue-screen metal highlights are the known false-positive class.
+    dominant_floor = float(bg[dominant]) * (0.30 if dominant == 1 else 0.35)
+    # A green pinprick can be just under 0.5 subject alpha before ShadowPatch
+    # then become visible after the shadow layer is composited. Keep this green
+    # relaxation local to the residue pass; blue stays stricter to avoid
+    # cutting B056-like metal filigree.
+    alpha_floor = 0.45 if dominant == 1 else 0.50
+    screen_dominant = (
+        (a >= alpha_floor)
+        & (rgb[..., dominant] > other_max + 8.0)
+        & (rgb[..., dominant] >= dominant_floor)
+        & (other_max <= off_channel_max)
+        & (rgb[..., dominant] <= min(170.0, float(bg[dominant]) * 0.82))
+    )
+    if not bool(screen_dominant.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "no screen-dominant opaque residue candidates",
+            "candidate_pixels": 0,
+            "repaired_pixels": 0,
+        }
+
+    h, w = a.shape
+    low_alpha_support = a <= 0.25
+    if bool(low_alpha_support.any()):
+        dist_to_transparent = cv2.distanceTransform((~low_alpha_support).astype(np.uint8), cv2.DIST_L2, 3)
+        edge_distance_px = float(max(4.0, min(18.0, round(float(min(h, w)) * 0.035))))
+        near_transparent = dist_to_transparent <= edge_distance_px
+    else:
+        edge_distance_px = 0.0
+        near_transparent = np.zeros(a.shape, dtype=bool)
+
+    candidate = screen_dominant & near_transparent
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    max_component_area = int(max(8.0, min(32.0, round(float(h * w) * 0.00008))))
+    max_thin_edge_component_area = int(max(24.0, min(384.0, round(float(h * w) * 0.004))))
+    min_total_candidate_pixels = int(max(8.0, round(float(h * w) * 0.00005)))
+    kept = np.zeros(a.shape, dtype=bool)
+    components: list[dict[str, Any]] = []
+    thin_edge_component_count = 0
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        small_pinprick = bool(area <= max_component_area)
+        # A bottom contact fringe can be one connected component, so the old
+        # "small blobs only" rule leaves a clean but wrong 1px screen-colored
+        # line. The green-screen relaxation is shape-based instead of
+        # sample-based: a long component is still residue only when it is
+        # extremely thin, edge-adjacent, screen-dominant, and tiny relative to
+        # the frame. Blue-screen hard metal edges remain on the stricter path.
+        thin_edge_fringe = bool(
+            dominant == 1
+            and area <= max_thin_edge_component_area
+            and min(width, height) <= 2
+            and max(width, height) >= 12
+        )
+        keep = small_pinprick or thin_edge_fringe
+        if keep:
+            kept |= comp
+            if thin_edge_fringe:
+                thin_edge_component_count += 1
+        components.append(
+            {
+                "area": area,
+                "width": width,
+                "height": height,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "keep": keep,
+                "keep_reason": "thin_edge_fringe" if thin_edge_fringe else ("small_pinprick" if small_pinprick else ""),
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    kept_component_count = sum(1 for item in components if item["keep"])
+    if int(kept.sum()) < min_total_candidate_pixels or (kept_component_count < 2 and thin_edge_component_count < 1):
+        return fg, a, {
+            "used": True,
+            "reason": "screen-dominant evidence below small-component family gate",
+            "candidate_pixels": int(candidate.sum()),
+            "repaired_pixels": 0,
+            "edge_distance_px": float(edge_distance_px),
+            "max_component_area": int(max_component_area),
+            "max_thin_edge_component_area": int(max_thin_edge_component_area),
+            "min_total_candidate_pixels": int(min_total_candidate_pixels),
+            "kept_component_count": int(kept_component_count),
+            "thin_edge_component_count": int(thin_edge_component_count),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+        }
+    if not bool(kept.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "screen-dominant components too large or not edge-adjacent",
+            "candidate_pixels": int(candidate.sum()),
+            "repaired_pixels": 0,
+            "edge_distance_px": float(edge_distance_px),
+            "max_component_area": int(max_component_area),
+            "max_thin_edge_component_area": int(max_thin_edge_component_area),
+            "min_total_candidate_pixels": int(min_total_candidate_pixels),
+            "kept_component_count": int(kept_component_count),
+            "thin_edge_component_count": int(thin_edge_component_count),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+        }
+
+    from scipy import ndimage
+
+    # Borrow only from non-screen-dominant subject pixels. Otherwise a vertical
+    # chain of unkept green residue can become the nearest "foreground" seed
+    # for neighboring pinpricks, preserving the very B055-style dots this pass
+    # is meant to remove.
+    seed = (a >= 0.90) & ~screen_dominant
+    if not bool(seed.any()):
+        return fg, a, {
+            "used": True,
+            "reason": "no nearby foreground RGB seed for screen residue repair",
+            "candidate_pixels": int(candidate.sum()),
+            "repaired_pixels": 0,
+            "edge_distance_px": float(edge_distance_px),
+            "max_component_area": int(max_component_area),
+            "max_thin_edge_component_area": int(max_thin_edge_component_area),
+            "min_total_candidate_pixels": int(min_total_candidate_pixels),
+            "kept_component_count": int(kept_component_count),
+            "thin_edge_component_count": int(thin_edge_component_count),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+        }
+    dist_to_seed, nearest = ndimage.distance_transform_edt(~seed, return_indices=True)
+    max_borrow_distance = float(max(6.0, min(24.0, round(float(min(h, w)) * 0.05))))
+    repair = kept & (dist_to_seed <= max_borrow_distance)
+    out = fg.copy()
+    out[repair] = fg[nearest[0][repair], nearest[1][repair]]
+    alpha_out = a.copy()
+    allow_alpha_lowering = dominant != 2
+    if allow_alpha_lowering and bool(low_alpha_support.any()) and bool(repair.any()):
+        _, nearest_low_alpha = ndimage.distance_transform_edt(~low_alpha_support, return_indices=True)
+        alpha_out[repair] = np.minimum(
+            alpha_out[repair],
+            np.maximum(a[nearest_low_alpha[0][repair], nearest_low_alpha[1][repair]], 0.12),
+        )
+    unrepaired = kept & ~repair
+    if bool(unrepaired.any()):
+        # Fallback for isolated one-pixel residues just outside the borrow
+        # radius. Capping the screen channel is less ideal than borrowing, but
+        # it neutralizes visible green/blue pinpricks while still preserving
+        # alpha and off-channel material color.
+        capped = out.astype(np.float32)
+        cap = np.maximum(capped[..., others[0]], capped[..., others[1]])
+        capped[..., dominant] = np.where(unrepaired, np.minimum(capped[..., dominant], cap), capped[..., dominant])
+        out = np.clip(capped, 0, 255).astype(np.uint8)
+    return out, alpha_out.astype(np.float32), {
+        "used": True,
+        "reason": "",
+        "candidate_pixels": int(candidate.sum()),
+        "repaired_pixels": int(kept.sum()),
+        "borrowed_pixels": int(repair.sum()),
+        "capped_pixels": int(unrepaired.sum()),
+        "alpha_lowered_pixels": int((repair & (alpha_out < a)).sum()),
+        "edge_distance_px": float(edge_distance_px),
+        "max_borrow_distance_px": float(max_borrow_distance),
+        "max_component_area": int(max_component_area),
+        "max_thin_edge_component_area": int(max_thin_edge_component_area),
+        "min_total_candidate_pixels": int(min_total_candidate_pixels),
+        "kept_component_count": int(kept_component_count),
+        "thin_edge_component_count": int(thin_edge_component_count),
+        "components": components[:12],
+        "omitted_components": max(0, len(components) - 12),
+    }
 
 
 def _pymatting_known_b_shadow_residue_from_source(

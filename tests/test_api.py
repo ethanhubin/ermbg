@@ -20,6 +20,99 @@ def _solid_green_with_red_subject(h=128, w=128):
     return img
 
 
+def test_screen_dominant_edge_residue_repair_preserves_large_material_component():
+    from ermbg.api import _repair_screen_dominant_edge_residue_foreground
+
+    alpha = np.zeros((128, 128), dtype=np.float32)
+    alpha[24:104, 24:104] = 1.0
+    foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    foreground[24:104, 24:104] = (230, 190, 20)
+    foreground[36:72, 24:44] = (30, 105, 16)
+
+    repaired, repaired_alpha, info = _repair_screen_dominant_edge_residue_foreground(
+        foreground,
+        subject_alpha=alpha,
+        background_color=(0, 200, 0),
+    )
+
+    # Mechanism: true subject-owned green material can be near a transparent
+    # edge. The residue repair is allowed to fix fragmented pinpricks, but a
+    # coherent material component must not be recolored by a "green means bad"
+    # rule.
+    assert info["repaired_pixels"] == 0
+    assert np.array_equal(repaired, foreground)
+    assert np.array_equal(repaired_alpha, alpha)
+
+
+def test_screen_dominant_edge_residue_repair_removes_thin_contact_fringe():
+    from ermbg.api import _repair_screen_dominant_edge_residue_foreground
+
+    alpha = np.zeros((128, 128), dtype=np.float32)
+    alpha[32:76, 24:104] = 1.0
+    foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+    foreground[32:76, 24:104] = (42, 126, 245)
+    fringe = np.zeros((128, 128), dtype=bool)
+    fringe[76, 32:96] = True
+    alpha[fringe] = 1.0
+    foreground[fringe] = (19, 116, 83)
+
+    repaired, repaired_alpha, info = _repair_screen_dominant_edge_residue_foreground(
+        foreground,
+        subject_alpha=alpha,
+        background_color=(0, 200, 0),
+    )
+
+    # Mechanism: screen residue can be a single connected 1px contact fringe,
+    # not just scattered dots. A shape-gated thin edge component should be
+    # handed back before ShadowPatch; broad green subject material is covered
+    # by the neighboring preservation test.
+    assert info["thin_edge_component_count"] == 1
+    assert info["repaired_pixels"] == int(fringe.sum())
+    assert repaired_alpha[fringe].mean() < 0.2
+    assert repaired[fringe, 2].mean() > 220.0
+
+
+def test_known_b_edge_ownership_reconstructs_source_proved_subject_aa():
+    from ermbg.api import _repair_known_b_edge_ownership
+
+    bg = np.array([0, 200, 0], dtype=np.float32)
+    material = np.array([46, 135, 247], dtype=np.float32)
+    image = np.full((64, 64, 3), bg, dtype=np.uint8)
+    alpha = np.zeros((64, 64), dtype=np.float32)
+    foreground = np.zeros((64, 64, 3), dtype=np.uint8)
+
+    alpha[18:46, 24:50] = 1.0
+    foreground[18:46, 24:50] = material.astype(np.uint8)
+    image[18:46, 24:50] = material.astype(np.uint8)
+    true_edge_alpha = np.array([0.18, 0.42, 0.68, 0.90], dtype=np.float32)
+    for i, value in enumerate(true_edge_alpha):
+        y = 24 + i
+        x = 23 - i
+        image[y, x] = np.clip(value * material + (1.0 - value) * bg + 0.5, 0, 255).astype(np.uint8)
+        # Simulate the B038 failure class: the source is valid subject AA, but
+        # the solver split is too low and the straight foreground is unstable.
+        alpha[y, x] = max(0.0, value - 0.28)
+        foreground[y, x] = (70, 0, 255)
+
+    repaired_fg, repaired_alpha, shadow_fg, info = _repair_known_b_edge_ownership(
+        image,
+        subject_foreground_srgb=foreground,
+        subject_alpha=alpha,
+        background_color=(0, 200, 0),
+    )
+
+    # Mechanism: the edge stage arbitrates subject AA before residue/shadow.
+    # When the known-B mixture reconstructs the original pixel, the edge should
+    # become smooth subject ownership instead of a gray-background stair step.
+    assert info["subject_edge_reconstruction"]["reconstructed_pixels"] >= len(true_edge_alpha)
+    for i, value in enumerate(true_edge_alpha):
+        y = 24 + i
+        x = 23 - i
+        assert repaired_alpha[y, x] == pytest.approx(float(value), abs=0.04)
+        assert repaired_fg[y, x, 2] > 220
+        assert shadow_fg[y, x, 2] > 220
+
+
 def test_classify_image_from_ndarray():
     img = _solid_green_with_red_subject()
     s = classify_image(img)
@@ -885,6 +978,83 @@ def test_pymatting_shadow_patch_stabilizes_colored_edge_foreground_rgb():
     assert rgba_rgb[edge, 2].mean() > 220.0
 
 
+def test_pymatting_shadow_patch_hands_screen_residue_back_to_shadow():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+
+    core = np.zeros((128, 128), dtype=bool)
+    core[32:72, 34:94] = True
+    residue = np.zeros((128, 128), dtype=bool)
+    residue[76, 44:52] = True
+    residue[76, 58:66] = True
+    residue[76, 72:80] = True
+    shadow = np.zeros((128, 128), dtype=bool)
+    shadow[77:94, 40:94] = True
+
+    subject_alpha[core] = 1.0
+    subject_alpha[residue] = 1.0
+    subject_foreground[core] = (245, 210, 18)
+    subject_foreground[residue] = (34, 92, 0)
+    image[core] = subject_foreground[core]
+    image[residue] = subject_foreground[residue]
+    image[shadow] = (0, 138, 0)
+
+    _, _, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: small screen-colored edge components may arrive from PyMatting
+    # as alpha=1 foreground. The residue pass should lower subject ownership
+    # before ShadowPatch runs, so source-matching known-B darkening becomes a
+    # continuous shadow repair instead of a dotted low-alpha foreground fringe.
+    assert info["screen_residue_repair"]["alpha_lowered_pixels"] >= int(residue.sum() * 0.95)
+    assert shadow_alpha[residue].mean() > 0.25
+
+
+def test_pymatting_shadow_patch_does_not_invent_background_colored_endpoint_specks():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    subject_alpha = np.zeros((128, 128), dtype=np.float32)
+    subject_foreground = np.zeros((128, 128, 3), dtype=np.uint8)
+
+    subject_alpha[34:70, 38:94] = 1.0
+    subject_foreground[34:70, 38:94] = (50, 130, 245)
+    image[34:70, 38:94] = subject_foreground[34:70, 38:94]
+    shadow = np.zeros((128, 128), dtype=bool)
+    shadow[76:90, 44:94] = True
+    image[shadow] = (0, 132, 0)
+    source_background_holes = np.zeros((128, 128), dtype=bool)
+    source_background_holes[78, 50:54] = True
+    source_background_holes[84, 88:92] = True
+    image[source_background_holes] = bg
+
+    _, _, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=tuple(int(c) for c in bg),
+        shadow_mode="on",
+    )
+
+    # Mechanism: ShadowPatch may grow support to close contact seams, but it
+    # must remain source-proved. Pixels that are background-colored in the
+    # original are not valid dark endpoint specks even if morphology surrounds
+    # them with a coherent shadow component.
+    assert info["objective_shadow"]["completed_support_pixels"] > info["objective_shadow"]["raw_source_pixels"]
+    assert shadow_alpha[source_background_holes].max() == 0.0
+    assert shadow_alpha[shadow & ~source_background_holes].mean() > 0.25
+
+
 def test_pymatting_foreground_stabilization_does_not_recolor_opaqueish_ui_interior():
     import ermbg.api as api
 
@@ -948,6 +1118,10 @@ def test_pymatting_shadow_patch_completes_gap_inside_objective_shadow_component(
     subject_foreground[core | edge] = (40, 120, 245)
     image[core] = (40, 120, 245)
     image[edge] = (20, 135, 118)
+    # The gap is source-proved shadow with off-channel subject noise. It should
+    # be completed because the known background channel still shows darkening;
+    # pure background-colored holes are covered by the endpoint-speck test.
+    image[contact_gap] = (20, 138, 120)
     image[shadow] = (0, 138, 0)
 
     alpha, _, shadow_alpha, _, info = api._pymatting_known_b_shadow_patch(
@@ -960,8 +1134,9 @@ def test_pymatting_shadow_patch_completes_gap_inside_objective_shadow_component(
 
     # Mechanism: PyMatting owns the subject, while ShadowPatch owns the full
     # connected shadow component. Once source residuals prove a nearby cast
-    # shadow, small support gaps inside that component should be completed by
-    # borrowed shadow opacity instead of leaving a white preview seam.
+    # shadow, small support gaps inside that component may be completed, but
+    # only from source-solved darkening so the same-B reprojection stays close
+    # to the original image.
     assert info["method"] == "objective_source_reprojection"
     assert info["objective_shadow"]["pixels"] > 0
     assert info["objective_shadow"]["completed_fill_pixels"] > 0

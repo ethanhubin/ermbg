@@ -35,6 +35,11 @@ def build_known_background_trimap(
     exterior are true opaque foreground, and the uncertain contour between them
     is the antialiasing band for PyMatting to solve. This is intentionally not a
     general object segmenter.
+
+    Ownership is split into three passes: this trimap should recall hard
+    subject anchors, edge-residue cleanup handles tiny screen-colored pinpricks,
+    and ShadowPatch accepts only source-reprojection-consistent shadow repairs.
+    A single global foreground threshold must not try to do all three jobs.
     """
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("image_srgb must be HxWx3 uint8")
@@ -49,13 +54,29 @@ def build_known_background_trimap(
         else _fixed_known_background_thresholds(bg_threshold, fg_threshold)
     )
     effective_bg_threshold = thresholds["bg_threshold_effective"]
-    effective_fg_threshold = thresholds["fg_threshold_effective"]
 
     bg_close = d <= effective_bg_threshold
     exterior_bg = _flood_from_border(bg_close)
-    enclosed_bg = bg_close & ~exterior_bg
+    enclosed_bg_raw = bg_close & ~exterior_bg
+    enclosed_bg, enclosed_info = _filter_enclosed_background_components(enclosed_bg_raw)
     not_exterior = ~exterior_bg
     dist_to_exterior = cv2.distanceTransform(not_exterior.astype(np.uint8), cv2.DIST_L2, 3)
+    if adaptive:
+        thresholds = {
+            **thresholds,
+            **_adaptive_foreground_seed_threshold(
+                d,
+                not_exterior,
+                dist_to_exterior,
+                bg_threshold=float(effective_bg_threshold),
+                base_fg_threshold=float(thresholds["fg_threshold_effective"]),
+                base_fg_source=str(thresholds["fg_threshold_source"]),
+                requested_fg_threshold=float(fg_threshold),
+                background_noise_mad=float(thresholds["background_noise_mad"]),
+                boundary_band_px=int(boundary_band_px),
+            ),
+        }
+    effective_fg_threshold = thresholds["fg_threshold_effective"]
     boundary_info = (
         _adaptive_boundary_band(
             d,
@@ -80,20 +101,17 @@ def build_known_background_trimap(
         bg,
         subject_seed=sure_fg,
     )
-    # Cast/contact shadows on a known screen are background behavior, not
-    # subject ownership. If those scalar-darkened background pixels enter the
-    # PyMatting unknown band, the solver can return colored semi-transparent
-    # "subject" that a later shadow patch cannot cleanly subtract. Mark only
-    # source-measurable, near-subject scalar darkening as sure background; the
-    # independent shadow patch will reconstruct its opacity from the source.
-    sure_bg |= shadow_bg
-    # Shadow-like scalar darkening can have a large OKLab distance from the
-    # background, so the normal distance rule may mark it as sure foreground.
-    # That pins PyMatting alpha to 1 and exports dark green/blue screen residue
-    # as opaque material. Let measured known-B shadow evidence override
-    # distance-based foreground; the separate ShadowPatch will reconstruct the
-    # black alpha layer from the same source pixels.
-    sure_fg &= ~(enclosed_bg | shadow_bg)
+    screen_dominant_shadow = _screen_dominant_shadow_pixels(image_srgb, bg)
+    hard_shadow_bg = shadow_bg & (~sure_fg | screen_dominant_shadow)
+    # ShadowPatch is a reconstruction patch, not a trimap ownership oracle.
+    # The grown shadow-like support is useful debug evidence for the later
+    # source-reprojection patch, but it must not freely overturn strong
+    # foreground seeds: connected metal grooves can look like scalar-darkened
+    # screen when attached to a real cast shadow. Only weak/non-seed support, or
+    # strong seeds that still have screen-dominant shadow color, are pinned to
+    # background. Near-black/cross-channel subject grooves stay with PyMatting.
+    sure_bg |= hard_shadow_bg
+    sure_fg &= ~(enclosed_bg | hard_shadow_bg)
     unknown = ~(sure_fg | sure_bg)
     labels_count, _, stats, _ = cv2.connectedComponentsWithStats(enclosed_bg.astype(np.uint8), 8)
     enclosed_areas = [int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)]
@@ -115,10 +133,80 @@ def build_known_background_trimap(
         "unknown_pixels": int(unknown.sum()),
         "exterior_bg_pixels": int(exterior_bg.sum()),
         "enclosed_bg_pixels": int(enclosed_bg.sum()),
+        "enclosed_bg_pixels_raw": int(enclosed_bg_raw.sum()),
+        **enclosed_info,
         "enclosed_bg_components": int(labels_count - 1),
         "largest_enclosed_bg_component": int(max(enclosed_areas, default=0)),
-        "shadow_background": shadow_info,
+        "shadow_background": {
+            **shadow_info,
+            "hard_ownership_pixels": int(hard_shadow_bg.sum()),
+            "screen_dominant_overlap_pixels": int((shadow_bg & sure_fg & screen_dominant_shadow).sum()),
+            "protected_foreground_overlap_pixels": int((shadow_bg & sure_fg & ~screen_dominant_shadow).sum()),
+        },
     }
+
+
+def _filter_enclosed_background_components(enclosed_bg: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    """Keep real known-B cutouts while dropping tiny same-screen speckles.
+
+    Known-B holes are important: forcing them unknown lets PyMatting smear
+    subject across transparent openings. But generator pinpricks inside ornate
+    hard UI can have the exact screen color and become black dots if promoted
+    to sure background. Component area separates real cutouts from speckles
+    without encoding a sample id.
+    """
+    h, w = enclosed_bg.shape
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(enclosed_bg.astype(np.uint8), 8)
+    min_area = int(max(8.0, round(float(h * w) * 0.00005)))
+    kept = np.zeros((h, w), dtype=bool)
+    dropped_pixels = 0
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        keep = bool(area >= min_area)
+        if keep:
+            kept |= labels == label
+        else:
+            dropped_pixels += area
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "keep": keep,
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    return kept, {
+        "enclosed_bg_component_min_area": int(min_area),
+        "enclosed_bg_dropped_pixels": int(dropped_pixels),
+        "enclosed_bg_components_debug": components[:12],
+        "enclosed_bg_omitted_components": max(0, len(components) - 12),
+    }
+
+
+def _screen_dominant_shadow_pixels(image_srgb: np.ndarray, background_color: np.ndarray) -> np.ndarray:
+    """Return pixels whose source color still points at the screen channel.
+
+    Empirical rule, mechanism-driven: true green/blue-screen shadows remain
+    dominated by the screen channel even when darkened. Subject-owned dark
+    grooves often become near-black or cross-channel material; those must not
+    let shadow evidence override a strong foreground seed.
+    """
+    h, w = image_srgb.shape[:2]
+    bg = background_color.astype(np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    sorted_bg = np.sort(bg)
+    if float(bg[dominant]) < 64.0 or float(sorted_bg[-1] - sorted_bg[-2]) < 48.0:
+        return np.zeros((h, w), dtype=bool)
+    img = image_srgb.astype(np.float32)
+    other = np.max(np.delete(img, dominant, axis=2), axis=2)
+    margin = max(8.0, float(bg[dominant]) * 0.08)
+    return (img[..., dominant] > other + margin) & (img[..., dominant] <= float(bg[dominant]) * 0.98)
 
 
 def _known_background_shadow_like_background_mask(
@@ -127,11 +215,15 @@ def _known_background_shadow_like_background_mask(
     *,
     subject_seed: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Detect scalar-darkened known-B pixels that should be trimap background.
+    """Detect scalar-darkened known-B support near a subject.
 
-    Core rule: PyMatting owns the subject edge; ShadowPatch owns the shadow.
-    Scalar-darkened known-B pixels are therefore pinned to trimap background so
-    PyMatting cannot turn green-screen shadows into colored foreground.
+    This is support evidence, not final subject ownership. The caller may pin
+    weak/non-seed scalar support to trimap background to keep screen residue out
+    of the foreground, but strong foreground seeds are overridden only when the
+    source color is still screen-dominant. Screen-neutral dark material, such
+    as ornate metal grooves connected to a cast shadow, must remain subject
+    owned and let ShadowPatch prove any actual shadow by same-background
+    reprojection later.
     """
     h, w = subject_seed.shape
     if not bool(subject_seed.any()):
@@ -243,6 +335,15 @@ def _fixed_known_background_thresholds(bg_threshold: float, fg_threshold: float)
     return {
         "bg_threshold_effective": float(bg_threshold),
         "fg_threshold_effective": float(fg_threshold),
+        "fg_threshold_requested": float(fg_threshold),
+        "fg_threshold_source": "fixed",
+        "fg_threshold_percentile": None,
+        "fg_threshold_raise_cap": None,
+        "fg_threshold_seed_pixels": None,
+        "fg_threshold_largest_seed_component": None,
+        "fg_threshold_candidate_pixels": None,
+        "fg_threshold_min_seed_pixels": None,
+        "fg_threshold_min_largest_component": None,
         "background_noise_median": None,
         "background_noise_mad": None,
         "background_noise_q99": None,
@@ -354,17 +455,142 @@ def _adaptive_known_background_thresholds(
     otsu = _otsu_float_threshold(all_dist)
     min_gap = max(2.0, 6.0 * max(seed_mad, 0.25))
     if otsu is not None and otsu > bg_effective + min_gap:
-        fg_effective = max(float(fg_threshold), bg_effective + min_gap, float(otsu))
+        fg_effective = max(bg_effective + min_gap, float(otsu))
+        source = "histogram_otsu"
     else:
-        fg_effective = max(float(fg_threshold), bg_effective + min_gap)
+        fg_effective = bg_effective + min_gap
+        source = "background_noise_gap"
     return {
         "bg_threshold_effective": float(bg_effective),
         "fg_threshold_effective": float(fg_effective),
+        "fg_threshold_requested": float(fg_threshold),
+        "fg_threshold_source": source,
+        "fg_threshold_percentile": None,
+        "fg_threshold_raise_cap": None,
+        "fg_threshold_seed_pixels": None,
+        "fg_threshold_largest_seed_component": None,
+        "fg_threshold_candidate_pixels": None,
+        "fg_threshold_min_seed_pixels": None,
+        "fg_threshold_min_largest_component": None,
         "background_noise_median": seed_median,
         "background_noise_mad": float(seed_mad),
         "background_noise_q99": seed_q99,
         "histogram_otsu_threshold": float(otsu) if otsu is not None else None,
     }
+
+
+def _adaptive_foreground_seed_threshold(
+    distance: np.ndarray,
+    not_exterior: np.ndarray,
+    dist_to_exterior: np.ndarray,
+    *,
+    bg_threshold: float,
+    base_fg_threshold: float,
+    base_fg_source: str,
+    requested_fg_threshold: float,
+    background_noise_mad: float,
+    boundary_band_px: int,
+) -> dict[str, Any]:
+    """Choose high-confidence foreground seeds from this image's distance field.
+
+    Foreground thresholding is a recall hint for hard subject structure, not
+    the screen-residue removal mechanism. Pick the background/foreground valley
+    estimated from this image, then lower it only if needed for a coherent
+    anchor. Edge screen-color residue is handled by local edge passes and
+    ShadowPatch reprojection; raising this global threshold to suppress residue
+    would drop B056-like hard silver/metal edges into PyMatting unknown.
+    """
+    h, w = distance.shape
+    image_area = int(h * w)
+    min_gap = max(2.0, 6.0 * max(float(background_noise_mad), 0.25))
+    candidate_floor = float(bg_threshold) + min_gap
+    candidate_domain = not_exterior & (distance > candidate_floor)
+    values = distance[candidate_domain].astype(np.float32)
+    min_seed_pixels = int(max(16, round(float(image_area) * 0.0008)))
+    min_largest_component = int(max(8, round(float(image_area) * 0.0004)))
+    # Keep a broad safety cap so noisy histograms cannot push the foreground
+    # recall threshold into highlight-only territory. Residue cleanup is local,
+    # so the global seed threshold should bias toward preserving hard subject
+    # structure rather than excluding every weak screen-colored edge pixel.
+    raise_cap = max(candidate_floor, float(requested_fg_threshold) + 12.0)
+    if values.size < min_seed_pixels:
+        return {
+            "fg_threshold_effective": float(min(max(candidate_floor, requested_fg_threshold), raise_cap)),
+            "fg_threshold_source": "fallback_requested_insufficient_non_bg",
+            "fg_threshold_percentile": None,
+            "fg_threshold_raise_cap": float(raise_cap),
+            "fg_threshold_seed_pixels": 0,
+            "fg_threshold_largest_seed_component": 0,
+            "fg_threshold_candidate_pixels": int(values.size),
+            "fg_threshold_min_seed_pixels": int(min_seed_pixels),
+            "fg_threshold_min_largest_component": int(min_largest_component),
+        }
+
+    seed_domain = not_exterior & (dist_to_exterior > float(max(1, boundary_band_px)))
+    base = min(max(candidate_floor, float(base_fg_threshold)), raise_cap)
+    best: dict[str, Any] | None = None
+    candidates: list[tuple[float, float | None, str]] = [(base, None, f"{base_fg_source}_seed_guard")]
+    for percentile in (50.0, 40.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0):
+        candidates.append(
+            (
+                min(max(candidate_floor, float(np.percentile(values, percentile))), raise_cap),
+                float(percentile),
+                "foreground_recall_percentile_seed_guard",
+            )
+        )
+
+    seen: set[float] = set()
+    for threshold, percentile, source in candidates:
+        key = round(float(threshold), 4)
+        if key in seen:
+            continue
+        seen.add(key)
+        seed = seed_domain & (distance >= threshold)
+        seed_pixels = int(seed.sum())
+        largest = _largest_component_area(seed)
+        info = {
+            "fg_threshold_effective": float(threshold),
+            "fg_threshold_source": source,
+            "fg_threshold_percentile": percentile,
+            "fg_threshold_raise_cap": float(raise_cap),
+            "fg_threshold_seed_pixels": int(seed_pixels),
+            "fg_threshold_largest_seed_component": int(largest),
+            "fg_threshold_candidate_pixels": int(values.size),
+            "fg_threshold_min_seed_pixels": int(min_seed_pixels),
+            "fg_threshold_min_largest_component": int(min_largest_component),
+        }
+        best = info
+        if seed_pixels >= min_seed_pixels and largest >= min_largest_component:
+            return info
+
+    assert best is not None
+    # If even the recall-oriented candidates are fragmented, prefer the
+    # requested threshold when it gives a coherent anchor; otherwise use the
+    # least-bad candidate. This is a guard, not a sample override.
+    requested = min(max(candidate_floor, float(requested_fg_threshold)), raise_cap)
+    requested_seed = seed_domain & (distance >= requested)
+    requested_seed_pixels = int(requested_seed.sum())
+    requested_largest = _largest_component_area(requested_seed)
+    if requested_seed_pixels >= min_seed_pixels and requested_largest >= min_largest_component:
+        return {
+            "fg_threshold_effective": float(requested),
+            "fg_threshold_source": "requested_threshold_seed_guard",
+            "fg_threshold_percentile": None,
+            "fg_threshold_raise_cap": float(raise_cap),
+            "fg_threshold_seed_pixels": int(requested_seed_pixels),
+            "fg_threshold_largest_seed_component": int(requested_largest),
+            "fg_threshold_candidate_pixels": int(values.size),
+            "fg_threshold_min_seed_pixels": int(min_seed_pixels),
+            "fg_threshold_min_largest_component": int(min_largest_component),
+        }
+    return {**best, "fg_threshold_source": "fallback_fragmented_foreground_recall"}
+
+
+def _largest_component_area(mask: np.ndarray) -> int:
+    labels_count, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    if labels_count <= 1:
+        return 0
+    return int(stats[1:, cv2.CC_STAT_AREA].max())
 
 
 def _border_mask(shape: tuple[int, int]) -> np.ndarray:
