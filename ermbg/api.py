@@ -1496,14 +1496,6 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     trusted = subject >= float(trusted_alpha_threshold)
     repair = domain & ~trusted
 
-    base = (1.0 - subject[..., None]) * bg
-    residual = image - subject[..., None] * foreground
-    usable = (bg >= 8.0) & (base >= 1e-3)
-    weights = np.where(usable, base * base, 0.0).astype(np.float32)
-    weight_sum = np.maximum(weights.sum(axis=2), 1e-6)
-    channel_shadow = 1.0 - residual / np.maximum(base, 1.0)
-    solved_shadow = np.clip((channel_shadow * weights).sum(axis=2) / weight_sum, 0.0, 1.0).astype(np.float32)
-
     empty = np.zeros(subject.shape, dtype=np.float32)
     before = _subject_shadow_reprojection_error_map(
         image_srgb,
@@ -1512,18 +1504,53 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         subject,
         empty,
     )
+
+    direction = foreground - bg
+    direction_denom = np.sum(direction * direction, axis=2)
+    projected_subject = np.sum((image - bg) * direction, axis=2) / np.maximum(direction_denom, 1.0e-6)
+    projected_subject = np.clip(projected_subject, 0.0, 1.0).astype(np.float32)
+    usable_projection = repair & (direction_denom > 16.0)
+    subject_reduce_candidate = subject.copy()
+    subject_reduce_candidate[usable_projection] = np.minimum(
+        subject[usable_projection],
+        projected_subject[usable_projection],
+    )
+    after_reduce_candidate = _subject_shadow_reprojection_error_map(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject_reduce_candidate,
+        empty,
+    )
+    reduce_subject = (
+        usable_projection
+        & (projected_subject + (1.0 / 255.0) < subject)
+        & (after_reduce_candidate + 0.02 < before)
+    )
+    corrected_subject = subject.copy()
+    corrected_subject[reduce_subject] = projected_subject[reduce_subject]
+
+    base = (1.0 - corrected_subject[..., None]) * bg
+    residual = image - corrected_subject[..., None] * foreground
+    usable = (bg >= 8.0) & (base >= 1e-3)
+    weights = np.where(usable, base * base, 0.0).astype(np.float32)
+    weight_sum = np.maximum(weights.sum(axis=2), 1e-6)
+    channel_shadow = 1.0 - residual / np.maximum(base, 1.0)
+    solved_shadow = np.clip((channel_shadow * weights).sum(axis=2) / weight_sum, 0.0, 1.0).astype(np.float32)
+
     after_candidate = _subject_shadow_reprojection_error_map(
         image_srgb,
         background_color,
         subject_foreground_srgb,
-        subject,
+        corrected_subject,
         solved_shadow,
     )
-    write = repair & (solved_shadow > 0.0) & (after_candidate + 0.02 < before)
+    after_subject = np.where(reduce_subject, after_reduce_candidate, before)
+    write = repair & (solved_shadow > 0.0) & (after_candidate + 0.02 < after_subject)
     shadow_display = np.where(write, solved_shadow, 0.0).astype(np.float32)
     alpha, rgba_rgb_srgb = _composite_subject_with_display_shadow_srgb(
         subject_foreground_srgb,
-        subject,
+        corrected_subject,
         shadow_display,
     )
     shadow_alpha_physical = _display_shadow_alpha_to_physical_alpha(shadow_display, background_color)
@@ -1532,33 +1559,41 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         image_srgb,
         background_color,
         subject_foreground_srgb,
-        subject,
+        corrected_subject,
         shadow_display,
     )
-    applied = bool(write.any())
+    shadow_written = bool(write.any())
+    applied = bool(shadow_written or reduce_subject.any())
     before_values = before[domain]
     after_values = after[domain]
+    alpha_reduce = subject[reduce_subject] - corrected_subject[reduce_subject]
     info = {
-        "method": "unknown_domain_same_background_reconstruction",
+        "method": "unknown_domain_bidirectional_same_background_reconstruction",
         "mode": "on",
         "source": "pymatting_known_b_shadow_patch",
         "subject_source": "pymatting_known_b_raw",
         "detected": applied,
         "applied": applied,
         "reason": "" if applied else "no unknown-domain same-background improvement",
-        "pixels": int(write.sum()),
+        "pixels": int((write | reduce_subject).sum()),
+        "shadow_pixels": int(write.sum()),
+        "subject_alpha_reduced_pixels": int(reduce_subject.sum()),
+        "subject_alpha_reduce_mean": float(alpha_reduce.mean()) if alpha_reduce.size else 0.0,
+        "subject_alpha_reduce_p95": float(np.percentile(alpha_reduce, 95.0)) if alpha_reduce.size else 0.0,
+        "subject_alpha_reduce_max": float(alpha_reduce.max()) if alpha_reduce.size else 0.0,
         "repair_domain_pixels": int(domain.sum()),
         "trusted_alpha_threshold": float(trusted_alpha_threshold),
         "trusted_domain_pixels": int((domain & trusted).sum()),
-        "mean_alpha": float(shadow_display[write].mean()) if applied else 0.0,
-        "p95_alpha": float(np.percentile(shadow_display[write], 95.0)) if applied else 0.0,
-        "max_alpha": float(shadow_display[write].max()) if applied else 0.0,
+        "mean_alpha": float(shadow_display[write].mean()) if shadow_written else 0.0,
+        "p95_alpha": float(np.percentile(shadow_display[write], 95.0)) if shadow_written else 0.0,
+        "max_alpha": float(shadow_display[write].max()) if shadow_written else 0.0,
         "objective_shadow": {
             "enabled": True,
-            "mode": "trimap_unknown_exact_replay",
+            "mode": "trimap_unknown_bidirectional_exact_replay",
             "repair_domain_pixels": int(domain.sum()),
             "candidate_pixels": int((repair & (solved_shadow > 0.0)).sum()),
             "written_pixels": int(write.sum()),
+            "subject_alpha_reduced_pixels": int(reduce_subject.sum()),
             "mean_abs_error_before_u8": float(before_values.mean()) if before_values.size else 0.0,
             "mean_abs_error_after_u8": float(after_values.mean()) if after_values.size else 0.0,
             "p95_abs_error_before_u8": float(np.percentile(before_values, 95.0)) if before_values.size else 0.0,

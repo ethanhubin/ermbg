@@ -124,12 +124,45 @@ def test_matte_image_pymatting_known_b_recovers_neutral_ui_shadow():
 
     assert r.debug["shadow"]["source"] == "pymatting_known_b_shadow_patch"
     assert r.debug["shadow"]["applied"] is True
-    assert r.debug["shadow"]["method"] == "unknown_domain_same_background_reconstruction"
+    assert r.debug["shadow"]["method"] == "unknown_domain_bidirectional_same_background_reconstruction"
     assert r.debug["trimap_u8"][90, 64] == 128
     assert r.debug["shadow"]["objective_shadow"]["mean_abs_error_after_u8"] < 1.0
     assert r.debug["shadow_alpha"][90, 64] > 0.20
     assert r.alpha[90, 64] > 0.20
     assert tuple(r.rgba[90, 64, :3]) == (0, 0, 0)
+
+
+def test_pymatting_known_b_shadow_patch_reduces_overdark_raw_subject_alpha():
+    import ermbg.api as api
+
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((48, 64, 3), bg, dtype=np.uint8)
+    repair_domain = np.zeros((48, 64), dtype=bool)
+    repair_domain[16:32, 20:44] = True
+    image[repair_domain] = (0, 180, 0)
+
+    subject_alpha = np.zeros((48, 64), dtype=np.float32)
+    subject_alpha[repair_domain] = 0.50
+    foreground = np.zeros((48, 64, 3), dtype=np.uint8)
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_unknown_domain_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        repair_domain=repair_domain,
+    )
+
+    assert info["applied"] is True
+    assert info["subject_alpha_reduced_pixels"] == int(repair_domain.sum())
+    assert info["shadow_pixels"] == 0
+    assert shadow_alpha[repair_domain].max() == 0.0
+    assert np.allclose(alpha[repair_domain].mean(), 0.10, atol=0.01)
+    replay = (
+        alpha[..., None] * rgba_rgb.astype(np.float32)
+        + (1.0 - alpha[..., None]) * bg.astype(np.float32).reshape(1, 1, 3)
+    )
+    assert np.abs(replay[repair_domain] - image[repair_domain].astype(np.float32)).mean() < 1.0
 
 
 def test_matte_image_comfy_pymatting_known_b_uses_remote_node(monkeypatch):

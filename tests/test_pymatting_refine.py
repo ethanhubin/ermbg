@@ -13,6 +13,7 @@ from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
     build_known_background_trimap,
     estimate_known_background_alpha_with_pymatting,
+    estimate_stable_background_color,
     normalize_known_background_field,
 )
 from ermbg.solid_graphic import analyze_solid_bg_graphic
@@ -201,6 +202,32 @@ def test_known_background_trimap_leaves_scalar_shadow_for_shadow_patch():
     assert trimap.sure_fg[shadow].mean() == 0.0
 
 
+def test_known_background_trimap_keeps_weak_known_b_shadow_tail_unknown():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    image[28:68, 38:88] = (230, 210, 20)
+    # Mechanism: known-B is now unified, so a coherent near-subject scalar
+    # darkening against that B is shadow-tail evidence even when it is only one
+    # 8-bit step away from the background. Trimap must leave it unknown for the
+    # reconstruction stages instead of pinning it to sure-BG.
+    weak_tail = np.zeros((96, 128), dtype=bool)
+    weak_tail[69:74, 44:94] = True
+    image[weak_tail] = (0, 199, 0)
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=30.0,
+        boundary_band_px=2,
+    )
+
+    assert info["protected_transition_pixels"] >= int(weak_tail.sum() * 0.95)
+    assert trimap.unknown[weak_tail].mean() > 0.95
+    assert trimap.sure_bg[weak_tail].mean() == 0.0
+    assert trimap.sure_fg[weak_tail].mean() == 0.0
+
+
 def test_background_normalization_preserves_visible_shadow_tail():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     image = np.full((96, 144, 3), bg, dtype=np.uint8)
@@ -225,6 +252,78 @@ def test_background_normalization_preserves_visible_shadow_tail():
     assert info["shadow_normalization_gate"]["protected_pixels"] >= int(shadow.sum() * 0.95)
     assert int(np.median(normalized[~shadow, 1])) == 200
     assert int(np.median(normalized[shadow, 1])) <= 186
+
+
+def test_known_background_color_prefers_boundary_support_near_unknown():
+    path = (
+        PROJECT_ROOT
+        / "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png"
+    )
+    image = np.array(Image.open(path).convert("RGB"))
+
+    bg, info = estimate_stable_background_color(image)
+
+    assert info["accepted"] is True
+    assert info["source"] == "sure_bg_mode"
+    assert info["seed"]["accepted"] is True
+    assert info["sure_bg_pixels"] > 0
+    assert info["known_bg_source"] == "boundary_support_quantized_mode"
+    assert info["color_support_source"] == "support_boundary_near_unknown"
+    assert info["color_support_pixels"] < info["support_pixels"]
+    assert bg == tuple(info["background_color"])
+    assert bg == (3, 194, 8)
+
+
+def test_background_normalization_starts_on_any_sure_bg_mismatch():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((64, 64, 3), bg, dtype=np.uint8)
+    image[0, 0] = (0, 199, 0)
+
+    normalized, info = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+
+    assert info["applied"] is True
+    assert info["changed_bg_pixels"] == 1
+    assert tuple(int(c) for c in normalized[0, 0]) == (0, 200, 0)
+
+
+def test_background_normalization_makes_b055_sure_bg_exact_for_exact_trimap():
+    path = (
+        PROJECT_ROOT
+        / "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png"
+    )
+    image = np.array(Image.open(path).convert("RGB"))
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+
+    normalized, normalization = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+    trimap, trimap_info = build_known_background_trimap(
+        normalized,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        adaptive=True,
+    )
+
+    exact_known_bg = np.all(normalized == bg.reshape(1, 1, 3), axis=2)
+    assert normalization["applied"] is True
+    assert normalization["sure_bg_normalization_pixels"] > 200_000
+    assert normalization["protected_transition_pixels"] > 10_000
+    assert int(exact_known_bg.sum()) == normalization["sure_bg_normalization_pixels"]
+    assert trimap_info["clean_bg_threshold"] == "exact_known_b"
+    assert trimap_info["sure_bg_pixels"] > 180_000
+    assert trimap_info["unknown_pixels"] < 50_000
 
 
 def test_known_background_trimap_protects_screen_neutral_metal_grooves_from_shadow_growth():
