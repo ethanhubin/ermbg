@@ -663,6 +663,49 @@ def test_game_eval_status_counts_direct_worker_running_summary(monkeypatch, tmp_
     assert status["progress"]["percent"] == 2.4
 
 
+def test_game_eval_discovers_fixed_direct_execution_backend_summary(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    run_root = tmp_path / "out" / "pymatting_path_samples_20260602"
+    case_root = run_root / "B001_case_green_green"
+    case_root.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (0, 200, 0, 255)).save(case_root / "rgba.png")
+    summary_path = run_root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "backend": "direct-pymatting-known-b",
+                "run_count": 1,
+                "case_count": 1,
+                "ok_count": 1,
+                "runs": [
+                    {
+                        "status": "ok",
+                        "case": "B001_case_green_green",
+                        "sample_id": "B001",
+                        "input": "samples/case/green.png",
+                        "backend": "direct-pymatting-known-b",
+                        "outputs": {
+                            "rgba": "out/pymatting_path_samples_20260602/B001_case_green_green/rgba.png"
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    web._GAME_EVAL_JOBS.clear()
+
+    assert web._remote_backend_summary_path(run_root) == summary_path
+    assert web._game_eval_root_has_data(run_root) is True
+    status = web._game_eval_batch_status("pymatting_path_samples_20260602")
+    assert status["status"] == "complete"
+    assert status["progress"]["completed"] == 1
+    assert status["progress"]["total"] == 1
+
+
 def test_game_eval_running_progress_counts_partial_summaries(monkeypatch, tmp_path):
     import ermbg.web as web
 

@@ -3143,10 +3143,10 @@ def _remote_backend_summary_path(root: Path) -> Path | None:
     runs = payload.get("runs")
     if not isinstance(runs, list):
         return None
-    remote_summary_backends = {"direct-worker", "direct-corridorkey", "auto"}
+    remote_summary_backends = {"direct-worker", "auto"}
     for item in runs:
         backend = str(item.get("backend", "")) if isinstance(item, dict) else ""
-        if backend.startswith("comfy-") or backend in remote_summary_backends:
+        if backend.startswith("comfy-") or backend.startswith("direct-") or backend in remote_summary_backends:
             return path
     return None
 
@@ -4049,7 +4049,9 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         ok_count += 1 if is_ok else 0
         sample_id, case_id, screen = _case_id_from_comfy_run(item, index)
         metadata = item.get("case_metadata") if isinstance(item.get("case_metadata"), dict) else {}
-        outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else {}
+        outputs = item.get("outputs") if isinstance(item.get("outputs"), dict) else None
+        if outputs is None:
+            outputs = item.get("output") if isinstance(item.get("output"), dict) else {}
         metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
         remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
         timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}

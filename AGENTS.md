@@ -30,6 +30,17 @@
   `tests/test_runtime_capabilities.py`。
 - 生成的 eval/debug 产物必须放在 `out/` 下一个自包含的 batch 目录中，
   并附带一份机器可读的 summary。
+- 做某一算法路径的批量样本测试时，必须显式固定 execution backend，
+  例如 PyMatting Known-B 使用
+  `--fixed-execution-backend direct-pymatting-known-b`。不要只用
+  “这些样本当前会被 auto route 到该路径”来代替固定路线；若有样本路由到
+  其它 backend，应记录为 error，而不是静默混跑。
+- 批量测试产物必须写标准 `ermbg.run.v1` manifest：batch 根目录要有
+  `manifest.json` 和 `summary.json`，每个 case 目录也要有 `manifest.json`
+  和 `summary.json`。summary 中要记录固定 backend、实际 execution backend、
+  case manifest 路径和输出文件路径，保证 Web 后台列表稳定发现。最终
+  `rgba` 是通用输出；`trimap`、`alpha`、`shadow` 等诊断图只在该后端实际
+  产出时写入并列入 manifest，不作为所有 backend 的强制要求。
 
 ## 算法规则
 

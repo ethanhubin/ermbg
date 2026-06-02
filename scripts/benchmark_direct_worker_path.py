@@ -11,10 +11,12 @@ Typical remote run on the Windows/4090 host:
     cd C:/Users/darkv/ermbg_src
     E:/ComfyUI/.venv/Scripts/python.exe scripts/benchmark_direct_worker_path.py \
       --sample-id B001,B002,I001,I011,C001,B055 \
+      --fixed-execution-backend direct-pymatting-known-b \
       --compare-summary out/auto_routematte_routefix_20260531/summary.json
 
 Outputs are written under out/direct_worker_benchmark_<YYYYMMDD>_vNNN by
-default. Each case gets a summary.json and, unless disabled, an rgba.png.
+default. Each case gets a summary.json, a standard ERMBG manifest.json, and,
+unless disabled, an rgba.png.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from ermbg.artifacts import build_run_manifest, write_run_manifest
 from ermbg.direct_worker import DirectCorridorKeyClientFactory, direct_matte_auto, direct_matte_from_decision
 from ermbg.router import classify_route
 
@@ -80,6 +83,13 @@ def _rel(path: Path) -> str:
         return str(path.resolve().relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
+
+
+def _project_path(path_value: str | Path | None) -> Path | None:
+    if path_value is None:
+        return None
+    path = Path(path_value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def _json_safe(value: Any) -> Any:
@@ -210,6 +220,56 @@ def _write_rgba(path: Path, rgba: np.ndarray) -> None:
     Image.fromarray(rgba.astype(np.uint8), mode="RGBA").save(path)
 
 
+def _write_rgb(path: Path, rgb: np.ndarray) -> None:
+    Image.fromarray(rgb.astype(np.uint8), mode="RGB").save(path)
+
+
+def _write_mask(path: Path, mask: np.ndarray) -> None:
+    arr = np.asarray(mask)
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = np.clip(arr, 0.0, 1.0) * 255.0 + 0.5
+    Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
+
+
+def _response_image_arrays(response: Any) -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {}
+    rgba = getattr(response, "rgba", None)
+    if isinstance(rgba, np.ndarray):
+        arrays["rgba"] = rgba
+    alpha = getattr(response, "alpha", None)
+    if isinstance(alpha, np.ndarray):
+        arrays["alpha"] = alpha
+    foreground = getattr(response, "foreground_srgb", None)
+    if isinstance(foreground, np.ndarray):
+        arrays["foreground"] = foreground
+    debug = getattr(response, "debug", None)
+    if isinstance(debug, dict):
+        trimap = debug.get("trimap_u8")
+        if isinstance(trimap, np.ndarray) and trimap.ndim == 2:
+            arrays["trimap"] = trimap
+        shadow = debug.get("shadow_alpha")
+        if isinstance(shadow, np.ndarray):
+            arrays["shadow"] = shadow
+        shadow_physical = debug.get("shadow_alpha_physical")
+        if isinstance(shadow_physical, np.ndarray):
+            arrays["shadow_physical"] = shadow_physical
+    return arrays
+
+
+def _write_case_images(case_dir: Path, arrays: dict[str, np.ndarray]) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for key, array in arrays.items():
+        path = case_dir / f"{key}.png"
+        if key == "rgba":
+            _write_rgba(path, array)
+        elif key == "foreground":
+            _write_rgb(path, array)
+        else:
+            _write_mask(path, array)
+        outputs[key] = _rel(path)
+    return outputs
+
+
 def _classify_prepared_case(
     index: int,
     case: dict[str, Any],
@@ -245,7 +305,32 @@ def _classify_prepared_case(
 
 
 def _cpu_parallel_backend(decision: Any) -> bool:
-    return getattr(decision, "backend", None) == "comfy-pymatting-known-b"
+    return _execution_backend_from_decision(decision) == "direct-pymatting-known-b"
+
+
+def _execution_backend_from_decision(decision: Any) -> str:
+    selected_backend = str(getattr(decision, "backend", "") or "")
+    if selected_backend == "comfy-pymatting-known-b":
+        return "direct-pymatting-known-b"
+    if selected_backend == "comfy-corridorkey":
+        return "direct-corridorkey"
+    if selected_backend == "passthrough":
+        return "direct-passthrough"
+    return selected_backend
+
+
+def _requested_backend(args: argparse.Namespace) -> str:
+    return str(getattr(args, "fixed_execution_backend", "") or "direct-auto")
+
+
+def _fixed_backend_mismatch(prepared: PreparedCase, args: argparse.Namespace) -> str | None:
+    fixed = str(getattr(args, "fixed_execution_backend", "") or "")
+    if not fixed:
+        return None
+    actual = _execution_backend_from_decision(prepared.decision)
+    if actual == fixed:
+        return None
+    return f"fixed execution backend {fixed!r} rejected routed backend {actual!r}"
 
 
 def _run_prepared_case_in_main(
@@ -274,10 +359,8 @@ def _run_prepared_case_in_main(
     timings.update(result.timings)
     if args.write_images:
         t = time.perf_counter()
-        rgba_path = case_dir / "rgba.png"
-        _write_rgba(rgba_path, result.response.rgba)
-        timings["encode_rgba_sec"] = time.perf_counter() - t
-        output["rgba"] = _rel(rgba_path)
+        output.update(_write_case_images(case_dir, _response_image_arrays(result.response)))
+        timings["encode_images_sec"] = time.perf_counter() - t
     timings["total_sec"] = (
         time.perf_counter() - total_start
         + timings.get("load_decode_sec", 0.0)
@@ -290,7 +373,7 @@ def _run_prepared_case_in_main(
         input=_rel(prepared.input_path),
         category=str(prepared.case.get("category", "")),
         image_size=prepared.image_size,
-        requested_backend="direct-auto",
+        requested_backend=_requested_backend(args),
         selected_backend=str(result.metadata.get("selected_backend")),
         execution_backend=str(result.metadata.get("execution_backend")),
         route=str(result.metadata.get("route")),
@@ -324,7 +407,7 @@ def _cpu_case_worker(payload: dict[str, Any]) -> dict[str, Any]:
         )
         timings.update(result.timings)
         if payload["write_images"]:
-            output["rgba_array"] = result.response.rgba
+            output["arrays"] = _response_image_arrays(result.response)
         timings["worker_elapsed_sec"] = time.perf_counter() - total_start
         # In parallel mode, ``total_sec`` remains per-case compute accounting;
         # batch wall-clock speedup is reported separately at the aggregate level.
@@ -368,14 +451,13 @@ def _row_from_worker_payload(
     timings = dict(payload["timings"])
     output: dict[str, str] = {}
     worker_output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
-    rgba = worker_output.get("rgba_array") if isinstance(worker_output, dict) else None
-    if args.write_images and isinstance(rgba, np.ndarray):
+    arrays = worker_output.get("arrays") if isinstance(worker_output, dict) else None
+    if args.write_images and isinstance(arrays, dict):
         t = time.perf_counter()
-        rgba_path = case_dir / "rgba.png"
-        _write_rgba(rgba_path, rgba)
-        timings["encode_rgba_sec"] = time.perf_counter() - t
-        timings["total_sec"] += timings["encode_rgba_sec"]
-        output["rgba"] = _rel(rgba_path)
+        image_arrays = {str(key): value for key, value in arrays.items() if isinstance(value, np.ndarray)}
+        output.update(_write_case_images(case_dir, image_arrays))
+        timings["encode_images_sec"] = time.perf_counter() - t
+        timings["total_sec"] += timings["encode_images_sec"]
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     return CaseBenchmark(
         status=str(payload["status"]),
@@ -384,7 +466,7 @@ def _row_from_worker_payload(
         input=_rel(prepared.input_path),
         category=str(prepared.case.get("category", "")),
         image_size=prepared.image_size,
-        requested_backend="direct-auto",
+        requested_backend=_requested_backend(args),
         selected_backend=str(metadata.get("selected_backend")) if metadata else None,
         execution_backend=str(metadata.get("execution_backend")) if metadata else None,
         route=str(metadata.get("route")) if metadata else None,
@@ -468,6 +550,102 @@ def _summarize(rows: list[CaseBenchmark]) -> dict[str, Any]:
     }
 
 
+def _benchmark_backend(row: CaseBenchmark) -> str:
+    return row.execution_backend or row.selected_backend or row.requested_backend
+
+
+def _row_payload(row: CaseBenchmark, *, artifact_manifest: Path | None = None) -> dict[str, Any]:
+    payload = asdict(row)
+    payload["backend"] = _benchmark_backend(row)
+    payload["outputs"] = dict(row.output)
+    if artifact_manifest is not None:
+        payload["artifact_manifest"] = _rel(artifact_manifest)
+    return payload
+
+
+def _write_case_manifest(*, row: CaseBenchmark, case_dir: Path, summary_path: Path) -> Path:
+    output_paths = {
+        key: path
+        for key, value in row.output.items()
+        if (path := _project_path(value)) is not None and path.exists()
+    }
+    manifest = build_run_manifest(
+        run_dir=case_dir,
+        input_path=_project_path(row.input),
+        outputs=output_paths,
+        request={
+            "backend": row.requested_backend,
+            "effective_backend": _benchmark_backend(row),
+            "source_input": row.input,
+        },
+        route={
+            "selected_backend": row.selected_backend,
+            "route": row.route,
+            "asset_kind": row.asset_kind,
+            "parameter_profile": row.parameter_profile,
+            "execution_profile": row.execution_profile,
+        },
+        runtime={
+            "kind": "game-eval",
+            "backend": _benchmark_backend(row),
+            "selected_backend": row.selected_backend,
+            "execution_backend": row.execution_backend,
+            "elapsed_sec_client": row.timings.get("total_sec"),
+        },
+        report_path=summary_path,
+        extra={
+            "case_metadata": {
+                "sample_id": row.sample_id,
+                "category": row.category,
+                "case": row.case,
+            }
+        },
+    )
+    return write_run_manifest(case_dir / "manifest.json", manifest)
+
+
+def _write_batch_manifest(
+    *,
+    out_root: Path,
+    aggregate: dict[str, Any],
+    summary_path: Path,
+    manifest_path: Path,
+) -> Path:
+    case_manifests = [
+        row.get("artifact_manifest")
+        for row in aggregate.get("runs", [])
+        if isinstance(row, dict) and isinstance(row.get("artifact_manifest"), str)
+    ]
+    backends = sorted(
+        {
+            str(row.get("backend"))
+            for row in aggregate.get("runs", [])
+            if isinstance(row, dict) and row.get("backend")
+        }
+    )
+    manifest = build_run_manifest(
+        run_dir=out_root,
+        outputs={"summary": summary_path},
+        request={
+            "backend": aggregate.get("backend"),
+            "case_count": aggregate.get("case_count"),
+            "manifest": _rel(manifest_path),
+            "sample_filter": aggregate.get("sample_filter"),
+            "category_filter": aggregate.get("category_filter"),
+        },
+        route={},
+        runtime={
+            "kind": "game-eval",
+            "backend": aggregate.get("backend"),
+            "backends": backends,
+            "ok_count": aggregate.get("ok_count"),
+        },
+        report_path=summary_path,
+        extra={"case_manifests": case_manifests},
+    )
+    return write_run_manifest(out_root / "manifest.json", manifest)
+
+
 def _write_case_and_aggregate(
     *,
     row: CaseBenchmark,
@@ -479,15 +657,24 @@ def _write_case_and_aggregate(
 ) -> dict[str, Any]:
     case_dir = out_root / row.case
     case_dir.mkdir(parents=True, exist_ok=True)
-    (case_dir / "summary.json").write_text(json.dumps(asdict(row), indent=2, ensure_ascii=False), encoding="utf-8")
+    case_summary_path = case_dir / "summary.json"
+    case_manifest = _write_case_manifest(row=row, case_dir=case_dir, summary_path=case_summary_path)
+    case_payload = _row_payload(row, artifact_manifest=case_manifest)
+    case_summary_path.write_text(json.dumps(case_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     rows_by_case[row.case] = row
     ordered_rows = [rows_by_case[_case_key(case)] for case in cases if _case_key(case) in rows_by_case]
+    fixed_backend = str(getattr(args, "fixed_execution_backend", "") or "")
     aggregate = {
         "batch": _rel(out_root),
+        "backend": fixed_backend or "direct-worker-benchmark",
         "manifest": _rel(args.manifest),
         "case_count": len(cases),
+        "run_count": len(cases),
         "ok_count": sum(1 for item in ordered_rows if item.status == "ok"),
         "write_images": bool(args.write_images),
+        "fixed_execution_backend": fixed_backend or None,
+        "sample_filter": args.sample_id,
+        "category_filter": args.category,
         "warmup_sample_id": args.warmup_sample_id or None,
         "compare_summary": _rel(args.compare_summary) if args.compare_summary else None,
         "cpu_workers": int(getattr(args, "cpu_workers", 1)),
@@ -495,9 +682,17 @@ def _write_case_and_aggregate(
         "batch_elapsed_sec": time.perf_counter() - batch_start,
         "runtime": _runtime_info(),
         "timing_summary": _summarize(ordered_rows),
-        "runs": [asdict(item) for item in ordered_rows],
+        "runs": [_row_payload(item, artifact_manifest=out_root / item.case / "manifest.json") for item in ordered_rows],
     }
-    (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+    batch_summary_path = out_root / "summary.json"
+    batch_manifest = _write_batch_manifest(
+        out_root=out_root,
+        aggregate=aggregate,
+        summary_path=batch_summary_path,
+        manifest_path=args.manifest,
+    )
+    aggregate["artifact_manifest"] = _rel(batch_manifest)
+    batch_summary_path.write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
     return aggregate
 
 
@@ -592,6 +787,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     error=str(exc),
                 )
                 print(f"  ERROR {exc}", flush=True)
+                aggregate = _write_case_and_aggregate(
+                    row=row,
+                    rows_by_case=rows_by_case,
+                    cases=cases,
+                    out_root=out_root,
+                    args=args,
+                    batch_start=batch_start,
+                )
+                continue
+            mismatch = _fixed_backend_mismatch(prepared, args)
+            if mismatch is not None:
+                row = _error_row(
+                    case=case,
+                    case_key=case_key,
+                    input_path=input_path,
+                    timings=dict(prepared.route_timings),
+                    compare_rows=compare_rows,
+                    error=mismatch,
+                    image_size=prepared.image_size,
+                )
+                row.requested_backend = _requested_backend(args)
+                row.selected_backend = str(getattr(prepared.decision, "backend", "") or "")
+                row.execution_backend = _execution_backend_from_decision(prepared.decision)
+                row.route = str(getattr(prepared.decision, "route", "") or "")
+                row.asset_kind = str(getattr(prepared.decision, "asset_kind", "") or "")
+                row.execution_profile = str(getattr(prepared.decision, "params", {}).get("execution_profile", "") or "")
+                print(f"  ERROR {mismatch}", flush=True)
                 aggregate = _write_case_and_aggregate(
                     row=row,
                     rows_by_case=rows_by_case,
@@ -701,12 +923,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             executor.shutdown(wait=True)
 
     if not aggregate:
+        fixed_backend = str(getattr(args, "fixed_execution_backend", "") or "")
         aggregate = {
             "batch": _rel(out_root),
+            "backend": fixed_backend or "direct-worker-benchmark",
             "manifest": _rel(args.manifest),
             "case_count": 0,
+            "run_count": 0,
             "ok_count": 0,
             "write_images": bool(args.write_images),
+            "fixed_execution_backend": fixed_backend or None,
             "warmup_sample_id": args.warmup_sample_id or None,
             "compare_summary": _rel(args.compare_summary) if args.compare_summary else None,
             "cpu_workers": cpu_workers,
@@ -716,7 +942,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "timing_summary": _summarize([]),
             "runs": [],
         }
-        (out_root / "summary.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
+        batch_summary_path = out_root / "summary.json"
+        batch_manifest = _write_batch_manifest(
+            out_root=out_root,
+            aggregate=aggregate,
+            summary_path=batch_summary_path,
+            manifest_path=args.manifest,
+        )
+        aggregate["artifact_manifest"] = _rel(batch_manifest)
+        batch_summary_path.write_text(json.dumps(aggregate, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return aggregate
 
@@ -730,6 +964,12 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Run every manifest case instead of the representative sample-id list.")
     parser.add_argument("--category", default="", help="Optional comma-separated category filter.")
     parser.add_argument("--compare-summary", type=Path, default=None)
+    parser.add_argument(
+        "--fixed-execution-backend",
+        choices=("direct-pymatting-known-b", "direct-corridorkey", "direct-passthrough"),
+        default="",
+        help="Require every selected case to execute on this direct backend; mismatches are recorded as errors.",
+    )
     parser.add_argument("--shadow-mode", choices=("on", "off", "auto"), default="on")
     parser.add_argument("--corridorkey-screen-mode", choices=("auto", "green", "blue"), default="auto")
     parser.add_argument("--corridorkey-preset", choices=("auto", "detail_safe", "spill_safe", "manual"), default="auto")
