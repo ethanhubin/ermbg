@@ -1288,11 +1288,43 @@ def _known_background_shadow_like_background_mask(
             "components": components[:12],
             "omitted_components": max(0, len(components) - 12),
         }
-    return kept, {
+    weak_tail_min = max(0.75 / 255.0, strength_floor + 0.25 / 255.0)
+    weak_tail_candidate = (strength >= weak_tail_min) & (err <= err_max) & (off_excess <= off_excess_max)
+    if bool(weak_tail_candidate.any()) and bool(kept.any()):
+        tail_labels_count, tail_labels, tail_stats, _ = cv2.connectedComponentsWithStats(
+            weak_tail_candidate.astype(np.uint8),
+            8,
+        )
+        seeded_labels = np.unique(tail_labels[kept])
+        seeded_labels = seeded_labels[seeded_labels > 0]
+        connected_tail = (
+            np.isin(tail_labels, seeded_labels) & weak_tail_candidate
+            if seeded_labels.size
+            else np.zeros_like(kept, dtype=bool)
+        )
+        tail_component_areas = [
+            int(tail_stats[label, cv2.CC_STAT_AREA])
+            for label in seeded_labels
+            if 0 < label < tail_labels_count
+        ]
+    else:
+        connected_tail = np.zeros_like(kept, dtype=bool)
+        tail_component_areas = []
+    # The near-subject pass provides a coherent anchor; this connected pass
+    # follows only scalar known-B darkening in the same component so soft shadow
+    # tails can fade to zero instead of being clipped by the near-subject cap.
+    shadow_mask = kept | connected_tail
+    return shadow_mask, {
         "enabled": True,
-        "reason": "" if bool(kept.any()) else "no scalar-darkening background near subject",
-        "pixels": int(kept.sum()),
+        "reason": "" if bool(shadow_mask.any()) else "no scalar-darkening background near subject",
+        "pixels": int(shadow_mask.sum()),
         "candidate_pixels": int(candidate.sum()),
+        "anchor_pixels": int(kept.sum()),
+        "weak_tail_candidate_pixels": int(weak_tail_candidate.sum()),
+        "connected_tail_pixels": int((connected_tail & ~kept).sum()),
+        "weak_tail_strength_min": float(weak_tail_min),
+        "connected_tail_component_areas": tail_component_areas[:12],
+        "connected_tail_omitted_components": max(0, len(tail_component_areas) - 12),
         "near_subject_px": near_px,
         "strength_min": float(strength_min),
         "err_max_u8": float(err_max),

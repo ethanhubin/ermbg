@@ -234,6 +234,32 @@ def test_known_background_trimap_keeps_weak_known_b_shadow_tail_unknown():
     assert trimap.sure_fg[weak_tail].mean() == 0.0
 
 
+def test_known_background_trimap_follows_connected_weak_shadow_tail_beyond_near_subject_cap():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((192, 160, 3), bg, dtype=np.uint8)
+    image[28:68, 44:108] = (30, 120, 245)
+    strong_shadow = np.zeros((192, 160), dtype=bool)
+    strong_shadow[78:94, 48:112] = True
+    weak_tail = np.zeros((192, 160), dtype=bool)
+    weak_tail[94:154, 48:112] = True
+    image[strong_shadow] = (0, 150, 0)
+    image[weak_tail] = (0, 199, 0)
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=30.0,
+        boundary_band_px=2,
+    )
+
+    shadow_info = info["shadow_background"]
+    assert shadow_info["anchor_pixels"] >= int(strong_shadow.sum() * 0.9)
+    assert shadow_info["connected_tail_pixels"] >= int(weak_tail.sum() * 0.8)
+    assert trimap.unknown[weak_tail].mean() > 0.8
+    assert trimap.sure_bg[weak_tail].mean() < 0.2
+
+
 def test_background_normalization_preserves_visible_shadow_tail():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     image = np.full((96, 144, 3), bg, dtype=np.uint8)
