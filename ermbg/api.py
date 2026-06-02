@@ -1505,6 +1505,31 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         empty,
     )
 
+    bg3 = np.asarray(background_color, dtype=np.float32).reshape(3)
+    dominant = int(np.argmax(bg3))
+    sorted_bg = np.sort(bg3)
+    screen_dominant_bg = bool(float(bg3[dominant]) >= 64.0 and float(sorted_bg[-1] - sorted_bg[-2]) >= 48.0)
+    source_shadow = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    source_shadow_replay = (1.0 - source_shadow[..., None]) * bg
+    source_shadow_error = np.mean(np.abs(source_shadow_replay - image), axis=2)
+    foreground_other_max = np.max(np.delete(foreground, dominant, axis=2), axis=2)
+    foreground_screen_like = (
+        screen_dominant_bg
+        & (foreground[..., dominant] > foreground_other_max + max(8.0, float(bg3[dominant]) * 0.04))
+        & (foreground[..., dominant] < float(bg3[dominant]) * 0.70)
+    )
+    # If the source pixel is a clean scalar darkening of the known background
+    # and PyMatting solved it as screen-colored foreground, prefer a real black
+    # shadow layer over "green/blue foreground + lower subject alpha". This is
+    # the enclosed-hole counterpart of the B003 hard-shadow failure mode.
+    source_shadow_candidate = (
+        repair
+        & foreground_screen_like
+        & (subject > 0.05)
+        & (source_shadow > 0.035)
+        & (source_shadow_error < 8.0)
+    )
+
     direction = foreground - bg
     direction_denom = np.sum(direction * direction, axis=2)
     projected_subject = np.sum((image - bg) * direction, axis=2) / np.maximum(direction_denom, 1.0e-6)
@@ -1524,11 +1549,58 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     )
     reduce_subject = (
         usable_projection
+        & ~source_shadow_candidate
         & (projected_subject + (1.0 / 255.0) < subject)
         & (after_reduce_candidate + 0.02 < before)
     )
     corrected_subject = subject.copy()
     corrected_subject[reduce_subject] = projected_subject[reduce_subject]
+
+    forced_shadow_subject = corrected_subject.copy()
+    forced_shadow_subject[source_shadow_candidate] = 0.0
+    forced_shadow_display = np.where(source_shadow_candidate, source_shadow, 0.0).astype(np.float32)
+    after_forced_shadow = _subject_shadow_reprojection_error_map(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        forced_shadow_subject,
+        forced_shadow_display,
+    )
+    after_subject = np.where(reduce_subject, after_reduce_candidate, before)
+    force_shadow_write = source_shadow_candidate & (after_forced_shadow + 0.02 < after_subject)
+    relaxed_screen_residue = (
+        screen_dominant_bg
+        & (foreground[..., dominant] > foreground_other_max + max(4.0, float(bg3[dominant]) * 0.02))
+        & (foreground[..., dominant] < float(bg3[dominant]) * 0.85)
+    )
+    clean_source_shadow = (
+        repair
+        & relaxed_screen_residue
+        & (subject > 0.05)
+        & (source_shadow > 0.035)
+        & (source_shadow_error < 8.0)
+    )
+    if bool(clean_source_shadow.any()):
+        from scipy import ndimage
+
+        labels, _ = ndimage.label(clean_source_shadow, structure=np.ones((3, 3), dtype=bool))
+        seeded_labels = np.unique(labels[force_shadow_write]) if bool(force_shadow_write.any()) else np.array([])
+        seeded_labels = seeded_labels[seeded_labels > 0]
+        seeded_component_write = (
+            np.isin(labels, seeded_labels) & clean_source_shadow
+            if seeded_labels.size
+            else np.zeros_like(force_shadow_write, dtype=bool)
+        )
+        source_shadow_connected_write = seeded_component_write & ~force_shadow_write
+    else:
+        source_shadow_connected_write = np.zeros_like(force_shadow_write, dtype=bool)
+
+    source_shadow_write = force_shadow_write | source_shadow_connected_write
+    reduce_subject &= ~source_shadow_write
+    corrected_subject = subject.copy()
+    corrected_subject[reduce_subject] = projected_subject[reduce_subject]
+    corrected_subject[source_shadow_write] = 0.0
+    after_subject = np.where(reduce_subject, after_reduce_candidate, before)
 
     base = (1.0 - corrected_subject[..., None]) * bg
     residual = image - corrected_subject[..., None] * foreground
@@ -1545,9 +1617,10 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         corrected_subject,
         solved_shadow,
     )
-    after_subject = np.where(reduce_subject, after_reduce_candidate, before)
     write = repair & (solved_shadow > 0.0) & (after_candidate + 0.02 < after_subject)
+    write |= source_shadow_write
     shadow_display = np.where(write, solved_shadow, 0.0).astype(np.float32)
+    shadow_display[source_shadow_write] = source_shadow[source_shadow_write]
     alpha, rgba_rgb_srgb = _composite_subject_with_display_shadow_srgb(
         subject_foreground_srgb,
         corrected_subject,
@@ -1593,6 +1666,10 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
             "repair_domain_pixels": int(domain.sum()),
             "candidate_pixels": int((repair & (solved_shadow > 0.0)).sum()),
             "written_pixels": int(write.sum()),
+            "source_shadow_candidate_pixels": int(source_shadow_candidate.sum()),
+            "source_shadow_seed_written_pixels": int(force_shadow_write.sum()),
+            "source_shadow_connected_written_pixels": int(source_shadow_connected_write.sum()),
+            "source_shadow_written_pixels": int(source_shadow_write.sum()),
             "subject_alpha_reduced_pixels": int(reduce_subject.sum()),
             "mean_abs_error_before_u8": float(before_values.mean()) if before_values.size else 0.0,
             "mean_abs_error_after_u8": float(after_values.mean()) if after_values.size else 0.0,

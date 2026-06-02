@@ -260,6 +260,35 @@ def test_background_normalization_preserves_visible_shadow_tail():
     assert int(np.median(normalized[shadow, 1])) <= 186
 
 
+def test_background_normalization_cleans_isolated_screen_colored_bg_residue():
+    bg = np.array([3, 178, 10], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    subject = np.zeros((96, 128), dtype=bool)
+    subject[28:58, 40:88] = True
+    coherent_shadow = np.zeros((96, 128), dtype=bool)
+    coherent_shadow[62:72, 44:84] = True
+    isolated_residue = np.zeros((96, 128), dtype=bool)
+    isolated_residue[88:90, 70:78] = True
+    image[subject] = (230, 210, 20)
+    image[coherent_shadow] = (3, 150, 2)
+    image[isolated_residue] = (6, 145, 10)
+
+    normalized, info = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+
+    cleanup = info["isolated_bg_residue_cleanup"]
+    assert info["applied"] is True
+    assert cleanup["cleaned_pixels"] == int(isolated_residue.sum())
+    assert info["isolated_bg_residue_cleanup_pixels"] == int(isolated_residue.sum())
+    assert np.all(normalized[isolated_residue] == bg.reshape(1, 3))
+    assert int(np.median(normalized[coherent_shadow, 1])) <= 152
+
+
 def test_known_background_color_prefers_boundary_support_near_unknown():
     path = (
         PROJECT_ROOT
@@ -326,7 +355,9 @@ def test_background_normalization_makes_b055_sure_bg_exact_for_exact_trimap():
     assert normalization["applied"] is True
     assert normalization["sure_bg_normalization_pixels"] > 200_000
     assert normalization["protected_transition_pixels"] > 10_000
-    assert int(exact_known_bg.sum()) == normalization["sure_bg_normalization_pixels"]
+    assert int(exact_known_bg.sum()) == (
+        normalization["sure_bg_normalization_pixels"] + normalization["isolated_bg_residue_cleanup_pixels"]
+    )
     assert trimap_info["clean_bg_threshold"] == "exact_known_b"
     assert trimap_info["sure_bg_pixels"] > 180_000
     assert trimap_info["unknown_pixels"] < 50_000

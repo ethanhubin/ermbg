@@ -92,6 +92,13 @@ def normalize_known_background_field(
     image = image_srgb.astype(np.float32)
     bgf = bg.astype(np.float32).reshape(3)
     source_shadow_alpha = _known_background_display_shadow_alpha(image_srgb, bg)
+    isolated_residue_cleanup, isolated_residue_info = _known_background_isolated_bg_residue_cleanup_mask(
+        image_srgb,
+        bg,
+        subject_seed=ownership.sure_fg,
+        shadow_unknown=ownership.shadow_unknown,
+        source_shadow_alpha=source_shadow_alpha,
+    )
     # Background normalization is allowed only where the source pixel implies
     # essentially no transferable screen darkening. Values above the weak
     # visible-shadow floor are protected so broad soft tails remain available
@@ -113,7 +120,7 @@ def normalize_known_background_field(
     residual_p95 = float(np.percentile(residual_abs, 95.0)) if bg_residual.size else 0.0
     residual_std = float(np.std(bg_residual.astype(np.float32), axis=0).mean()) if bg_residual.size else 0.0
     changed_bg_pixels = sure_bg_normalization & np.any(image_srgb != bg.reshape(1, 1, 3), axis=2)
-    if not bool(changed_bg_pixels.any()):
+    if not bool(changed_bg_pixels.any()) and not bool(isolated_residue_cleanup.any()):
         return image_srgb, {
             "enabled": True,
             "applied": False,
@@ -124,6 +131,8 @@ def normalize_known_background_field(
             "residual_abs_p95_u8": residual_p95,
             "residual_std_u8": residual_std,
             "changed_bg_pixels": 0,
+            "isolated_bg_residue_cleanup_pixels": 0,
+            "isolated_bg_residue_cleanup": isolated_residue_info,
             "ownership": ownership.debug,
             **thresholds,
         }
@@ -199,6 +208,7 @@ def normalize_known_background_field(
     normalized = image * (1.0 - weight[..., None]) + bgf.reshape(1, 1, 3) * weight[..., None]
     normalized_u8 = np.clip(normalized + 0.5, 0, 255).astype(np.uint8)
     normalized_u8[sure_bg_normalization] = bg.reshape(1, 3)
+    normalized_u8[isolated_residue_cleanup] = bg.reshape(1, 3)
     changed = np.abs(normalized_u8.astype(np.int16) - image_srgb.astype(np.int16)).mean(axis=2) > 0
     return normalized_u8, {
         "enabled": True,
@@ -210,6 +220,8 @@ def normalize_known_background_field(
         "protected_transition_pixels": int(ownership.protected_transition.sum()),
         "shadow_unknown_pixels": int(ownership.shadow_unknown.sum()),
         "changed_bg_pixels": int(changed_bg_pixels.sum()),
+        "isolated_bg_residue_cleanup_pixels": int(isolated_residue_cleanup.sum()),
+        "isolated_bg_residue_cleanup": isolated_residue_info,
         "drift_probe_pixels": int(drift_probe.sum()),
         "enclosed_bg_pixels": int(ownership.enclosed_bg.sum()),
         "enclosed_bg_component_min_area": int(ownership.enclosed_info.get("enclosed_bg_component_min_area", 0)),
@@ -258,6 +270,101 @@ def _smoothstep_array(edge0: float, edge1: float, value: np.ndarray) -> np.ndarr
         return (value >= edge1).astype(np.float32)
     x = np.clip((value.astype(np.float32) - float(edge0)) / (float(edge1) - float(edge0)), 0.0, 1.0)
     return (x * x * (3.0 - 2.0 * x)).astype(np.float32)
+
+
+def _known_background_isolated_bg_residue_cleanup_mask(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    subject_seed: np.ndarray,
+    shadow_unknown: np.ndarray,
+    source_shadow_alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Find isolated screen-colored background dirt that should become known-B.
+
+    Coherent scalar darkening tied to a subject is shadow evidence and stays
+    unknown. Detached components that are close to the known-B color line and
+    do not touch subject seeds are treated as dirty background residue before
+    PyMatting sees them.
+    """
+    h, w = image_srgb.shape[:2]
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    others = [idx for idx in range(3) if idx != dominant]
+    if float(bg[dominant]) < 64.0 or float(bg[dominant] - np.max(bg[others])) < 48.0:
+        empty = np.zeros((h, w), dtype=bool)
+        return empty, {
+            "enabled": False,
+            "reason": "background is not screen-dominant",
+            "candidate_pixels": 0,
+            "cleaned_pixels": 0,
+        }
+
+    image = image_srgb.astype(np.float32)
+    other_max = np.max(image[..., others], axis=2)
+    screen_like = (
+        (image[..., dominant] > other_max + max(4.0, float(bg[dominant]) * 0.02))
+        & (image[..., dominant] < float(bg[dominant]) * 0.90)
+        & (other_max <= max(12.0, float(np.max(bg[others])) + 12.0))
+    )
+    shadow_replay = (1.0 - source_shadow_alpha[..., None]) * bg.reshape(1, 1, 3)
+    shadow_error = np.mean(np.abs(shadow_replay - image), axis=2)
+    candidate = (
+        screen_like
+        & (source_shadow_alpha > 0.035)
+        & (shadow_error < 8.0)
+        & ~np.asarray(subject_seed, dtype=bool)
+        & ~np.asarray(shadow_unknown, dtype=bool)
+    )
+    if not bool(candidate.any()):
+        return np.zeros((h, w), dtype=bool), {
+            "enabled": True,
+            "reason": "no isolated background residue candidates",
+            "candidate_pixels": 0,
+            "cleaned_pixels": 0,
+        }
+
+    subject_touch = cv2.dilate(subject_seed.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+    shadow_touch = cv2.dilate(shadow_unknown.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
+    # Detached screen-darkened strips can be wider than pinpricks, but they are
+    # still weak background residue when they do not touch the subject. The
+    # absolute cap keeps this from flattening a large detached cast shadow.
+    max_area = int(max(32, min(768, round(float(h * w) * 0.025))))
+    cleanup = np.zeros((h, w), dtype=bool)
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        touches_subject = bool((comp & subject_touch).any())
+        touches_shadow = bool((comp & shadow_touch).any())
+        keep = bool(area <= max_area and not touches_subject)
+        if keep:
+            cleanup |= comp
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "touches_subject": touches_subject,
+                "touches_shadow": touches_shadow,
+                "keep": keep,
+            }
+        )
+    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
+    return cleanup, {
+        "enabled": True,
+        "reason": "" if bool(cleanup.any()) else "no disconnected small residue components",
+        "candidate_pixels": int(candidate.sum()),
+        "cleaned_pixels": int(cleanup.sum()),
+        "component_max_area": int(max_area),
+        "components": components[:12],
+        "omitted_components": max(0, len(components) - 12),
+    }
 
 
 def _known_background_hard_shadow_subject_evidence_release(

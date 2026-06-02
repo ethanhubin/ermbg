@@ -158,11 +158,83 @@ def test_pymatting_known_b_shadow_patch_reduces_overdark_raw_subject_alpha():
     assert info["shadow_pixels"] == 0
     assert shadow_alpha[repair_domain].max() == 0.0
     assert np.allclose(alpha[repair_domain].mean(), 0.10, atol=0.01)
+
+
+def test_pymatting_known_b_shadow_patch_prefers_source_shadow_over_screen_colored_foreground():
+    import ermbg.api as api
+
+    bg = np.array([3, 203, 6], dtype=np.uint8)
+    image = np.full((48, 64, 3), bg, dtype=np.uint8)
+    repair_domain = np.zeros((48, 64), dtype=bool)
+    repair_domain[16:32, 20:44] = True
+    image[repair_domain] = (3, 150, 2)
+
+    subject_alpha = np.zeros((48, 64), dtype=np.float32)
+    subject_alpha[repair_domain] = 0.55
+    foreground = np.zeros((48, 64, 3), dtype=np.uint8)
+    foreground[repair_domain] = (3, 61, 0)
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_unknown_domain_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        repair_domain=repair_domain,
+    )
+
+    assert info["applied"] is True
+    assert info["shadow_pixels"] == int(repair_domain.sum())
+    assert info["subject_alpha_reduced_pixels"] == 0
+    assert info["objective_shadow"]["source_shadow_written_pixels"] == int(repair_domain.sum())
+    assert float(np.median(shadow_alpha[repair_domain])) > 0.20
+    assert np.all(rgba_rgb[repair_domain] == 0)
+    assert float(np.median(alpha[repair_domain])) > 0.20
     replay = (
         alpha[..., None] * rgba_rgb.astype(np.float32)
         + (1.0 - alpha[..., None]) * bg.astype(np.float32).reshape(1, 1, 3)
     )
-    assert np.abs(replay[repair_domain] - image[repair_domain].astype(np.float32)).mean() < 1.0
+    # A single display-space black alpha cannot fit all quantized sRGB
+    # channels exactly, but it must be a close replay of the known-B darkening.
+    assert np.abs(replay[repair_domain] - image[repair_domain].astype(np.float32)).mean() < 1.5
+
+
+def test_pymatting_known_b_shadow_patch_extends_source_shadow_to_connected_screen_residue():
+    import ermbg.api as api
+
+    bg = np.array([3, 178, 10], dtype=np.uint8)
+    image = np.full((48, 64, 3), bg, dtype=np.uint8)
+    repair_domain = np.zeros((48, 64), dtype=bool)
+    seed = np.zeros((48, 64), dtype=bool)
+    residue = np.zeros((48, 64), dtype=bool)
+    seed[16:32, 18:30] = True
+    residue[16:32, 30:42] = True
+    repair_domain |= seed | residue
+    image[seed] = (3, 150, 2)
+    image[residue] = (6, 145, 10)
+
+    subject_alpha = np.zeros((48, 64), dtype=np.float32)
+    subject_alpha[seed] = 0.55
+    subject_alpha[residue] = 0.61
+    foreground = np.zeros((48, 64, 3), dtype=np.uint8)
+    foreground[seed] = (3, 61, 0)
+    foreground[residue] = (8, 115, 10)
+
+    alpha, rgba_rgb, shadow_alpha, _, info = api._pymatting_known_b_unknown_domain_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=tuple(int(c) for c in bg),
+        repair_domain=repair_domain,
+    )
+
+    assert info["applied"] is True
+    assert info["subject_alpha_reduced_pixels"] == 0
+    assert info["objective_shadow"]["source_shadow_seed_written_pixels"] == int(seed.sum())
+    assert info["objective_shadow"]["source_shadow_connected_written_pixels"] == int(residue.sum())
+    assert info["objective_shadow"]["source_shadow_written_pixels"] == int(repair_domain.sum())
+    assert np.all(rgba_rgb[repair_domain] == 0)
+    assert float(np.median(alpha[residue])) > 0.15
+    assert float(np.median(shadow_alpha[residue])) > 0.15
 
 
 def test_matte_image_comfy_pymatting_known_b_uses_remote_node(monkeypatch):
