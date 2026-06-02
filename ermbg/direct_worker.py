@@ -22,6 +22,7 @@ from .api import (
     _matte_image_pymatting_known_b,
 )
 from .corridorkey_runner import LocalCorridorKeyClient
+from .known_bg_glow import matte_known_bg_glow
 from .qa import run_qa
 from .router import RouteDecision, classify_route
 
@@ -61,6 +62,74 @@ def _ck_background_color(analysis: dict[str, Any], fallback: tuple[int, int, int
     if isinstance(raw, (list, tuple)) and len(raw) == 3:
         return tuple(int(np.clip(c, 0, 255)) for c in raw)
     return fallback
+
+
+def _rgb_param(params: dict[str, Any], key: str, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+    raw = params.get(key)
+    if isinstance(raw, (list, tuple)) and len(raw) == 3:
+        return tuple(int(np.clip(c, 0, 255)) for c in raw)
+    return fallback
+
+
+def matte_known_bg_glow_direct(
+    rgb: np.ndarray,
+    *,
+    params: dict[str, Any],
+    bg_color: tuple[int, int, int],
+    qa: bool = False,
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    selected_bg_color = _rgb_param(params, "known_bg_glow_bg_color", bg_color)
+    target_color = _rgb_param(params, "known_bg_glow_target_color", (255, 255, 255))
+    mode = str(params.get("known_bg_glow_mode") or "single_target_line")
+    result = matte_known_bg_glow(rgb, selected_bg_color, target_color, mode=mode)
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(selected_bg_color),
+        "despill_method": "known_bg_glow_line_solver",
+        "matting_model": "none",
+        "keyer": {},
+        "shadow": {"mode": "off", "applied": False, "reason": "glow route has no shadow layer"},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "direct_known_bg_glow",
+            "bg_type": "known_background",
+            "image_type": "glow_icon",
+            "keyer_mode": "known_bg_glow",
+            "despill": "line_unmix",
+            "passthrough": False,
+            "notes": "Simple glow solved directly from a known background mixing line.",
+            "extras": result.debug,
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+    if qa:
+        report["qa"] = run_qa(
+            image_srgb=rgb,
+            rgba=result.rgba,
+            soft_mask=result.alpha,
+            background_color=selected_bg_color,
+            out_dir=Path("/tmp/_ermbg_direct_worker_qa_discard"),
+        )
+    debug = {
+        "backend": "direct-known-bg-glow",
+        "known_bg_glow": result.debug,
+        "strategy": report["strategy"],
+        "soft_mask": result.alpha,
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=result.rgba,
+        alpha=result.alpha,
+        foreground_srgb=result.foreground_srgb,
+        strategy_name="direct_known_bg_glow",
+        background_color=selected_bg_color,
+        report=report,
+        output_dir=None,
+        debug=debug,
+    )
 
 
 def matte_corridorkey_direct(
@@ -415,6 +484,15 @@ def direct_matte_from_decision(
         response.strategy_name = "direct_pymatting_known_b"
         response.debug["backend"] = "direct-pymatting-known-b"
         execution_backend = "direct-pymatting-known-b"
+    elif selected_backend == "direct-known-bg-glow":
+        response = matte_known_bg_glow_direct(
+            rgb,
+            params=params,
+            bg_color=fallback_bg_color,
+            qa=False,
+            auto_route=auto_route,
+        )
+        execution_backend = "direct-known-bg-glow"
     elif selected_backend == "comfy-corridorkey":
         ck_analysis = decision.analysis.get("corridorkey_analysis")
         if not isinstance(ck_analysis, dict):
@@ -490,5 +568,6 @@ __all__ = [
     "DirectWorkerResult",
     "direct_matte_from_decision",
     "direct_matte_auto",
+    "matte_known_bg_glow_direct",
     "matte_corridorkey_direct",
 ]

@@ -395,7 +395,7 @@ def matte_image(
         return _matte_image_passthrough(rgb, alpha, src_path=src_path, output_dir=output_dir, qa=qa, auto_route=auto_route)
 
     remote_full_backends = {"comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg"}
-    local_known_bg_backends = {"pymatting-known-b"}
+    local_known_bg_backends = {"pymatting-known-b", "direct-known-bg-glow"}
     if alpha is not None and (
         backend in remote_full_backends
         or backend in local_known_bg_backends
@@ -466,6 +466,18 @@ def matte_image(
             auto_route=auto_route,
         )
 
+    if backend == "direct-known-bg-glow":
+        return _matte_image_known_bg_glow(
+            rgb,
+            src_path=src_path,
+            output_dir=output_dir,
+            qa=qa,
+            bg_color=auto_params.get("known_bg_glow_bg_color", bg_color),
+            target_color=auto_params.get("known_bg_glow_target_color", (255, 255, 255)),
+            mode=auto_params.get("known_bg_glow_mode", "single_target_line"),
+            auto_route=auto_route,
+        )
+
     if backend == "pymatting-known-b":
         if vlm_prior:
             raise ValueError("backend='pymatting-known-b' does not support local vlm_prior")
@@ -489,6 +501,96 @@ def matte_image(
         )
 
     raise ValueError(f"Unsupported backend after ERMBG route cleanup: {backend!r}")
+
+
+def _matte_image_known_bg_glow(
+    rgb: np.ndarray,
+    *,
+    src_path: str | None,
+    output_dir: str | Path | None,
+    qa: bool,
+    bg_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+    mode: str = "single_target_line",
+    auto_route: dict[str, Any] | None = None,
+) -> MatteResponse:
+    from .known_bg_glow import matte_known_bg_glow
+
+    bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
+    target = tuple(int(np.clip(c, 0, 255)) for c in target_color)
+    result = matte_known_bg_glow(rgb, bg, target, mode=mode)
+    report: dict[str, Any] = {
+        "diagnosis": None,
+        "background_color": list(bg),
+        "despill_method": "known_bg_glow_line_solver",
+        "matting_model": "none",
+        "keyer": {},
+        "shadow": {"mode": "off", "applied": False, "reason": "glow route has no shadow layer"},
+        "semantic_prior": {},
+        "strategy": {
+            "name": "known_bg_glow",
+            "bg_type": "known_background",
+            "image_type": "glow_icon",
+            "keyer_mode": "known_bg_glow",
+            "despill": "line_unmix",
+            "passthrough": False,
+            "notes": "Simple glow solved directly from a known background mixing line.",
+            "extras": result.debug,
+        },
+    }
+    if auto_route is not None:
+        report["auto_route"] = auto_route
+    if qa:
+        report["qa"] = run_qa(
+            image_srgb=rgb,
+            rgba=result.rgba,
+            soft_mask=result.alpha,
+            background_color=bg,
+            out_dir=Path("/tmp/_ermbg_api_glow_qa_discard"),
+        )
+
+    out_dir: Path | None = None
+    if output_dir is not None:
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(src_path).stem if src_path else "matte"
+        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", result.rgba)
+        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", result.alpha)
+        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", result.foreground_srgb)
+        report_path = out_dir / f"{stem}.report.json"
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_output_manifest(
+            out_dir=out_dir,
+            stem=stem,
+            src_path=src_path,
+            report=report,
+            outputs={
+                "rgba": out_dir / f"{stem}_rgba.png",
+                "alpha": out_dir / f"{stem}_alpha.png",
+                "foreground": out_dir / f"{stem}_foreground.png",
+            },
+            report_path=report_path,
+            requested_backend="direct-known-bg-glow",
+        )
+
+    debug = {
+        "backend": "direct-known-bg-glow",
+        "known_bg_glow": result.debug,
+        "strategy": report["strategy"],
+        "soft_mask": result.alpha,
+    }
+    if auto_route is not None:
+        debug["auto_route"] = auto_route
+    return MatteResponse(
+        rgba=result.rgba,
+        alpha=result.alpha,
+        foreground_srgb=result.foreground_srgb,
+        strategy_name="known_bg_glow",
+        background_color=bg,
+        report=report,
+        output_dir=out_dir,
+        debug=debug,
+    )
 
 
 def _matte_image_passthrough(

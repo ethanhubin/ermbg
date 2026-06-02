@@ -104,6 +104,7 @@ def test_direct_worker_server_health_reports_capabilities():
     assert payload["capabilities"]["route_profile_contract"] is True
     assert payload["capabilities"]["direct_pymatting_known_b"] is True
     assert payload["capabilities"]["direct_corridorkey"] is True
+    assert payload["capabilities"]["direct_known_bg_glow"] is True
     assert payload["capabilities"]["batch_matte"] is True
 
 
@@ -176,6 +177,62 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
     assert payload["selected_backend"] == "comfy-corridorkey"
     assert payload["execution_backend"] == "direct-corridorkey"
     assert payload["route"] == "corridorkey"
+
+
+def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch):
+    rgb = np.full((16, 16, 3), (0, 200, 0), dtype=np.uint8)
+    rgb[4:12, 4:12] = (80, 230, 255)
+    captured = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="comfy-pymatting-known-b",
+            params={"execution_profile": "pymatting-hard-button"},
+            confidence=1.0,
+            reasons=["test"],
+            analysis={"corridorkey_analysis": {"background_color": [0, 200, 0]}},
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured["backend"] = prepared.decision.backend
+        captured["route"] = prepared.decision.route
+        captured["params"] = prepared.decision.params
+        captured["analysis"] = prepared.decision.analysis
+        result = _result(prepared.rgb, execution_profile="known-bg-glow")
+        result.response.strategy_name = "direct_known_bg_glow"
+        result.response.debug["known_bg_glow"] = {"mode": prepared.decision.params["known_bg_glow_mode"]}
+        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["execution_backend"] = "direct-known-bg-glow"
+        result.metadata["route"] = prepared.decision.route
+        result.metadata["execution_profile"] = prepared.decision.params["execution_profile"]
+        return result
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={"include_image": "false", "execution_backend": "direct-known-bg-glow"},
+    )
+
+    assert response.status_code == 200
+    assert captured["backend"] == "direct-known-bg-glow"
+    assert captured["route"] == "known_bg_glow"
+    assert captured["params"]["execution_profile"] == "known-bg-glow"
+    assert captured["params"]["known_bg_glow_mode"] in {"single_target_line", "adaptive_ray"}
+    assert captured["params"]["known_bg_glow_bg_color"] == (0, 200, 0)
+    assert captured["analysis"]["known_bg_glow"]["background_color"] == [0, 200, 0]
+    payload = response.json()
+    assert payload["selected_backend"] == "direct-known-bg-glow"
+    assert payload["execution_backend"] == "direct-known-bg-glow"
+    assert payload["route"] == "known_bg_glow"
+    assert payload["algorithm_debug"]["known_bg_glow"]["mode"] == captured["params"]["known_bg_glow_mode"]
 
 
 def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(monkeypatch):

@@ -71,6 +71,7 @@ ALLOWED_BACKENDS = {
     "comfy-pymatting-known-b",
     "direct-worker",
     "direct-corridorkey",
+    "direct-known-bg-glow",
 }
 REMOTE_DIRECT_BACKENDS = {
     "passthrough",
@@ -80,6 +81,7 @@ REMOTE_DIRECT_BACKENDS = {
     "comfy-pymatting-known-b",
     "direct-worker",
     "direct-corridorkey",
+    "direct-known-bg-glow",
 }
 WEB_SHADOW_MODE = "on"
 DEFAULT_GAME_EVAL_ROOT = PROJECT_ROOT / "out" / "local_ownership_full_20260527"
@@ -154,6 +156,8 @@ def _direct_backend_base(backend: str) -> str:
         return "direct-worker"
     if backend.startswith("direct-corridorkey:"):
         return "direct-corridorkey"
+    if backend.startswith("direct-known-bg-glow:"):
+        return "direct-known-bg-glow"
     return backend
 
 
@@ -161,7 +165,7 @@ def _direct_backend_endpoint_name(backend: str) -> str | None:
     if ":" not in backend:
         return None
     base, name = backend.split(":", 1)
-    if base not in {"direct-worker", "direct-corridorkey"}:
+    if base not in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
         return None
     name = name.strip()
     return name or None
@@ -181,7 +185,7 @@ def _is_allowed_backend(backend: str) -> bool:
     base = _direct_backend_base(backend)
     if base not in ALLOWED_BACKENDS:
         return False
-    if base in {"direct-worker", "direct-corridorkey"} and _direct_backend_endpoint_name(backend) is not None:
+    if base in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"} and _direct_backend_endpoint_name(backend) is not None:
         return _direct_backend_endpoint_name(backend) in WEB_DIRECT_WORKER_ENDPOINTS
     return backend in ALLOWED_BACKENDS
 
@@ -191,6 +195,7 @@ def _allowed_backend_names() -> list[str]:
     for endpoint_name in sorted(WEB_DIRECT_WORKER_ENDPOINTS):
         names.append(f"direct-worker:{endpoint_name}")
         names.append(f"direct-corridorkey:{endpoint_name}")
+        names.append(f"direct-known-bg-glow:{endpoint_name}")
     return names
 
 
@@ -209,6 +214,9 @@ def _backend_options_html(*, selected: str = "auto") -> str:
     rows.append(option("direct-corridorkey", f"Direct Worker CorridorKey primary · [{direct_worker_location(primary_url)}] {primary_url}"))
     for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
         rows.append(option(f"direct-corridorkey:{name}", f"Direct Worker CorridorKey {name} · [{direct_worker_location(url)}] {url}"))
+    rows.append(option("direct-known-bg-glow", f"Direct Worker Known-B Glow primary · [{direct_worker_location(primary_url)}] {primary_url}"))
+    for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
+        rows.append(option(f"direct-known-bg-glow:{name}", f"Direct Worker Known-B Glow {name} · [{direct_worker_location(url)}] {url}"))
     rows.append(option("pymatting-known-b", "PyMatting Known-B local process"))
     return "".join(rows)
 
@@ -218,6 +226,7 @@ def _inject_backend_options(html: str) -> str:
         '<option value="auto" selected>Auto</option>'
         '<option value="direct-worker">direct-worker</option>'
         '<option value="direct-corridorkey">Direct Worker CorridorKey</option>'
+        '<option value="direct-known-bg-glow">Direct Worker Known-B Glow</option>'
         '<option value="pymatting-known-b">pymatting-known-b</option>'
     )
     return html.replace(old, _backend_options_html())
@@ -593,7 +602,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
+      <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="direct-known-bg-glow">Direct Worker Known-B Glow</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
@@ -1316,6 +1325,7 @@ def _matte_page_html() -> str:
           <option value="auto" selected>Auto</option>
           <option value="direct-worker">direct-worker</option>
           <option value="direct-corridorkey">Direct Worker CorridorKey</option>
+          <option value="direct-known-bg-glow">Direct Worker Known-B Glow</option>
           <option value="pymatting-known-b">pymatting-known-b</option>
         </select>
       </label>
@@ -2356,14 +2366,14 @@ def sam_mask_endpoint(
 
 def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
     requested_base = _direct_backend_base(requested_backend)
-    if isinstance(result.debug, dict) and result.debug.get("backend") in {"direct-worker", "direct-corridorkey"}:
+    if isinstance(result.debug, dict) and result.debug.get("backend") in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
         return str(result.debug.get("backend"))
     if requested_base == "auto" and isinstance(result.debug, dict):
         fallback = result.debug.get("web_auto_fallback_backend")
         if isinstance(fallback, str) and fallback:
             return fallback
     auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
-    if isinstance(auto_route, dict) and auto_route.get("requested_backend") in {"direct-worker", "direct-corridorkey"}:
+    if isinstance(auto_route, dict) and auto_route.get("requested_backend") in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
         return str(auto_route.get("requested_backend"))
     if requested_base == "auto" and isinstance(auto_route, dict):
         selected = auto_route.get("selected_backend")
@@ -2483,7 +2493,7 @@ def _run_web_backend(
                 "ERMBG_WEB_AUTO_BACKEND must be direct-worker, auto-local, or comfy-route-matte"
             )
     execution_base = _direct_backend_base(execution_backend)
-    if execution_base in {"direct-worker", "direct-corridorkey"}:
+    if execution_base in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
         direct_worker_url, endpoint_name = _direct_worker_url_for_backend(execution_backend)
         corridorkey_overrides: dict[str, Any] = {
             "corridorkey_screen_mode": corridorkey_screen_mode,
@@ -2508,7 +2518,7 @@ def _run_web_backend(
             result = matte_image_direct_worker(
                 image,
                 direct_worker_url=direct_worker_url,
-                execution_backend="direct-corridorkey" if execution_base == "direct-corridorkey" else "auto",
+                execution_backend=execution_base if execution_base in {"direct-corridorkey", "direct-known-bg-glow"} else "auto",
                 shadow_mode=shadow_mode,
                 **corridorkey_overrides,
             )
@@ -2520,7 +2530,7 @@ def _run_web_backend(
             fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
             if not requested_auto or fallback in {"", "none", "off", "disabled"}:
                 raise
-            if fallback not in ALLOWED_BACKENDS or fallback in {"direct-worker", "direct-corridorkey"}:
+            if fallback not in ALLOWED_BACKENDS or fallback in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
                 raise ValueError(
                     "ERMBG_WEB_AUTO_FALLBACK_BACKEND must be a non-direct backend or disabled"
                 ) from exc
@@ -2818,6 +2828,8 @@ def matte_candidates_endpoint(
             direct_label = "Direct Worker"
         elif effective_backend == "direct-corridorkey":
             direct_label = "Direct Worker CorridorKey"
+        elif effective_backend == "direct-known-bg-glow":
+            direct_label = "Direct Worker Known-B Glow"
         elif effective_backend == "passthrough":
             direct_label = "远端 Passthrough"
         else:

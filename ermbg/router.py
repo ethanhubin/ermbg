@@ -597,6 +597,20 @@ def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[
     }
 
 
+def _known_bg_glow_route_params(
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    return {
+        "execution_profile": "known-bg-glow",
+        "known_bg_glow_mode": mode,
+        "known_bg_glow_bg_color": tuple(int(c) for c in background_color),
+        "known_bg_glow_target_color": tuple(int(c) for c in target_color),
+    }
+
+
 def _wide_button_complex_boundary_score(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
@@ -761,6 +775,22 @@ def classify_route(
         foreground_aspect_ratio=ck.foreground_aspect_ratio,
     )
     analysis["complex_button_boundary"] = complex_button_info
+    if known_corridor_screen and asset_kind == "icon":
+        from .known_bg_glow import analyze_known_bg_glow
+
+        glow = analyze_known_bg_glow(image_srgb, ck.background_color)
+        analysis["known_bg_glow"] = glow.to_dict()
+        if glow.accepted:
+            reasons.append(f"icon_{profile}_uses_known_bg_glow")
+            return RouteDecision(
+                route="known_bg_glow",
+                asset_kind="icon",
+                backend="direct-known-bg-glow",
+                params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
+                confidence=float(max(0.70, ck.background_confidence)),
+                reasons=reasons,
+                analysis=analysis,
+            )
     if known_corridor_screen and (
         asset_kind in {"icon", "character"}
         or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))

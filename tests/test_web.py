@@ -111,6 +111,7 @@ def test_index_serves_upload_ui():
     assert '<option value="auto" selected>Auto -&gt;' in response.text
     assert '<option value="direct-worker">Direct Worker primary ·' in response.text
     assert '<option value="direct-corridorkey">Direct Worker CorridorKey primary ·' in response.text
+    assert '<option value="direct-known-bg-glow">Direct Worker Known-B Glow primary ·' in response.text
     assert '<option value="pymatting-known-b">PyMatting Known-B local process</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
@@ -243,6 +244,10 @@ def test_matte_page_lists_named_direct_worker_endpoints(monkeypatch):
     assert (
         '<option value="direct-corridorkey:remote">'
         "Direct Worker CorridorKey remote · [remote] http://192.168.0.8:7871</option>"
+    ) in response.text
+    assert (
+        '<option value="direct-known-bg-glow:remote">'
+        "Direct Worker Known-B Glow remote · [remote] http://192.168.0.8:7871</option>"
     ) in response.text
 
 
@@ -1398,6 +1403,59 @@ def test_matte_candidates_endpoint_accepts_direct_corridorkey_backend(monkeypatc
     assert payload["route"] == "corridorkey"
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "Direct Worker CorridorKey", True)
+    ]
+
+
+def test_matte_candidates_endpoint_accepts_direct_known_bg_glow_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 180
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.full((h, w), 180 / 255.0, dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_known_bg_glow",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-known-bg-glow",
+                "direct_worker": {"server_elapsed_sec": 1.25, "execution_backend": "direct-known-bg-glow"},
+                "auto_route": {
+                    "requested_backend": "direct-known-bg-glow",
+                    "selected_backend": "direct-known-bg-glow",
+                    "execution_backend": "direct-known-bg-glow",
+                    "route": "known_bg_glow",
+                    "asset_kind": "icon",
+                    "parameter_profile": "effect_icon",
+                    "execution_profile": "known-bg-glow",
+                },
+            },
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "direct-known-bg-glow"},
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-known-bg-glow"
+    payload = response.json()
+    assert payload["backend"] == "direct-known-bg-glow"
+    assert payload["requested_backend"] == "direct-known-bg-glow"
+    assert payload["route"] == "known_bg_glow"
+    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
+        ("auto", "Direct Worker Known-B Glow", True)
     ]
 
 

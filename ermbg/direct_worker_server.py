@@ -100,6 +100,7 @@ def _git_sha() -> str:
 def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
     debug = result.response.debug if isinstance(result.response.debug, dict) else {}
     known_b = debug.get("pymatting_known_b") if isinstance(debug.get("pymatting_known_b"), dict) else None
+    known_bg_glow = debug.get("known_bg_glow") if isinstance(debug.get("known_bg_glow"), dict) else None
     shadow = debug.get("shadow") if isinstance(debug.get("shadow"), dict) else None
     algorithm: dict[str, Any] = {
         "strategy": result.response.strategy_name,
@@ -113,6 +114,8 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
             "parameters": known_b.get("parameters"),
             "alpha_pinhole_repair": known_b.get("alpha_pinhole_repair"),
         }
+    if known_bg_glow is not None:
+        algorithm["known_bg_glow"] = known_bg_glow
     if shadow is not None:
         algorithm["shadow"] = shadow
     return algorithm
@@ -195,14 +198,51 @@ def _prepare_request(
     )
 
 
-def _apply_execution_backend_override(decision: RouteDecision, execution_backend: str) -> RouteDecision:
+def _decision_background_color(decision: RouteDecision, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+    ck_analysis = decision.analysis.get("corridorkey_analysis")
+    if isinstance(ck_analysis, dict):
+        raw = ck_analysis.get("background_color")
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
+            return tuple(int(np.clip(c, 0, 255)) for c in raw)
+    return fallback
+
+
+def _apply_execution_backend_override(
+    decision: RouteDecision,
+    execution_backend: str,
+    *,
+    rgb: np.ndarray,
+    fallback_bg_color: tuple[int, int, int],
+) -> RouteDecision:
     requested = execution_backend.strip().lower()
     if requested in {"", "auto", "direct-worker"}:
         return decision
+    if requested == "direct-known-bg-glow":
+        from .known_bg_glow import analyze_known_bg_glow
+
+        bg_color = _decision_background_color(decision, fallback_bg_color)
+        glow = analyze_known_bg_glow(rgb, bg_color)
+        mode = glow.mode if glow.accepted and glow.mode in {"single_target_line", "adaptive_ray"} else "adaptive_ray"
+        params = {
+            "execution_profile": "known-bg-glow",
+            "known_bg_glow_mode": mode,
+            "known_bg_glow_bg_color": glow.background_color,
+            "known_bg_glow_target_color": glow.target_color,
+        }
+        return replace(
+            decision,
+            route="known_bg_glow",
+            asset_kind="icon",
+            backend="direct-known-bg-glow",
+            params=params,
+            confidence=max(0.50, float(decision.confidence)),
+            reasons=[*decision.reasons, "manual_direct_known_bg_glow_backend"],
+            analysis={**decision.analysis, "known_bg_glow": glow.to_dict()},
+        )
     if requested != "direct-corridorkey":
         raise HTTPException(
             status_code=400,
-            detail="execution_backend must be auto, direct-worker, or direct-corridorkey",
+            detail="execution_backend must be auto, direct-worker, direct-corridorkey, or direct-known-bg-glow",
         )
     if not isinstance(decision.analysis.get("corridorkey_analysis"), dict):
         raise HTTPException(status_code=400, detail="direct-corridorkey requires corridorkey analysis metadata")
@@ -267,7 +307,7 @@ def _corridorkey_form_params(
 
 
 def _is_cpu_parallel_route(decision: RouteDecision) -> bool:
-    return decision.backend == "comfy-pymatting-known-b"
+    return decision.backend in {"comfy-pymatting-known-b", "direct-known-bg-glow"}
 
 
 def _run_prepared_main(
@@ -354,6 +394,7 @@ def health() -> dict[str, Any]:
             "route_profile_contract": True,
             "direct_pymatting_known_b": True,
             "direct_corridorkey": True,
+            "direct_known_bg_glow": True,
             "batch_matte": True,
         },
     }
@@ -414,7 +455,12 @@ async def matte_endpoint(
             corridorkey_preset=corridorkey_preset,
             fallback_bg_color=bg,
         )
-        decision = _apply_execution_backend_override(prepared.decision, execution_backend)
+        decision = _apply_execution_backend_override(
+            prepared.decision,
+            execution_backend,
+            rgb=prepared.rgb,
+            fallback_bg_color=bg,
+        )
         prepared = replace(prepared, decision=_with_corridorkey_params(decision, ck_params))
         result = _run_prepared_main(
             prepared,
@@ -485,7 +531,12 @@ async def batch_matte_endpoint(
                 corridorkey_preset=corridorkey_preset,
                 fallback_bg_color=bg,
             )
-            decision = _apply_execution_backend_override(item.decision, execution_backend)
+            decision = _apply_execution_backend_override(
+                item.decision,
+                execution_backend,
+                rgb=item.rgb,
+                fallback_bg_color=bg,
+            )
             prepared.append(replace(item, decision=_with_corridorkey_params(decision, ck_params)))
         except Exception as exc:
             rows[index] = {

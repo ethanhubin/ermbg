@@ -305,7 +305,7 @@ def _classify_prepared_case(
 
 
 def _cpu_parallel_backend(decision: Any) -> bool:
-    return _execution_backend_from_decision(decision) == "direct-pymatting-known-b"
+    return _execution_backend_from_decision(decision) in {"direct-pymatting-known-b", "direct-known-bg-glow"}
 
 
 def _execution_backend_from_decision(decision: Any) -> str:
@@ -678,7 +678,7 @@ def _write_case_and_aggregate(
         "warmup_sample_id": args.warmup_sample_id or None,
         "compare_summary": _rel(args.compare_summary) if args.compare_summary else None,
         "cpu_workers": int(getattr(args, "cpu_workers", 1)),
-        "cpu_parallel_backends": ["comfy-pymatting-known-b"],
+        "cpu_parallel_backends": ["direct-pymatting-known-b", "direct-known-bg-glow"],
         "batch_elapsed_sec": time.perf_counter() - batch_start,
         "runtime": _runtime_info(),
         "timing_summary": _summarize(ordered_rows),
@@ -768,7 +768,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     futures: dict[Any, PreparedCase] = {}
     if cpu_workers > 1:
         executor = ProcessPoolExecutor(max_workers=cpu_workers)
-        print(f"[batch] CPU parallel workers enabled: {cpu_workers} for comfy-pymatting-known-b", flush=True)
+        print(f"[batch] CPU parallel workers enabled: {cpu_workers} for CPU direct backends", flush=True)
 
     try:
         for index, case in enumerate(cases, start=1):
@@ -837,7 +837,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 futures[executor.submit(_cpu_case_worker, payload)] = prepared
                 print(
-                    "  queued direct-pymatting-known-b "
+                    f"  queued {_execution_backend_from_decision(prepared.decision)} "
                     f"route={prepared.route_timings.get('route_sec', 0.0):.3f}s",
                     flush=True,
                 )
@@ -936,7 +936,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "warmup_sample_id": args.warmup_sample_id or None,
             "compare_summary": _rel(args.compare_summary) if args.compare_summary else None,
             "cpu_workers": cpu_workers,
-            "cpu_parallel_backends": ["comfy-pymatting-known-b"],
+            "cpu_parallel_backends": ["direct-pymatting-known-b", "direct-known-bg-glow"],
             "batch_elapsed_sec": time.perf_counter() - batch_start,
             "runtime": _runtime_info(),
             "timing_summary": _summarize([]),
@@ -966,7 +966,7 @@ def main() -> None:
     parser.add_argument("--compare-summary", type=Path, default=None)
     parser.add_argument(
         "--fixed-execution-backend",
-        choices=("direct-pymatting-known-b", "direct-corridorkey", "direct-passthrough"),
+        choices=("direct-pymatting-known-b", "direct-corridorkey", "direct-known-bg-glow", "direct-passthrough"),
         default="",
         help="Require every selected case to execute on this direct backend; mismatches are recorded as errors.",
     )
