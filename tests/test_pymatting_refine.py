@@ -13,6 +13,7 @@ from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
     build_known_background_trimap,
     estimate_known_background_alpha_with_pymatting,
+    normalize_known_background_field,
 )
 from ermbg.solid_graphic import analyze_solid_bg_graphic
 
@@ -198,6 +199,32 @@ def test_known_background_trimap_leaves_scalar_shadow_for_shadow_patch():
     assert info["shadow_background"]["unknown_ownership_pixels"] >= int(shadow.sum() * 0.8)
     assert trimap.unknown[shadow].mean() > 0.8
     assert trimap.sure_fg[shadow].mean() == 0.0
+
+
+def test_background_normalization_preserves_visible_shadow_tail():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((96, 144, 3), bg, dtype=np.uint8)
+    # Mechanism: low-frequency screen drift should be normalized, but a
+    # measurable black-screen shadow tail is transferable image content. The
+    # normalization gate protects visible display-shadow alpha and fades
+    # smoothly through the sub-visible range instead of flattening the tail.
+    image[..., 1] = 198
+    shadow = np.zeros((96, 144), dtype=bool)
+    shadow[48:72, 42:114] = True
+    image[shadow] = (0, 184, 0)
+
+    normalized, info = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+
+    assert info["applied"] is True
+    assert info["shadow_normalization_gate"]["protected_pixels"] >= int(shadow.sum() * 0.95)
+    assert int(np.median(normalized[~shadow, 1])) == 200
+    assert int(np.median(normalized[shadow, 1])) <= 186
 
 
 def test_known_background_trimap_protects_screen_neutral_metal_grooves_from_shadow_growth():

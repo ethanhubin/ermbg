@@ -97,6 +97,18 @@ def normalize_known_background_field(
     others = [idx for idx in range(3) if idx != dominant]
     screen_like_tail = np.zeros((h, w), dtype=bool)
     tail_weight = np.zeros((h, w), dtype=np.float32)
+    source_shadow_alpha = _known_background_display_shadow_alpha(image_srgb, bg)
+    # Background normalization is allowed only where the source pixel implies
+    # essentially no transferable screen darkening. Values above the weak
+    # visible-shadow floor are protected so broad soft tails remain available
+    # for ShadowPatch; the smooth interval prevents a hard normalization seam.
+    normalize_shadow_full_alpha = 1.5 / 255.0
+    normalize_shadow_zero_alpha = 8.0 / 255.0
+    shadow_normalization_gate = 1.0 - _smoothstep_array(
+        normalize_shadow_full_alpha,
+        normalize_shadow_zero_alpha,
+        source_shadow_alpha,
+    )
     if float(bgf[dominant]) >= 64.0 and float(bgf[dominant] - np.max(bgf[others])) >= 48.0:
         other_max = np.max(image[..., others], axis=2)
         # Tail normalization is intentionally limited to screen-colored pixels:
@@ -107,12 +119,19 @@ def normalize_known_background_field(
             & (other_max <= max(8.0, float(np.max(bgf[others])) + 8.0))
         )
         strength = np.clip(1.0 - image[..., dominant] / max(float(bgf[dominant]), 1.0), -0.20, 1.0)
-        tail_max_strength = 0.12
+        # This gate is no longer a shadow-tail normalizer. It only lets very
+        # weak screen-color drift contribute to the background field; visible
+        # darkening is excluded by ``shadow_normalization_gate`` below.
+        tail_max_strength = float(normalize_shadow_zero_alpha)
         strength_gate = np.clip((tail_max_strength - np.maximum(strength, 0.0)) / tail_max_strength, 0.0, 1.0)
         strength_gate = strength_gate * strength_gate * (3.0 - 2.0 * strength_gate)
         fg_span = max(effective_fg_threshold - effective_bg_threshold, 1e-6)
         bg_color_gate = np.clip(1.0 - (distance - effective_bg_threshold) / fg_span, 0.0, 1.0)
-        tail_weight = np.where(screen_like_tail, strength_gate * bg_color_gate, 0.0).astype(np.float32)
+        tail_weight = np.where(
+            screen_like_tail,
+            strength_gate * bg_color_gate * shadow_normalization_gate,
+            0.0,
+        ).astype(np.float32)
 
         strong_fg = distance >= effective_fg_threshold
         subject_support, _support_info = _known_background_subject_material_support(
@@ -127,7 +146,7 @@ def normalize_known_background_field(
             tail_weight *= subject_clearance
 
     raw_weight = np.zeros((h, w), dtype=np.float32)
-    raw_weight[high_conf_bg] = 1.0
+    raw_weight[high_conf_bg] = shadow_normalization_gate[high_conf_bg]
     raw_weight = np.maximum(raw_weight, tail_weight)
     if float(raw_weight.max()) <= 0.0:
         return image_srgb, {
@@ -145,7 +164,8 @@ def normalize_known_background_field(
     ksize = int(round(sigma * 6.0)) | 1
     weight = cv2.GaussianBlur(raw_weight, (ksize, ksize), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
     weight = np.clip(weight, 0.0, 1.0).astype(np.float32)
-    weight[high_conf_bg] = 1.0
+    weight = np.minimum(weight, shadow_normalization_gate).astype(np.float32)
+    weight[high_conf_bg] = np.maximum(weight[high_conf_bg], raw_weight[high_conf_bg])
     # Do not let smoothing spill into obvious material. Any residual line here
     # is less harmful than pre-normalizing real subject color.
     obvious_material = distance >= max(effective_fg_threshold, effective_bg_threshold + 8.0)
@@ -167,6 +187,15 @@ def normalize_known_background_field(
         "residual_std_u8": residual_std,
         "screen_like_tail_pixels": int(screen_like_tail.sum()),
         "tail_weight_pixels": int((tail_weight > 1.0 / 255.0).sum()),
+        "shadow_normalization_gate": {
+            "full_alpha": float(normalize_shadow_full_alpha),
+            "zero_alpha": float(normalize_shadow_zero_alpha),
+            "protected_pixels": int((shadow_normalization_gate <= 1.0 / 255.0).sum()),
+            "transition_pixels": int(
+                ((shadow_normalization_gate > 1.0 / 255.0) & (shadow_normalization_gate < 1.0 - 1.0 / 255.0)).sum()
+            ),
+            "full_pixels": int((shadow_normalization_gate >= 1.0 - 1.0 / 255.0).sum()),
+        },
         "weight_nonzero_pixels": int((weight > 1.0 / 255.0).sum()),
         "weight_mean": float(weight.mean()),
         "weight_p95": float(np.percentile(weight, 95.0)),
@@ -174,6 +203,30 @@ def normalize_known_background_field(
         "sigma_px": sigma,
         **thresholds,
     }
+
+
+def _known_background_display_shadow_alpha(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+) -> np.ndarray:
+    """Return display-space black alpha implied by known-background darkening."""
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    image = image_srgb.astype(np.float32)
+    usable = bg >= 8.0
+    if not bool(usable.any()):
+        return np.zeros(image_srgb.shape[:2], dtype=np.float32)
+    weights = np.where(usable, bg * bg, 0.0).astype(np.float32)
+    weight_sum = np.maximum(float(weights.sum()), 1e-6)
+    channel_alpha = 1.0 - image / np.maximum(bg, 1.0)
+    alpha = (channel_alpha * weights).sum(axis=-1) / weight_sum
+    return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+
+def _smoothstep_array(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
+    if edge1 <= edge0:
+        return (value >= edge1).astype(np.float32)
+    x = np.clip((value.astype(np.float32) - float(edge0)) / (float(edge1) - float(edge0)), 0.0, 1.0)
+    return (x * x * (3.0 - 2.0 * x)).astype(np.float32)
 
 
 def build_known_background_trimap(
