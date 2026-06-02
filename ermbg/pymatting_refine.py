@@ -388,10 +388,12 @@ def _build_known_background_ownership(
 
     dist_to_non_clean = cv2.distanceTransform(clean_bg.astype(np.uint8), cv2.DIST_L2, 3)
     sure_bg = ((exterior_bg & clean_bg & (dist_to_non_clean >= 2.0)) | (enclosed_bg & clean_bg))
-    # Keep true same-B holes pinned as background. The subject-adjacent
-    # transition guard protects exterior shadow/AA ownership; applying it to
-    # enclosed cutouts lets PyMatting smear foreground across transparent holes.
-    sure_bg &= ~(protected_transition & ~enclosed_bg)
+    # Enclosed holes and exterior background use the same ownership standard:
+    # enclosed_bg only says a region may be background, not that it may bypass
+    # source shadow or subject-transition evidence. Clean hole centers remain
+    # sure-BG through the clean inset; hole-edge shadow/AA stays unknown for the
+    # later same-background reconstruction stages.
+    sure_bg &= ~protected_transition
     sure_fg = sure_fg & ~(enclosed_bg | shadow_unknown)
     unknown = ~(sure_fg | sure_bg)
 

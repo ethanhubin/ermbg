@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -89,11 +90,16 @@ def test_known_background_trimap_marks_enclosed_same_bg_as_sure_background():
     )
 
     # The center is a same-background cutout fully enclosed by subject pixels.
-    # Treating it as unknown lets closed-form smooth foreground across the hole.
+    # Treating the clean center as unknown lets closed-form smooth foreground
+    # across the hole, but the enclosed edge still follows the same
+    # transition/unknown ownership standard as exterior shadow.
+    dist_to_subject = cv2.distanceTransform(inner.astype(np.uint8), cv2.DIST_L2, 3)
+    clean_center = inner & (dist_to_subject >= 8.0)
+    transition_edge = inner & (dist_to_subject < 8.0)
     assert info["enclosed_bg_pixels"] >= int(inner.sum() * 0.95)
     assert info["largest_enclosed_bg_component"] >= int(inner.sum() * 0.95)
-    assert trimap.sure_bg[inner].mean() > 0.95
-    assert trimap.unknown[inner].mean() < 0.05
+    assert trimap.sure_bg[clean_center].mean() > 0.95
+    assert trimap.unknown[transition_edge].mean() > 0.20
 
 
 def test_known_background_trimap_allows_broad_ui_antialias_band():
@@ -324,6 +330,52 @@ def test_background_normalization_makes_b055_sure_bg_exact_for_exact_trimap():
     assert trimap_info["clean_bg_threshold"] == "exact_known_b"
     assert trimap_info["sure_bg_pixels"] > 180_000
     assert trimap_info["unknown_pixels"] < 50_000
+
+
+def test_b055_hole_shadow_uses_same_unknown_standard_as_exterior_shadow():
+    path = (
+        PROJECT_ROOT
+        / "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png"
+    )
+    image = np.array(Image.open(path).convert("RGB"))
+    bg, bg_info = estimate_stable_background_color(image)
+    bg_arr = np.asarray(bg, dtype=np.uint8)
+
+    normalized, normalization = normalize_known_background_field(
+        image,
+        bg,
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+    trimap, trimap_info = build_known_background_trimap(
+        normalized,
+        bg,
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        adaptive=True,
+    )
+
+    # B055's transparent center is an enclosed background component. The dark
+    # inner-wall falloff is still source shadow evidence, so it must not get the
+    # enclosed-bg shortcut into sure-BG.
+    x1, y1, x2, y2 = 178, 172, 347, 333
+    hole = np.zeros(image.shape[:2], dtype=bool)
+    hole[y1:y2, x1:x2] = True
+    screen_darker = (
+        hole
+        & (image[..., 1].astype(np.int16) < int(bg_arr[1]) - 1)
+        & (image[..., 1] >= image[..., 0])
+        & (image[..., 1] >= image[..., 2])
+    )
+
+    assert bg_info["accepted"] is True
+    assert normalization["ownership"]["enclosed_bg_pixels"] > 20_000
+    assert trimap_info["enclosed_bg_pixels"] > 20_000
+    assert int(screen_darker.sum()) > 4_000
+    assert trimap.unknown[screen_darker].mean() > 0.85
+    assert trimap.sure_bg[screen_darker].mean() < 0.15
 
 
 def test_known_background_trimap_protects_screen_neutral_metal_grooves_from_shadow_growth():
