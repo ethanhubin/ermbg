@@ -101,8 +101,10 @@ schtasks /Run /TN "__TASK_NAME__" | Out-Host
 '
 
 subst_script() {
-  local remote_root_win="${remote_root//\//\\}"
-  local remote_python_win="${remote_python//\//\\}"
+  # Keep forward slashes here. PowerShell accepts them for local paths, and
+  # using backslashes in sed replacements would require another escaping layer.
+  local remote_root_win="${remote_root}"
+  local remote_python_win="${remote_python}"
   sed \
     -e "s#__PORT__#${port}#g" \
     -e "s#__LISTEN__#${listen}#g" \
