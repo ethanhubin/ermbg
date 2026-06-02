@@ -127,10 +127,14 @@ def test_index_serves_upload_ui():
     assert 'id="pm-cg-maxiter" name="pymatting_cg_maxiter" type="number" min="100" max="10000" step="100" value="1000"' in response.text
     assert 'id="pm-fg-threshold" name="pymatting_fg_threshold" type="number" min="0" max="96" step="0.5" value="24"' in response.text
     assert 'id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"' in response.text
-    assert '<span>保留阴影</span><input id="shadow-enabled" name="shadow_enabled" type="checkbox" checked>' in response.text
-    assert 'const shadowEnabled = document.getElementById("shadow-enabled");' in response.text
-    assert 'shadowEnabled.disabled = isBusy' in response.text
-    assert 'formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false")' in response.text
+    assert '<label>阴影策略<select id="shadow-mode" name="shadow_mode"><option value="auto" selected>自动</option><option value="on">保留</option><option value="off">关闭</option></select></label>' in response.text
+    assert 'const shadowMode = document.getElementById("shadow-mode");' in response.text
+    assert 'shadowMode.disabled = isBusy' in response.text
+    assert 'formData.append("shadow_mode", shadowMode.value)' in response.text
+    assert "function completionBackendLabel(payload)" in response.text
+    assert "directWorker.execution_backend || autoRoute.execution_backend" in response.text
+    assert "payload.execution_profile || directWorker.execution_profile || autoRoute.execution_profile" in response.text
+    assert "statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed)" in response.text
     assert "pymattingSettingControls" in response.text
     assert 'const baseBackend = backend.value.split(":")[0];' in response.text
     assert 'corridorSettings.classList.toggle("is-visible", baseBackend === "comfy-corridorkey" || baseBackend === "direct-corridorkey")' in response.text
@@ -234,11 +238,11 @@ def test_matte_page_lists_named_direct_worker_endpoints(monkeypatch):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert '<option value="direct-worker:local">Direct Worker local · http://127.0.0.1:7871</option>' in response.text
-    assert '<option value="direct-worker:remote">Direct Worker remote · http://192.168.0.8:7871</option>' in response.text
+    assert '<option value="direct-worker:local">Direct Worker local · [local] http://127.0.0.1:7871</option>' in response.text
+    assert '<option value="direct-worker:remote">Direct Worker remote · [remote] http://192.168.0.8:7871</option>' in response.text
     assert (
         '<option value="direct-corridorkey:remote">'
-        "Direct Worker CorridorKey remote · http://192.168.0.8:7871</option>"
+        "Direct Worker CorridorKey remote · [remote] http://192.168.0.8:7871</option>"
     ) in response.text
 
 
@@ -1046,7 +1050,7 @@ def test_game_eval_regions_serves_bbox_overlay(monkeypatch, tmp_path):
 
 def test_matte_endpoint_returns_png(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del image, backend, qa, kwargs
         rgba = np.zeros((8, 8, 4), dtype=np.uint8)
         rgba[..., 0] = 220
@@ -1080,7 +1084,7 @@ def test_matte_endpoint_returns_png(monkeypatch):
 
 def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -1096,7 +1100,7 @@ def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
         )
 
     def fake_local_candidate(image_rgb, base_rgba, background_color, backend="auto", **kwargs):
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del image_rgb, base_rgba, background_color, backend, kwargs
         rgba = np.zeros((16, 16, 4), dtype=np.uint8)
         rgba[..., :3] = (10, 20, 30)
@@ -1123,7 +1127,7 @@ def test_matte_endpoint_returns_local_ownership_png_when_available(monkeypatch):
 
 def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del backend, qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -1174,7 +1178,7 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
 def test_matte_candidates_endpoint_serializes_comfy_rmbg_debug(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
         assert backend == "comfy-rmbg"
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -1500,7 +1504,7 @@ def test_matte_candidates_endpoint_auto_direct_worker_falls_back_to_configured_b
 def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch):
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
         assert backend == "auto"
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         del qa, kwargs
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
@@ -1559,7 +1563,7 @@ def test_matte_candidates_endpoint_accepts_pymatting_known_b_backend(monkeypatch
 
     def fake_matte_image(image, backend="auto", qa=False, **kwargs):
         assert backend == "pymatting-known-b"
-        assert kwargs["shadow_mode"] == "on"
+        assert kwargs["shadow_mode"] == "auto"
         captured.update(kwargs)
         del image, qa
         rgba = np.zeros((16, 16, 4), dtype=np.uint8)
@@ -1720,7 +1724,7 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["shadow_mode"] == "on"
+    assert captured["shadow_mode"] == "auto"
     assert captured["corridorkey_gamma_space"] == "Linear"
     assert captured["corridorkey_despill_strength"] == 0.25
     assert captured["corridorkey_refiner_strength"] == 1.5

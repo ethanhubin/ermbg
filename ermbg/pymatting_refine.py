@@ -1705,7 +1705,11 @@ def _estimate_known_background_seed(image_srgb: np.ndarray) -> tuple[tuple[int, 
     corner_agreement = float(np.std(medians, axis=0).mean())
     sigma = float(np.std(pixels.astype(np.float32), axis=0).mean())
     bg_arr = np.median(pixels, axis=0).astype(np.uint8)
-    if corner_agreement <= 4.0 and sigma <= 6.0:
+    # Smooth generated/studio backgrounds can drift a few RGB units from one
+    # corner to another while still being a valid single known-B after the
+    # normalization prepass. Keep the internal-variance gate tight so textured
+    # or noisy photo borders do not pass as deterministic known background.
+    if corner_agreement <= 6.0 and sigma <= 6.0:
         return tuple(int(c) for c in bg_arr), {
             "accepted": True,
             "reason": "accepted",

@@ -63,6 +63,9 @@ class CorridorKeyAssetAnalysis:
     key_color_compact_fill: float
     key_color_compact_fraction: float
     key_transition_fraction: float
+    foreground_bbox_xyxy: tuple[int, int, int, int] | None
+    foreground_aspect_ratio: float | None
+    foreground_long_side: int
     hard_screen_residue_risk: float
     small_component_risk: bool
     parameter_profile: str
@@ -73,6 +76,8 @@ class CorridorKeyAssetAnalysis:
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["background_color"] = list(self.background_color)
+        if self.foreground_bbox_xyxy is not None:
+            payload["foreground_bbox_xyxy"] = list(self.foreground_bbox_xyxy)
         payload["decision_candidates"] = [candidate.to_dict() for candidate in self.decision_candidates]
         payload["recommended_settings"] = self.recommended_settings.to_dict()
         return payload
@@ -132,6 +137,29 @@ def _foreground_component_stats(key_alpha: np.ndarray) -> tuple[bool, int]:
     small_limit = max(8, int(image_area * 0.0008))
     small_components = sum(1 for area in areas if area <= small_limit)
     return small_components >= 6, small_components
+
+
+def _foreground_geometry(key_alpha: np.ndarray) -> tuple[tuple[int, int, int, int] | None, float | None, int]:
+    """Return largest foreground-support geometry for semantic routing.
+
+    Canvas size is a weak proxy for asset type: a wide button can sit on a
+    square export canvas, and a character can leave wide empty margins. Use the
+    observed key support bbox so character/button routing follows the subject
+    geometry rather than the file dimensions.
+    """
+    support = key_alpha >= 0.16
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), connectivity=8)
+    if n_labels <= 1:
+        return None, None, 0
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    label_offset = int(np.argmax(areas)) + 1
+    x = int(stats[label_offset, cv2.CC_STAT_LEFT])
+    y = int(stats[label_offset, cv2.CC_STAT_TOP])
+    w = int(stats[label_offset, cv2.CC_STAT_WIDTH])
+    h = int(stats[label_offset, cv2.CC_STAT_HEIGHT])
+    if w <= 0 or h <= 0:
+        return None, None, 0
+    return (x, y, x + w, y + h), float(w / max(1, h)), int(max(w, h))
 
 
 def _key_color_material_stats(
@@ -421,6 +449,8 @@ def _decision_candidates(
     *,
     image_aspect_ratio: float,
     image_long_side: int,
+    foreground_aspect_ratio: float | None,
+    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -435,6 +465,8 @@ def _decision_candidates(
     semantic_candidates = _semantic_decision_candidates(
         image_aspect_ratio=image_aspect_ratio,
         image_long_side=image_long_side,
+        foreground_aspect_ratio=foreground_aspect_ratio,
+        foreground_long_side=foreground_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -474,6 +506,8 @@ def _semantic_decision_candidates(
     *,
     image_aspect_ratio: float,
     image_long_side: int,
+    foreground_aspect_ratio: float | None,
+    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -501,8 +535,10 @@ def _semantic_decision_candidates(
         key_color_compact_fraction=key_color_compact_fraction,
         key_transition_fraction=key_transition_fraction,
     )
+    subject_aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else image_aspect_ratio
+    subject_long_side = foreground_long_side if foreground_long_side > 0 else image_long_side
     opaque_hard_ui_candidates = _opaque_hard_ui_profile_candidates(
-        image_aspect_ratio=image_aspect_ratio,
+        image_aspect_ratio=subject_aspect,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -514,7 +550,14 @@ def _semantic_decision_candidates(
     candidates: list[CorridorKeyDecisionCandidate] = []
     candidates.extend(opaque_hard_ui_candidates)
 
-    composite_character = 0.75 <= image_aspect_ratio <= 1.35 and image_long_side >= 512
+    # Size is only a coarse eligibility gate. The semantic claim is "character",
+    # so the observed foreground support must also be roughly character-shaped;
+    # otherwise wide buttons exported on square canvases are misrouted.
+    composite_character = (
+        0.75 <= image_aspect_ratio <= 1.35
+        and 0.55 <= subject_aspect <= 1.45
+        and subject_long_side >= 512
+    )
     if composite_character:
         candidates.append(
             CorridorKeyDecisionCandidate(
@@ -530,7 +573,7 @@ def _semantic_decision_candidates(
         )
 
     translucent_button = (
-        image_aspect_ratio >= 1.45
+        subject_aspect >= 1.45
         and subject_key_color_risk >= 0.25
         and key_transition_fraction >= 0.30
     )
@@ -760,6 +803,8 @@ def _recommend_settings(
     preset: str,
     image_aspect_ratio: float,
     image_long_side: int,
+    foreground_aspect_ratio: float | None,
+    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -820,6 +865,8 @@ def _recommend_settings(
     candidates = _decision_candidates(
         image_aspect_ratio=image_aspect_ratio,
         image_long_side=image_long_side,
+        foreground_aspect_ratio=foreground_aspect_ratio,
+        foreground_long_side=foreground_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -924,6 +971,7 @@ def corridorkey_analyze_asset(
         notes.append("auto detected green screen")
 
     key_alpha = chromatic_key_alpha(image_srgb, background_color, KeyerThresholds(bg_max=5.5, fg_min=18.0))
+    foreground_bbox, foreground_aspect, foreground_long_side = _foreground_geometry(key_alpha)
     small_component_risk, small_count = _foreground_component_stats(key_alpha)
     if small_component_risk:
         notes.append(f"detected {small_count} small foreground components")
@@ -939,6 +987,8 @@ def corridorkey_analyze_asset(
         preset=preset,
         image_aspect_ratio=float(image_srgb.shape[1] / max(1, image_srgb.shape[0])),
         image_long_side=int(max(image_srgb.shape[:2])),
+        foreground_aspect_ratio=foreground_aspect,
+        foreground_long_side=foreground_long_side,
         screen_mode=selected_mode,
         subject_key_color_risk=subject_risk,
         key_color_solid_fraction=solid_fraction,
@@ -968,6 +1018,9 @@ def corridorkey_analyze_asset(
         key_color_compact_fill=compact_fill,
         key_color_compact_fraction=compact_fraction,
         key_transition_fraction=transition_fraction,
+        foreground_bbox_xyxy=foreground_bbox,
+        foreground_aspect_ratio=foreground_aspect,
+        foreground_long_side=foreground_long_side,
         hard_screen_residue_risk=hard_residue_risk,
         small_component_risk=small_component_risk,
         parameter_profile=parameter_profile,

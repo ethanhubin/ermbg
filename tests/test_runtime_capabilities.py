@@ -107,6 +107,28 @@ def test_inspect_direct_worker_runtime_passes_health_payload(monkeypatch: pytest
     assert payload["capabilities"]["batch_matte"] is True
 
 
+def test_inspect_direct_worker_runtime_reports_remote_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(caps.requests, "get", lambda url, *, timeout: _FakeResponse({"status": "ok"}))
+
+    payload = caps.inspect_direct_worker_runtime(direct_worker_url="http://192.168.0.8:7871", timeout=1.0)
+
+    assert payload["location"] == "remote"
+
+
+def test_inspect_direct_worker_runtime_reports_location_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(url: str, *, timeout: float) -> _FakeResponse:
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(caps.requests, "get", boom)
+
+    # Even when the worker is down the UI must still be able to say *which*
+    # worker (local vs remote) is unreachable.
+    payload = caps.inspect_direct_worker_runtime(direct_worker_url="http://127.0.0.1:7871", timeout=1.0)
+
+    assert payload["status"] == "error"
+    assert payload["location"] == "local"
+
+
 def test_collect_runtime_capabilities_combines_all_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(caps, "inspect_comfy_runtime", lambda **kwargs: {"status": "ok", "kind": "comfy"})
     monkeypatch.setattr(caps, "inspect_direct_worker_runtime", lambda **kwargs: {"status": "ok", "kind": "worker"})

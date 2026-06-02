@@ -42,7 +42,7 @@ from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
 from .runtime_capabilities import collect_runtime_capabilities
-from .settings import get_bool_setting, get_direct_worker_endpoints, get_setting
+from .settings import direct_worker_location, get_bool_setting, get_direct_worker_endpoints, get_setting
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -200,15 +200,15 @@ def _backend_options_html(*, selected: str = "auto") -> str:
         return f'<option value="{html.escape(value)}"{selected_attr}>{html.escape(label)}</option>'
 
     rows = [
-        option("auto", f"Auto -> {WEB_AUTO_BACKEND} · {WEB_DIRECT_WORKER_URL}"),
+        option("auto", f"Auto -> {WEB_AUTO_BACKEND} · [{direct_worker_location(WEB_DIRECT_WORKER_URL)}] {WEB_DIRECT_WORKER_URL}"),
     ]
     primary_url = WEB_DIRECT_WORKER_URL
-    rows.append(option("direct-worker", f"Direct Worker primary · {primary_url}"))
+    rows.append(option("direct-worker", f"Direct Worker primary · [{direct_worker_location(primary_url)}] {primary_url}"))
     for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
-        rows.append(option(f"direct-worker:{name}", f"Direct Worker {name} · {url}"))
-    rows.append(option("direct-corridorkey", f"Direct Worker CorridorKey primary · {primary_url}"))
+        rows.append(option(f"direct-worker:{name}", f"Direct Worker {name} · [{direct_worker_location(url)}] {url}"))
+    rows.append(option("direct-corridorkey", f"Direct Worker CorridorKey primary · [{direct_worker_location(primary_url)}] {primary_url}"))
     for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
-        rows.append(option(f"direct-corridorkey:{name}", f"Direct Worker CorridorKey {name} · {url}"))
+        rows.append(option(f"direct-corridorkey:{name}", f"Direct Worker CorridorKey {name} · [{direct_worker_location(url)}] {url}"))
     rows.append(option("pymatting-known-b", "PyMatting Known-B local process"))
     return "".join(rows)
 
@@ -650,7 +650,7 @@ def _matte_page_html() -> str:
               <label>CG rtol<input id="pm-cg-rtol" name="pymatting_cg_rtol" type="number" min="0.00000001" max="0.01" step="any" value="0.000001"></label>
             </div>
           </details>
-          <label class="check-label"><span>保留阴影</span><input id="shadow-enabled" name="shadow_enabled" type="checkbox" checked></label>
+          <label>阴影策略<select id="shadow-mode" name="shadow_mode"><option value="auto" selected>自动</option><option value="on">保留</option><option value="off">关闭</option></select></label>
         </div>
       </details>
     </form>
@@ -717,7 +717,7 @@ def _matte_page_html() -> str:
     const pymattingSettings = document.getElementById("pymatting-settings");
     const corridorSettingControls = Array.from(document.querySelectorAll("[name^='corridorkey_']"));
     const pymattingSettingControls = Array.from(document.querySelectorAll("[name^='pymatting_']"));
-    const shadowEnabled = document.getElementById("shadow-enabled");
+    const shadowMode = document.getElementById("shadow-mode");
     const autoMask = document.getElementById("ck-auto-mask");
     const hardUiHintMode = document.getElementById("ck-hard-ui-hint-mode");
     const samMaskButton = document.getElementById("sam-mask-button");
@@ -758,9 +758,24 @@ def _matte_page_html() -> str:
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
+    function completionBackendLabel(payload) {
+      const debug = payload && payload.debug ? payload.debug : {};
+      const directWorker = debug.direct_worker || {};
+      const autoRoute = debug.auto_route || {};
+      const executionBackend = payload.execution_backend || directWorker.execution_backend || autoRoute.execution_backend;
+      const backendLabel = executionBackend || payload.backend || backend.value;
+      const route = payload.route || directWorker.route || autoRoute.route;
+      const profile = payload.execution_profile || directWorker.execution_profile || autoRoute.execution_profile || payload.parameter_profile || directWorker.parameter_profile || autoRoute.parameter_profile;
+      return [backendLabel, route, profile].filter((part, index, parts) => part && parts.indexOf(part) === index).join(" · ");
+    }
+    function completionStatusText(payload, elapsed, serverElapsed) {
+      const details = completionBackendLabel(payload);
+      const base = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed}` : `完成 · ${elapsed}`;
+      return details ? `${base} · ${details}` : base;
+    }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
-    async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "comfy-corridorkey" || baseBackend === "direct-corridorkey"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting-known-b" || baseBackend === "comfy-pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
@@ -810,7 +825,7 @@ def _matte_page_html() -> str:
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
     canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => { if (activeView !== "mask") resetPreviewTransform(); });
-    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false"); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); const shouldUseCustomMask = backend.value === "comfy-corridorkey" && !autoMask.checked && maskDirty; const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null; if (hintMaskFile) formData.append("corridorkey_hint_mask", hintMaskFile); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`; strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
+    form.addEventListener("submit", async (event) => { event.preventDefault(); if (!file.files.length) return; const formData = new FormData(); formData.append("file", file.files[0]); formData.append("backend", backend.value); formData.append("shadow_mode", shadowMode.value); corridorSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); }); const shouldUseCustomMask = backend.value === "comfy-corridorkey" && !autoMask.checked && maskDirty; const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null; if (hintMaskFile) formData.append("corridorkey_hint_mask", hintMaskFile); setBusy(true); statusEl.textContent = "正在抠图"; strategyEl.textContent = backend.value; const startedAt = performance.now(); try { const response = await fetch("/api/matte-candidates", { method: "POST", body: formData }); if (!response.ok) { let message = "处理失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); const elapsed = formatElapsed(performance.now() - startedAt); const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null; setCandidatePayloads(payload, file.files[0].name); const strategy = payload.strategy || "done"; const bg = Array.isArray(payload.background) ? payload.background.join(",") : ""; statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed); strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy; } catch (error) { statusEl.textContent = error.message; } finally { setBusy(false); } });
     syncColorProtectionRange();
     syncBackendSettings();
     syncAutoMaskControls();
@@ -1386,6 +1401,23 @@ def _matte_page_html() -> str:
       return `${(ms / 1000).toFixed(2)}s`;
     }
 
+    function completionBackendLabel(payload) {
+      const debug = payload && payload.debug ? payload.debug : {};
+      const directWorker = debug.direct_worker || {};
+      const autoRoute = debug.auto_route || {};
+      const executionBackend = payload.execution_backend || directWorker.execution_backend || autoRoute.execution_backend;
+      const backendLabel = executionBackend || payload.backend || backend.value;
+      const route = payload.route || directWorker.route || autoRoute.route;
+      const profile = payload.execution_profile || directWorker.execution_profile || autoRoute.execution_profile || payload.parameter_profile || directWorker.parameter_profile || autoRoute.parameter_profile;
+      return [backendLabel, route, profile].filter((part, index, parts) => part && parts.indexOf(part) === index).join(" · ");
+    }
+
+    function completionStatusText(payload, elapsed, serverElapsed) {
+      const details = completionBackendLabel(payload);
+      const base = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed}` : `完成 · ${elapsed}`;
+      return details ? `${base} · ${details}` : base;
+    }
+
     function setBusy(isBusy) {
       submit.disabled = isBusy;
       file.disabled = isBusy;
@@ -1604,7 +1636,7 @@ def _matte_page_html() -> str:
         setCandidatePayloads(payload, crop.filename);
         const strategy = payload.strategy || "done";
         const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
-        statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`;
+        statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed);
         strategyEl.textContent = bg ? `${crop.label} · ${strategy} · ${bg}` : `${crop.label} · ${strategy}`;
       } catch (error) {
         statusEl.textContent = error.message;
@@ -1809,7 +1841,7 @@ def _matte_page_html() -> str:
           setCandidatePayloads(payload, file.files[0].name);
           const strategy = payload.strategy || "done";
           const bg = Array.isArray(payload.background) ? payload.background.join(",") : "";
-          statusEl.textContent = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed} · ${payload.backend || backend.value}` : `完成 · ${elapsed}`;
+          statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed);
           strategyEl.textContent = bg ? `${strategy} · ${bg}` : strategy;
         }
       } catch (error) {
@@ -2577,11 +2609,23 @@ def _pymatting_kwargs(
     }
 
 
+def _shadow_mode_from_form(shadow_mode: str | None, shadow_enabled: bool | None) -> str:
+    if shadow_mode is not None and str(shadow_mode).strip():
+        mode = str(shadow_mode).strip().lower()
+        if mode not in {"auto", "on", "off"}:
+            raise HTTPException(status_code=400, detail="shadow_mode must be auto, on, or off")
+        return mode
+    if shadow_enabled is None:
+        return "auto"
+    return "on" if shadow_enabled else "off"
+
+
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
     backend: Annotated[str, Form()] = "auto",
-    shadow_enabled: Annotated[bool, Form()] = True,
+    shadow_mode: Annotated[str | None, Form()] = None,
+    shadow_enabled: Annotated[bool | None, Form()] = None,
     pymatting_method: Annotated[str, Form()] = "cf",
     pymatting_image_space: Annotated[str, Form()] = "linear",
     pymatting_bg_source: Annotated[str, Form()] = "auto",
@@ -2597,7 +2641,7 @@ def matte_endpoint(
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
 
     image = _load_upload_image(file)
-    shadow_mode = "on" if shadow_enabled else "off"
+    shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
     pymatting_params = _pymatting_kwargs(
         pymatting_method=pymatting_method,
         pymatting_image_space=pymatting_image_space,
@@ -2658,7 +2702,8 @@ def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
     corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
     backend: Annotated[str, Form()] = "auto",
-    shadow_enabled: Annotated[bool, Form()] = True,
+    shadow_mode: Annotated[str | None, Form()] = None,
+    shadow_enabled: Annotated[bool | None, Form()] = None,
     corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
     corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
     corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
@@ -2715,7 +2760,7 @@ def matte_candidates_endpoint(
         raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
     if corridorkey_protection_fg_min <= corridorkey_protection_bg_max:
         raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
-    shadow_mode = "on" if shadow_enabled else "off"
+    shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
     pymatting_params = _pymatting_kwargs(
         pymatting_method=pymatting_method,
         pymatting_image_space=pymatting_image_space,
@@ -2935,6 +2980,12 @@ def _image_url(path_value: str | Path | None) -> str | None:
     if path_value is None:
         return None
     path = _resolve_project_path(path_value)
+    # The /eval/game/file endpoint only serves out/ and samples/. Mirror that
+    # allow-list here so a manifest field that points elsewhere under the repo
+    # (e.g. ermbg/ source, docs/assets) never gets a servable URL. Path values
+    # originate from on-disk manifests/case.json that are not fully trusted.
+    if not any(_is_relative_to(path, (PROJECT_ROOT / root).resolve()) for root in ("out", "samples")):
+        return None
     if not path.exists() or path.suffix.lower() not in SERVABLE_IMAGE_SUFFIXES:
         return None
     rel = path.relative_to(PROJECT_ROOT).as_posix()
@@ -5683,8 +5734,10 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const payload = await response.json();
         setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${{payload.local && payload.local.version ? payload.local.version : ""}}`);
-        const directOk = payload.direct_worker && payload.direct_worker.status === "ok";
-        setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable");
+        const dw = payload.direct_worker || {{}};
+        const directOk = dw.status === "ok";
+        const directLabel = dw.location ? `Direct · ${{dw.location}}` : "Direct";
+        setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable"));
       }} catch (error) {{
         setRuntimePill("local", "Local", "warn", "capability check failed");
         setRuntimePill("direct", "Direct", "warn", "capability check failed");

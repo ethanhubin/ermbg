@@ -358,7 +358,7 @@ def direct_matte_from_decision(
     *,
     decision: RouteDecision,
     source_alpha: np.ndarray | None = None,
-    shadow_mode: str = "on",
+    shadow_mode: str = "auto",
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     ck_factory: DirectCorridorKeyClientFactory | None = None,
@@ -376,6 +376,9 @@ def direct_matte_from_decision(
     auto_route = decision.to_dict()
     selected_backend = decision.backend
     params = dict(decision.params)
+    shadow_mode = str(shadow_mode or "auto").strip().lower()
+    if shadow_mode not in {"auto", "on", "off"}:
+        raise ValueError("shadow_mode must be 'auto', 'on', or 'off'")
 
     t = time.perf_counter()
     if selected_backend == "passthrough":
@@ -439,6 +442,7 @@ def direct_matte_from_decision(
         "asset_kind": auto_route.get("asset_kind"),
         "parameter_profile": auto_route.get("parameter_profile"),
         "execution_profile": auto_route.get("execution_profile"),
+        "shadow_mode": shadow_mode,
     }
     if execution_backend == "direct-corridorkey":
         hard_ui_hint = response.debug.get("hard_ui_hint") if isinstance(response.debug, dict) else None
@@ -451,7 +455,7 @@ def direct_matte_auto(
     rgb: np.ndarray,
     *,
     source_alpha: np.ndarray | None = None,
-    shadow_mode: str = "on",
+    shadow_mode: str = "auto",
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",

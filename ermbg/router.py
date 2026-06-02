@@ -522,22 +522,33 @@ def classify_strategy(
     )
 
 
-def _route_asset_kind(image_srgb: np.ndarray, profile: str, screen_mode: str) -> str:
+def _route_asset_kind(
+    image_srgb: np.ndarray,
+    profile: str,
+    screen_mode: str,
+    *,
+    foreground_aspect_ratio: float | None = None,
+    foreground_long_side: int | None = None,
+) -> str:
     h, w = image_srgb.shape[:2]
-    aspect = float(w / max(1, h))
-    long_side = int(max(h, w))
+    image_aspect = float(w / max(1, h))
+    image_long_side = int(max(h, w))
+    aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else image_aspect
+    long_side = foreground_long_side if foreground_long_side is not None and foreground_long_side > 0 else image_long_side
     # Character routing should not be a pure "square image" shortcut. The game
     # eval set has 512x512 square UI controls with known-B holes that can look
     # composite to CorridorKey's profile classifier; treating every 512 square
     # as a character sends deterministic button mechanics to the learned keyer.
-    # Reserve the automatic square-character rule for large composite assets.
-    if profile == "composite_character_corridor_only" and long_side >= 768:
-        return "character"
-    if 0.75 <= aspect <= 1.35 and long_side >= 768:
+    # Reserve character routing for large composite assets whose observed
+    # foreground support is not button-wide; square export canvases are common
+    # for wide UI buttons.
+    if profile == "composite_character_corridor_only" and 0.55 <= aspect <= 1.45 and long_side >= 768:
         return "character"
     if profile == "composite_character_corridor_only" and long_side < 768:
         return "button"
     if aspect >= 1.45 or profile.startswith("opaque_hard_ui") or profile == "translucent_button":
+        return "button"
+    if profile in {"edge_cleanup", "balanced", "key_color_material"} and long_side >= 256:
         return "button"
     if screen_mode in {"green", "blue"}:
         return "icon"
@@ -589,6 +600,8 @@ def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[
 def _wide_button_complex_boundary_score(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
+    *,
+    foreground_aspect_ratio: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Detect glass/translucent button edges missed by aggregate CK profiles.
 
@@ -602,9 +615,9 @@ def _wide_button_complex_boundary_score(
     semi-alpha fraction provides the separate glass/translucency escape hatch.
     """
     h, w = image_srgb.shape[:2]
-    aspect = float(w / max(1, h))
+    aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else float(w / max(1, h))
     if aspect < 1.45:
-        return False, {"enabled": True, "reason": "not wide button"}
+        return False, {"enabled": True, "foreground_aspect_ratio": aspect, "reason": "not wide button"}
 
     key = chromatic_key_alpha(
         image_srgb,
@@ -645,6 +658,7 @@ def _wide_button_complex_boundary_score(
     accepted = gradient_gate or semi_alpha_gate or combined_glass_gate
     return accepted, {
         "enabled": True,
+        "foreground_aspect_ratio": aspect,
         "support_pixels": support_pixels,
         "support_fraction": float(support.mean()),
         "semi_alpha_fraction": semi_alpha_fraction,
@@ -726,6 +740,8 @@ def classify_route(
         image_srgb,
         profile,
         ck.screen_mode if known_corridor_screen else "unknown",
+        foreground_aspect_ratio=ck.foreground_aspect_ratio,
+        foreground_long_side=ck.foreground_long_side,
     )
     reasons: list[str] = []
     analysis: dict[str, Any] = {
@@ -742,6 +758,7 @@ def classify_route(
     complex_button_boundary, complex_button_info = _wide_button_complex_boundary_score(
         image_srgb,
         ck.background_color,
+        foreground_aspect_ratio=ck.foreground_aspect_ratio,
     )
     analysis["complex_button_boundary"] = complex_button_info
     if known_corridor_screen and (

@@ -8,7 +8,7 @@ from typing import Any
 import requests
 
 from .comfy import DEFAULT_COMFY_URL
-from .settings import get_direct_worker_url
+from .settings import direct_worker_location, get_direct_worker_url
 
 DEFAULT_DIRECT_WORKER_URL = get_direct_worker_url()
 
@@ -138,11 +138,16 @@ def inspect_direct_worker_runtime(
         if not isinstance(data, dict):
             raise TypeError("Direct Worker /health did not return a JSON object")
     except Exception as exc:
-        return _error_payload(base_url, exc)
+        payload = _error_payload(base_url, exc)
+        # Report location even on failure so the UI can say which worker
+        # (local vs remote) is unreachable instead of just "Direct down".
+        payload["location"] = direct_worker_location(base_url)
+        return payload
 
     payload = dict(data)
     payload.setdefault("status", "ok")
     payload["url"] = base_url
+    payload["location"] = direct_worker_location(base_url)
     payload.setdefault("capabilities", {})
     return payload
 

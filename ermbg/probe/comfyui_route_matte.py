@@ -177,7 +177,7 @@ class ComfyUIRouteMatteClient:
         *,
         source_alpha: np.ndarray | None = None,
         fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
-        shadow_mode: str = "on",
+        shadow_mode: str = "auto",
         corridorkey_screen_mode: str = "auto",
         corridorkey_preset: str = "auto",
         corridorkey_hard_ui_hint_mode: str = "bbox_2px",

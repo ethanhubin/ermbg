@@ -225,6 +225,23 @@ def _auto_backend_for_image(
     return decision.backend, decision.to_dict(), decision
 
 
+def _pymatting_known_b_auto_background_fallback_info(
+    *,
+    selected_bg: tuple[int, int, int],
+    auto_bg_info: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "accepted": True,
+        "reason": "fallback_after_unstable_auto_background",
+        "source": "auto_fallback_best_effort",
+        "background_color": list(selected_bg),
+        "auto_background": {
+            **auto_bg_info,
+            "accepted": False,
+        },
+    }
+
+
 def matte_image(
     image: ImageLike,
     output_dir: str | Path | None = None,
@@ -236,7 +253,7 @@ def matte_image(
     despill: str | None = None,
     use_keyer: bool | None = None,
     subject_mask: MaskLike | None = None,
-    shadow_mode: str = "on",
+    shadow_mode: str = "auto",
     vlm_prior: bool = False,
     vlm_provider: str = "openai",
     vlm_model: str = "gpt-4o-mini",
@@ -289,8 +306,9 @@ def matte_image(
         despill, use_keyer: deprecated compatibility arguments. Maintained
             backends derive despill/keyer behavior from the selected route.
         subject_mask: removed with the old ERMBG ownership-repair path.
-        shadow_mode: ``on`` preserves full shadow recovery, ``off`` skips it
-            for faster previews, ``auto`` currently preserves ``on`` behavior.
+        shadow_mode: ``auto`` uses backend defaults: PyMatting Known-B keeps
+            shadow recovery on, while CorridorKey skips its shadow patch.
+            ``on`` and ``off`` force the behavior.
         vlm_prior: removed with the old semantic ownership-repair path.
         vlm_provider, vlm_prior_mode: deprecated compatibility arguments.
         solid_graphic_prepass: deprecated compatibility argument; ERMBG auto
@@ -332,6 +350,9 @@ def matte_image(
         raise ValueError("vlm_prior belonged to the removed legacy ERMBG matting path")
     if backend in {"birefnet", "grabcut", "comfy-ermbg"}:
         raise ValueError(f"backend={backend!r} was removed; use backend='auto' or an explicit routed backend")
+    shadow_mode = str(shadow_mode or "auto").strip().lower()
+    if shadow_mode not in {"auto", "on", "off"}:
+        raise ValueError("shadow_mode must be 'auto', 'on', or 'off'")
 
     auto_route: dict[str, Any] | None = None
     auto_params: dict[str, Any] = {}
@@ -728,10 +749,20 @@ def _matte_image_pymatting_known_b(
         raise ValueError("pymatting_cg_rtol must be > 0")
 
     bg_info: dict[str, Any]
+    effective_bg_source = bg_source
+    effective_auto_adapt = bool(auto_adapt)
     if bg_source == "auto":
         selected_bg, bg_info = estimate_stable_background_color(rgb)
         if not bg_info.get("accepted", False):
-            raise ValueError(f"pymatting-known-b requires a stable known background: {bg_info.get('reason')}")
+            bg_info = _pymatting_known_b_auto_background_fallback_info(
+                selected_bg=selected_bg,
+                auto_bg_info=bg_info,
+            )
+            effective_bg_source = "custom"
+            # Unknown-background fallback is deliberately bounded. Adaptive
+            # thresholds can turn noisy/photo borders into over-broad background
+            # evidence, which is the failure mode this fallback is avoiding.
+            effective_auto_adapt = False
     elif bg_source == "green":
         selected_bg = (0, 200, 0)
         bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
@@ -749,7 +780,7 @@ def _matte_image_pymatting_known_b(
         selected_bg,
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
-        adaptive=bool(auto_adapt),
+        adaptive=effective_auto_adapt,
     )
 
     trimap, trimap_info = build_known_background_trimap(
@@ -758,7 +789,7 @@ def _matte_image_pymatting_known_b(
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
-        adaptive=bool(auto_adapt),
+        adaptive=effective_auto_adapt,
     )
     pm = estimate_alpha_with_pymatting(
         processing_rgb,
@@ -843,11 +874,13 @@ def _matte_image_pymatting_known_b(
                 "parameters": {
                     "method": method,
                     "image_space": image_space,
-                    "bg_source": bg_source,
+                    "bg_source": effective_bg_source,
+                    "requested_bg_source": bg_source,
                     "bg_threshold": float(bg_threshold),
                     "fg_threshold": float(fg_threshold),
                     "boundary_band_px": int(boundary_band_px),
-                    "auto_adapt": bool(auto_adapt),
+                    "auto_adapt": effective_auto_adapt,
+                    "requested_auto_adapt": bool(auto_adapt),
                     "cg_maxiter": int(cg_maxiter),
                     "cg_rtol": float(cg_rtol),
                 },
@@ -991,10 +1024,17 @@ def _matte_image_comfy_pymatting_known_b(
         raise ValueError("pymatting_cg_rtol must be > 0")
 
     bg_info: dict[str, Any]
+    effective_bg_source = bg_source
+    effective_auto_adapt = bool(auto_adapt)
     if bg_source == "auto":
         selected_bg, bg_info = estimate_stable_background_color(rgb)
         if not bg_info.get("accepted", False):
-            raise ValueError(f"comfy-pymatting-known-b requires a stable known background: {bg_info.get('reason')}")
+            bg_info = _pymatting_known_b_auto_background_fallback_info(
+                selected_bg=selected_bg,
+                auto_bg_info=bg_info,
+            )
+            effective_bg_source = "custom"
+            effective_auto_adapt = False
     elif bg_source == "green":
         selected_bg = (0, 200, 0)
         bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
@@ -1012,7 +1052,7 @@ def _matte_image_comfy_pymatting_known_b(
         selected_bg,
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
-        adaptive=bool(auto_adapt),
+        adaptive=effective_auto_adapt,
     )
 
     # Build the same trimap locally for report/debug symmetry. The remote node
@@ -1024,19 +1064,19 @@ def _matte_image_comfy_pymatting_known_b(
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
-        adaptive=bool(auto_adapt),
+        adaptive=effective_auto_adapt,
     )
     client = ComfyUIPyMattingKnownBClient(url=comfy_url)
     remote = client.matte(
         processing_rgb,
         method=method,
         image_space=image_space,
-        bg_source=bg_source,
+        bg_source=effective_bg_source,
         bg_color=selected_bg,
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
-        auto_adapt=bool(auto_adapt),
+        auto_adapt=effective_auto_adapt,
         cg_maxiter=int(cg_maxiter),
         cg_rtol=float(cg_rtol),
     )
@@ -1059,11 +1099,13 @@ def _matte_image_comfy_pymatting_known_b(
     parameters = {
         "method": method,
         "image_space": image_space,
-        "bg_source": bg_source,
+        "bg_source": effective_bg_source,
+        "requested_bg_source": bg_source,
         "bg_threshold": float(bg_threshold),
         "fg_threshold": float(fg_threshold),
         "boundary_band_px": int(boundary_band_px),
-        "auto_adapt": bool(auto_adapt),
+        "auto_adapt": effective_auto_adapt,
+        "requested_auto_adapt": bool(auto_adapt),
         "cg_maxiter": int(cg_maxiter),
         "cg_rtol": float(cg_rtol),
     }
@@ -1810,14 +1852,14 @@ def _corridorkey_shadow_patch(
     )
 
     subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
-    if shadow_mode == "off":
+    if shadow_mode in {"off", "auto"}:
         empty = np.zeros(subject.shape, dtype=np.float32)
         info = {
             "mode": shadow_mode,
             "source": "corridorkey_shadow_patch",
             "detected": False,
             "applied": False,
-            "reason": "shadow_mode=off",
+            "reason": f"shadow_mode={shadow_mode}",
         }
         return subject, subject_foreground_srgb, empty, empty, info
 

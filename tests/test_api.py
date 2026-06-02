@@ -108,6 +108,27 @@ def test_matte_image_pymatting_known_b_accepts_parameters():
     assert params["cg_rtol"] == 1e-5
 
 
+def test_matte_image_pymatting_known_b_auto_background_falls_back_when_unstable():
+    h = w = 64
+    yy = np.linspace(0.0, 24.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(0.0, 24.0, w, dtype=np.float32)[None, :]
+    gray = 154.0 + (xx + yy) * 0.5
+    img = np.dstack([gray, gray, gray + 2.0]).astype(np.uint8)
+    img[20:46, 22:42] = (220, 40, 30)
+
+    r = matte_image(img, backend="pymatting-known-b", shadow_mode="off")
+
+    background = r.debug["pymatting_known_b"]["background"]
+    params = r.debug["pymatting_known_b"]["parameters"]
+    assert r.strategy_name == "pymatting_known_b"
+    assert background["source"] == "auto_fallback_best_effort"
+    assert background["auto_background"]["accepted"] is False
+    assert background["auto_background"]["reason"] == "corner/background border is unstable"
+    assert params["requested_bg_source"] == "auto"
+    assert params["bg_source"] == "custom"
+    assert params["auto_adapt"] is False
+
+
 def test_matte_image_pymatting_known_b_recovers_neutral_ui_shadow():
     img = np.full((128, 128, 3), [0, 200, 0], dtype=np.uint8)
     img[72:98, 24:104] = [0, 120, 0]

@@ -372,7 +372,7 @@ class ErmbgRouteMatte:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "shadow_mode": (["on", "off", "auto"], {"default": "on"}),
+                "shadow_mode": (["auto", "on", "off"], {"default": "auto"}),
                 "corridorkey_screen_mode": (["auto", "green", "blue"], {"default": "auto"}),
                 "corridorkey_preset": (["auto", "detail_safe", "spill_safe", "manual"], {"default": "auto"}),
                 "corridorkey_hard_ui_hint_mode": (
@@ -434,7 +434,6 @@ class ErmbgRouteMatte:
             _matte_image_passthrough,
             _matte_image_pymatting_known_b,
         )
-
         started = time.perf_counter()
         rgb = _image_to_numpy(image)
         source_alpha = _optional_source_alpha(source_mask)
@@ -447,6 +446,9 @@ class ErmbgRouteMatte:
             fallback_background_color=fallback_bg,
         )
         params = dict(decision.params)
+        shadow_mode = str(shadow_mode or "auto").strip().lower()
+        if shadow_mode not in {"auto", "on", "off"}:
+            raise ValueError("shadow_mode must be auto, on, or off")
         if selected_backend == "passthrough":
             result = _matte_image_passthrough(
                 rgb,
@@ -524,6 +526,8 @@ class ErmbgRouteMatte:
             "route": auto_route.get("route"),
             "asset_kind": auto_route.get("asset_kind"),
             "parameter_profile": auto_route.get("parameter_profile"),
+            "execution_profile": auto_route.get("execution_profile"),
+            "shadow_mode": shadow_mode,
             "background_color": list(result.background_color),
             "strategy_name": result.strategy_name,
             "report": _json_safe(result.report),

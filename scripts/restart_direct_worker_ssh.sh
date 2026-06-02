@@ -48,6 +48,34 @@ if ! git diff --quiet --ignore-submodules -- 2>/dev/null; then
 fi
 build_sha="${ERMBG_BUILD_GIT_SHA:-$default_build_sha}"
 
+# These values are interpolated by sed (delimiter '#', and '&' is a backreference)
+# and then embedded inside PowerShell double-quoted strings ("__BUILD_SHA__",
+# "__PYTHON_WIN__", ...). A stray '#', '&', '"', '`', '$', backslash, or newline
+# would silently corrupt the generated task script rather than fail loudly, so
+# reject them up front. Ports / worker counts must be plain integers.
+require_safe() {
+  local name="$1" value="$2"
+  if printf '%s' "$value" | LC_ALL=C grep -q '[#&"`$\\]' || [[ "$value" == *$'\n'* ]]; then
+    echo "$name contains characters that would corrupt the remote script: '$value'" >&2
+    exit 2
+  fi
+}
+require_int() {
+  local name="$1" value="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be a positive integer, got: '$value'" >&2
+    exit 2
+  fi
+}
+
+require_int "ERMBG_DIRECT_PORT" "$port"
+require_int "ERMBG_DIRECT_CPU_WORKERS" "$cpu_workers"
+require_safe "ERMBG_DIRECT_LISTEN" "$listen"
+require_safe "ERMBG_DIRECT_TASK" "$task_name"
+require_safe "ERMBG_BUILD_GIT_SHA" "$build_sha"
+require_safe "ERMBG_REMOTE_ROOT" "$remote_root"
+require_safe "ERMBG_REMOTE_PYTHON" "$remote_python"
+
 if [[ -n "${ERMBG_SSH_PASSWORD:-}" ]]; then
   if ! command -v sshpass >/dev/null 2>&1; then
     echo "ERMBG_SSH_PASSWORD is set but sshpass is not installed." >&2

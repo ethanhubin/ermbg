@@ -43,7 +43,7 @@ def matte_image_direct_worker(
     *,
     direct_worker_url: str = DEFAULT_DIRECT_WORKER_URL,
     execution_backend: str = "auto",
-    shadow_mode: str = "on",
+    shadow_mode: str = "auto",
     corridorkey_gamma_space: str | None = None,
     corridorkey_despill_strength: float | None = None,
     corridorkey_refiner_strength: float | None = None,
@@ -117,6 +117,7 @@ def matte_image_direct_worker(
         "asset_kind": payload.get("asset_kind"),
         "parameter_profile": payload.get("parameter_profile"),
         "execution_profile": payload.get("execution_profile"),
+        "shadow_mode": payload.get("shadow_mode") or shadow_mode,
     }
     debug = {
         "backend": requested_backend,

@@ -970,7 +970,7 @@ def main() -> None:
         default="",
         help="Require every selected case to execute on this direct backend; mismatches are recorded as errors.",
     )
-    parser.add_argument("--shadow-mode", choices=("on", "off", "auto"), default="on")
+    parser.add_argument("--shadow-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--corridorkey-screen-mode", choices=("auto", "green", "blue"), default="auto")
     parser.add_argument("--corridorkey-preset", choices=("auto", "detail_safe", "spill_safe", "manual"), default="auto")
     parser.add_argument(

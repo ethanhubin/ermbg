@@ -253,6 +253,25 @@ def test_route_icon_and_character_use_corridorkey():
     assert character_decision.params["execution_profile"] == "corridorkey-character"
 
 
+def test_route_square_canvas_wide_button_uses_foreground_geometry_not_canvas_size():
+    img = np.full((1024, 1024, 3), (8, 205, 8), dtype=np.uint8)
+    img[420:650, 110:914] = (0, 90, 245)
+    img[418:422, 130:894] = (120, 190, 255)
+    img[650:690, 150:874] = (0, 85, 40)
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert "button_" in decision.reasons[0]
+    ck = decision.analysis["corridorkey_analysis"]
+    assert ck["foreground_aspect_ratio"] >= 1.45
+    assert ck["parameter_profile"] != "composite_character_corridor_only"
+    assert decision.analysis["complex_button_boundary"]["foreground_aspect_ratio"] >= 1.45
+    assert decision.analysis["complex_button_boundary"]["reason"] != "not wide button"
+
+
 def test_route_unknown_unstable_background_uses_pymatting_fallback():
     rng = np.random.default_rng(123)
     img = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)

@@ -73,6 +73,20 @@ def _direct_worker_endpoint_name(url: str, fallback: str) -> str:
     return fallback
 
 
+def direct_worker_location(url: str) -> str:
+    """Classify a Direct Worker URL as ``local`` or ``remote`` for display.
+
+    The Web UI needs an at-a-glance signal of which worker is in use; reading a
+    raw IP (127.0.0.1 vs 192.168.x) and decoding it by hand is the source of the
+    "am I on local or remote?" confusion. A loopback host is the only thing that
+    is unambiguously this machine, so everything else is reported as remote.
+    """
+    lowered = url.lower()
+    if "127.0.0.1" in lowered or "localhost" in lowered or "[::1]" in lowered:
+        return "local"
+    return "remote"
+
+
 def _dotenv_paths() -> tuple[Path, ...]:
     cwd_env = Path.cwd() / ".env"
     project_env = PROJECT_ROOT / ".env"
@@ -164,6 +178,7 @@ __all__ = [
     "DEFAULT_DIRECT_WORKER_URL",
     "LOCAL_CONFIG_PATH",
     "PROJECT_ROOT",
+    "direct_worker_location",
     "get_bool_setting",
     "get_comfy_url",
     "get_direct_worker_endpoints",

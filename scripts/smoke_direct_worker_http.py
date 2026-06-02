@@ -138,7 +138,7 @@ def main() -> None:
     parser.add_argument("--sample-id", default=DEFAULT_SAMPLE_IDS)
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--category", default="")
-    parser.add_argument("--shadow-mode", choices=("on", "off", "auto"), default="on")
+    parser.add_argument("--shadow-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--corridorkey-screen-mode", choices=("auto", "green", "blue"), default="auto")
     parser.add_argument("--corridorkey-preset", choices=("auto", "detail_safe", "spill_safe", "manual"), default="auto")
     parser.add_argument(

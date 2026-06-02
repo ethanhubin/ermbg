@@ -164,7 +164,7 @@ def matte(
     input_path: Path = typer.Argument(..., help="Input image path (clean solid-bg)"),
     out_dir: Path = typer.Option(Path("samples/outputs/matte"), help="Output directory"),
     backend: str = typer.Option("auto", help="auto | comfy-rmbg | comfy-corridorkey | pymatting-known-b | comfy-pymatting-known-b"),
-    shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
+    shadow_mode: str = typer.Option("auto", help="auto | on | off. Use on/off to force shadow recovery behavior."),
     bg_color: str = typer.Option(
         "0,200,0",
         help="Composite background for transparent inputs, as 'R,G,B' (default green screen)",
@@ -204,7 +204,7 @@ def phase1(
     out_dir: Path = typer.Option(Path("samples/outputs/phase1"), help="Output root"),
     backend: str = typer.Option("auto"),
     input_size: int = typer.Option(1024, help="Deprecated compatibility option."),
-    shadow_mode: str = typer.Option("on", help="on | auto | off. Use off for faster previews without shadow recovery."),
+    shadow_mode: str = typer.Option("auto", help="auto | on | off. Use on/off to force shadow recovery behavior."),
     comfy_url: str = typer.Option(DEFAULT_COMFY_URL, help="ComfyUI server URL for --backend comfy-rmbg"),
     matte_only_when_ready: bool = typer.Option(
         False,

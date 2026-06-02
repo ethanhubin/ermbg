@@ -335,6 +335,23 @@ def test_known_background_color_prefers_boundary_support_near_unknown():
     assert bg == (3, 194, 8)
 
 
+def test_stable_background_accepts_smooth_low_chroma_corner_drift():
+    h = w = 64
+    yy = np.linspace(0.0, 16.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(0.0, 16.0, w, dtype=np.float32)[None, :]
+    gray = 154.0 + (xx + yy) * 0.5
+    image = np.dstack([gray, gray, gray + 2.0]).astype(np.uint8)
+    image[20:46, 22:42] = (220, 40, 30)
+
+    bg, info = estimate_stable_background_color(image)
+
+    assert info["accepted"] is True
+    assert info["seed"]["source"] == "corners"
+    assert 4.0 < info["seed"]["corner_agreement"] <= 6.0
+    assert info["seed"]["sigma"] <= 6.0
+    assert bg == tuple(info["background_color"])
+
+
 def test_background_normalization_starts_on_any_sure_bg_mismatch():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     image = np.full((64, 64, 3), bg, dtype=np.uint8)

@@ -151,6 +151,7 @@ def _case_payload(
         "asset_kind": result.metadata.get("asset_kind"),
         "parameter_profile": result.metadata.get("parameter_profile"),
         "execution_profile": result.metadata.get("execution_profile"),
+        "shadow_mode": result.metadata.get("shadow_mode"),
         "timings": timings,
         "algorithm_debug": _algorithm_debug(result),
     }
@@ -371,7 +372,7 @@ def health() -> dict[str, Any]:
 async def matte_endpoint(
     image: UploadFile = File(...),
     execution_backend: str = Form("auto"),
-    shadow_mode: str = Form("on"),
+    shadow_mode: str = Form("auto"),
     corridorkey_gamma_space: str | None = Form(None),
     corridorkey_despill_strength: float | None = Form(None),
     corridorkey_refiner_strength: float | None = Form(None),
@@ -439,7 +440,7 @@ async def matte_endpoint(
 async def batch_matte_endpoint(
     files: list[UploadFile] = File(...),
     execution_backend: str = Form("auto"),
-    shadow_mode: str = Form("on"),
+    shadow_mode: str = Form("auto"),
     corridorkey_gamma_space: str | None = Form(None),
     corridorkey_despill_strength: float | None = Form(None),
     corridorkey_refiner_strength: float | None = Form(None),
@@ -550,6 +551,7 @@ async def batch_matte_endpoint(
                 "asset_kind": payload.get("asset_kind"),
                 "parameter_profile": payload.get("parameter_profile"),
                 "execution_profile": payload.get("execution_profile"),
+                "shadow_mode": payload.get("shadow_mode"),
                 "timings": timings,
             }
             if include_images and isinstance(payload.get("rgba_png_base64"), str):
