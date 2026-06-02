@@ -1,6 +1,9 @@
 {
   "services": {
     "direct_worker_url": "http://127.0.0.1:7871",
+    "direct_worker_urls": {
+      "local": "http://127.0.0.1:7871"
+    },
     "comfy_url": ""
   },
   "web": {

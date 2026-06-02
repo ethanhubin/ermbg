@@ -489,6 +489,58 @@ def test_pymatting_known_b_adaptive_foreground_threshold_removes_dark_screen_edg
         assert int(dark_screen_edge_residue.sum()) <= residue_budget, case_id
 
 
+def test_known_background_trimap_releases_subject_evidence_only_for_hard_shadow_gap():
+    cases = {
+        "button_green_yellow_a_outlined_hard_lite_shadow": 0,
+        "button_green_yellow_a_outlined_hard_heavy_shadow": 2500,
+        "button_green_yellow_b_unoutlined_hard_heavy_shadow": 0,
+    }
+    for case_id, min_release_pixels in cases.items():
+        path = PROJECT_ROOT / f"samples/corridorkey_semantic/button/{case_id}/green.png"
+        image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+        _, info = build_known_background_trimap(
+            image,
+            (0, 200, 0),
+            bg_threshold=3.5,
+            fg_threshold=24.0,
+            boundary_band_px=2,
+        )
+
+        released = int(info["hard_shadow_subject_evidence_release_pixels"])
+        if min_release_pixels:
+            assert released >= min_release_pixels, case_id
+            assert info["hard_shadow_subject_evidence"]["components"][0]["keep"] is True
+        else:
+            assert released == 0, case_id
+
+
+def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
+    path = PROJECT_ROOT / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    result = matte_image(
+        path,
+        backend="pymatting-known-b",
+        shadow_mode="on",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(0, 200, 0),
+        pymatting_fg_threshold=24.0,
+    )
+
+    other = np.maximum(image[..., 0], image[..., 2]).astype(np.float32)
+    green = image[..., 1].astype(np.float32)
+    source_shadow = (other < 10.0) & (green < 190.0) & (green > 60.0)
+
+    # B003's failure mode was PyMatting solving the hard shadow as dark green
+    # foreground at high subject alpha. The trimap evidence pass should make
+    # the raw solve neutral enough that ShadowPatch can write a real shadow.
+    raw_fg_median = np.median(result.debug["pymatting_subject_foreground"][source_shadow], axis=0)
+    assert int(source_shadow.sum()) > 1500
+    assert float(raw_fg_median[1]) <= 3.0
+    assert result.debug["shadow"]["shadow_pixels"] > 3000
+    assert result.debug["shadow"]["subject_alpha_reduced_pixels"] == 0
+    assert float(np.median(result.debug["shadow_alpha"][source_shadow])) > 0.30
+
+
 def test_solid_graphic_pymatting_refiner_is_explicit_and_debugged():
     image, _, _, _ = _aa_disc_case()
 

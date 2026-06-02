@@ -108,10 +108,10 @@ def test_index_serves_upload_ui():
     assert 'sourceFrame.appendChild(img); img.src = pending.rgb;' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>Auto</option>' in response.text
-    assert '<option value="direct-worker">direct-worker</option>' in response.text
-    assert '<option value="direct-corridorkey">Direct Worker CorridorKey</option>' in response.text
-    assert '<option value="pymatting-known-b">pymatting-known-b</option>' in response.text
+    assert '<option value="auto" selected>Auto -&gt;' in response.text
+    assert '<option value="direct-worker">Direct Worker primary ·' in response.text
+    assert '<option value="direct-corridorkey">Direct Worker CorridorKey primary ·' in response.text
+    assert '<option value="pymatting-known-b">PyMatting Known-B local process</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
     assert '<option value="comfy-rmbg">comfy-rmbg</option>' not in response.text
@@ -132,8 +132,9 @@ def test_index_serves_upload_ui():
     assert 'shadowEnabled.disabled = isBusy' in response.text
     assert 'formData.append("shadow_enabled", shadowEnabled.checked ? "true" : "false")' in response.text
     assert "pymattingSettingControls" in response.text
-    assert 'corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey" || backend.value === "direct-corridorkey")' in response.text
-    assert 'pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b")' in response.text
+    assert 'const baseBackend = backend.value.split(":")[0];' in response.text
+    assert 'corridorSettings.classList.toggle("is-visible", baseBackend === "comfy-corridorkey" || baseBackend === "direct-corridorkey")' in response.text
+    assert 'pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting-known-b" || baseBackend === "comfy-pymatting-known-b")' in response.text
     assert 'pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); })' in response.text
     assert "<summary>[设置]</summary>" in response.text
     assert '<input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">' in response.text
@@ -209,12 +210,36 @@ def test_runtime_capabilities_endpoint(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["comfy"]["capabilities"]["ermbg_route_matte"] is True
     assert payload["direct_worker"]["capabilities"]["batch_matte"] is True
+    assert payload["web"]["direct_worker_endpoints"] == web.WEB_DIRECT_WORKER_ENDPOINTS
     assert captured == {
         "timeout": 1.25,
         "include_object_info": False,
         "include_comfy": web.WEB_ENABLE_COMFY,
         "direct_worker_url": web.WEB_DIRECT_WORKER_URL,
     }
+
+
+def test_matte_page_lists_named_direct_worker_endpoints(monkeypatch):
+    monkeypatch.setattr(
+        web,
+        "WEB_DIRECT_WORKER_ENDPOINTS",
+        {
+            "local": "http://127.0.0.1:7871",
+            "remote": "http://192.168.0.8:7871",
+        },
+    )
+    monkeypatch.setattr(web, "WEB_DIRECT_WORKER_URL", "http://192.168.0.8:7871")
+
+    client = TestClient(app)
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert '<option value="direct-worker:local">Direct Worker local · http://127.0.0.1:7871</option>' in response.text
+    assert '<option value="direct-worker:remote">Direct Worker remote · http://192.168.0.8:7871</option>' in response.text
+    assert (
+        '<option value="direct-corridorkey:remote">'
+        "Direct Worker CorridorKey remote · http://192.168.0.8:7871</option>"
+    ) in response.text
 
 
 def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
@@ -1251,6 +1276,48 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "Direct Worker", True)
     ]
+
+
+def test_matte_candidates_endpoint_accepts_named_direct_worker_endpoint(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {"requested_backend": "direct-worker", "route": "pymatting_known_b"},
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_DIRECT_WORKER_ENDPOINTS", {"remote": "http://192.168.0.8:7871"})
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "direct-worker:remote"},
+    )
+
+    assert response.status_code == 200
+    assert captured["direct_worker_url"] == "http://192.168.0.8:7871"
+    payload = response.json()
+    assert payload["backend"] == "direct-worker"
+    assert payload["requested_backend"] == "direct-worker:remote"
+    assert payload["debug"]["web_direct_worker_endpoint"] == "remote"
+    assert payload["debug"]["web_direct_worker_url"] == "http://192.168.0.8:7871"
 
 
 def test_matte_candidates_endpoint_accepts_direct_corridorkey_backend(monkeypatch):

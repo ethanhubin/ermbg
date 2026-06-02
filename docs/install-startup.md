@@ -35,6 +35,10 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 {
   "services": {
     "direct_worker_url": "...",
+    "direct_worker_urls": {
+      "local": "http://127.0.0.1:7871",
+      "remote": "http://192.168.0.8:7871"
+    },
     "comfy_url": "..."
   },
   "web": {
@@ -44,6 +48,11 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
   }
 }
 ```
+
+`services.direct_worker_url` 是 `backend=auto` 和旧的 `direct-worker` 选项使用的
+主地址。`services.direct_worker_urls` 是命名地址表;Web 后端下拉框会显示
+`direct-worker:<name>` / `direct-corridorkey:<name>` 以及对应 URL。这样本地
+和远端 worker 同时配置时,选择项会显式写出地址,不要再靠隐藏覆盖猜当前走哪台。
 
 环境变量 `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
 `ERMBG_WEB_AUTO_FALLBACK_BACKEND` 和 `ERMBG_ENABLE_COMFY` 可在单个 shell
@@ -82,7 +91,23 @@ Start-Process -WindowStyle Hidden -WorkingDirectory . `
 
 ## 用远端 Direct Worker 启动 Web
 
-在远端服务器上启动 worker:
+固定流程:
+
+1. 同步本地源码到远端源码树。
+2. 用远端 Direct Worker 专用脚本重启 `7871`。
+3. 用本地 Web 连接远端 URL。
+
+```bash
+scripts/sync_comfy_ssh.sh --smoke
+scripts/restart_direct_worker_ssh.sh --restart
+curl -sS "http://192.168.0.8:7871/health"
+```
+
+脚本默认远端路径为 `C:/Users/darkv/ermbg_src`,Python 为
+`E:/ComfyUI/.venv/Scripts/python.exe`,并通过 Windows 任务计划启动 worker,
+避免进程随 SSH 会话结束而退出。
+
+手动启动远端 worker 仅用于排查:
 
 ```powershell
 cd C:\path\to\ermbg
@@ -118,6 +143,28 @@ curl.exe -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_obj
 - `web.auto_backend = direct-worker`
 - `web.enable_comfy = false`
 - `comfy.status = disabled`
+
+Web 行为改动或服务重启后,还要做一次真实上传 smoke:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:7860/api/matte-candidates \
+  -F "file=@samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png" \
+  -F "backend=auto" \
+  -F "shadow_enabled=true" \
+  -o /tmp/ermbg_web_smoke.json
+jq '{backend,strategy,route,execution_backend,server_elapsed_sec}' /tmp/ermbg_web_smoke.json
+```
+
+如果本机 `.venv` 出现 `ModuleNotFoundError: No module named 'cv2'`,先修环境,
+不要改算法:
+
+```bash
+uv pip install --reinstall opencv-python-headless
+.venv/bin/python - <<'PY'
+import cv2
+print(cv2.__version__)
+PY
+```
 
 ## 可选的 Comfy 适配器
 

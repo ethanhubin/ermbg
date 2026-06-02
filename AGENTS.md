@@ -6,6 +6,10 @@
 
 - Web/API 的 `backend=auto` 使用 Direct Worker。
 - 服务端点与 Web 默认值都写在 `ermbg.config.json` 中。
+- `services.direct_worker_url` 是主 Direct Worker 地址；
+  `services.direct_worker_urls` 是命名地址表。若本地和远端 worker
+  同时存在，必须显式配置并在 Web 后端列表显示地址，例如
+  `direct-worker:local` / `direct-worker:remote`。
 - 允许用环境变量在单个 shell 会话内临时覆盖：
   `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
   `ERMBG_WEB_AUTO_FALLBACK_BACKEND`、`ERMBG_ENABLE_COMFY`。
@@ -60,14 +64,21 @@
 
 在改动 `ermbg/web.py`、Web UI/API 行为或某个 Web 侧后端之后：
 
-1. 用 `scripts\start_local.ps1` 或等价方式重启本地服务。
-2. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
-3. 确认首页包含改动后的标记，例如 `Auto Direct Worker`
+1. 先确认目标 Direct Worker 是本机还是远端。远端算法改动必须先跑
+   `scripts/sync_comfy_ssh.sh --smoke`,再跑
+   `scripts/restart_direct_worker_ssh.sh --restart`。
+2. 用 `scripts\start_local.ps1` 或等价方式重启本地 Web；如果走远端,
+   Web 必须连接 `ermbg.local.json` 或 `ERMBG_DIRECT_URL` 中的远端 URL。
+3. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
+4. 确认首页包含改动后的标记，例如 `Auto Direct Worker`
    或相关 UI 文案。
-4. 用 `backend=auto` 对 `/api/matte-candidates` 跑一次真实 HTTP smoke，
+5. 用 `/api/runtime-capabilities` 确认 Direct Worker URL、health
+   `git_sha`/同步标记和 GPU/CPU 能力。
+6. 用 `backend=auto` 对 `/api/matte-candidates` 跑一次真实 HTTP smoke，
    确认 HTTP 200、route/profile 元数据以及 `server_elapsed_sec`。
-5. 如果 Web 报告 Direct Worker 连接错误，先检查
-   `<services.direct_worker_url>/health`，再去改算法代码。
+7. 如果 Web 报告 Direct Worker 连接错误，先检查
+   `<services.direct_worker_url>/health`、远端 `7871` 监听和本机 `.venv`
+   import `cv2`，再去改算法代码。
 
 最终的 Web 状态报告应说明 `7860` 的 PID、Web 是如何启动的、Direct Worker
 的健康状态，以及真实 HTTP smoke 的结果。

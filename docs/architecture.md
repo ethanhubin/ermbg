@@ -101,8 +101,11 @@ Direct Worker 消费共享的 route 元数据和 execution profile。
 2. 必要时对背景场做归一化,把不均匀背景尾部拉回同一个背景色。
 3. 构造 trimap: 局部材质 core 是 sure foreground,稳定背景是 sure
    background,边缘、描边、孔洞和阴影可能区域保持 unknown。
-4. PyMatting 只解 trimap unknown 的 alpha/foreground。
-5. ShadowPatch 只在 trimap unknown 域内重建可同背景回放的阴影;高 alpha
+4. 在 trimap 阶段检查 unknown 证据是否平衡。对高强度硬阴影贴主体且
+   主体侧颜色证据不足的局部区域,先释放邻近 sure foreground 到 unknown,
+   再交给 PyMatting。
+5. PyMatting 只解 trimap unknown 的 alpha/foreground。
+6. ShadowPatch 只在 trimap unknown 域内重建可同背景回放的阴影;高 alpha
    主体保持 PyMatting 输出不动。
 
 这条链路不再保留旧的 PyMatting edge-ownership fallback。需要新的失败类别时,

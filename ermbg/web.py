@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import json
 import os
 import re
@@ -41,7 +42,7 @@ from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
 from .runtime_capabilities import collect_runtime_capabilities
-from .settings import get_bool_setting, get_setting
+from .settings import get_bool_setting, get_direct_worker_endpoints, get_setting
 from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,7 @@ WEB_DIRECT_WORKER_URL = get_setting(
     env="ERMBG_DIRECT_URL",
     default=DEFAULT_DIRECT_WORKER_URL,
 ).rstrip("/")
+WEB_DIRECT_WORKER_ENDPOINTS = get_direct_worker_endpoints()
 WEB_ENABLE_COMFY = get_bool_setting("web.enable_comfy", env="ERMBG_ENABLE_COMFY", default=False)
 
 ALLOWED_BACKENDS = {
@@ -147,6 +149,80 @@ _SLICE_CACHE: OrderedDict[tuple[str, int, int], SliceResult] = OrderedDict()
 _SLICE_CACHE_LOCK = Lock()
 
 
+def _direct_backend_base(backend: str) -> str:
+    if backend.startswith("direct-worker:"):
+        return "direct-worker"
+    if backend.startswith("direct-corridorkey:"):
+        return "direct-corridorkey"
+    return backend
+
+
+def _direct_backend_endpoint_name(backend: str) -> str | None:
+    if ":" not in backend:
+        return None
+    base, name = backend.split(":", 1)
+    if base not in {"direct-worker", "direct-corridorkey"}:
+        return None
+    name = name.strip()
+    return name or None
+
+
+def _direct_worker_url_for_backend(backend: str) -> tuple[str, str | None]:
+    endpoint_name = _direct_backend_endpoint_name(backend)
+    if endpoint_name is None:
+        return WEB_DIRECT_WORKER_URL, None
+    try:
+        return WEB_DIRECT_WORKER_ENDPOINTS[endpoint_name], endpoint_name
+    except KeyError as exc:
+        raise ValueError(f"unknown Direct Worker endpoint {endpoint_name!r}") from exc
+
+
+def _is_allowed_backend(backend: str) -> bool:
+    base = _direct_backend_base(backend)
+    if base not in ALLOWED_BACKENDS:
+        return False
+    if base in {"direct-worker", "direct-corridorkey"} and _direct_backend_endpoint_name(backend) is not None:
+        return _direct_backend_endpoint_name(backend) in WEB_DIRECT_WORKER_ENDPOINTS
+    return backend in ALLOWED_BACKENDS
+
+
+def _allowed_backend_names() -> list[str]:
+    names = sorted(ALLOWED_BACKENDS)
+    for endpoint_name in sorted(WEB_DIRECT_WORKER_ENDPOINTS):
+        names.append(f"direct-worker:{endpoint_name}")
+        names.append(f"direct-corridorkey:{endpoint_name}")
+    return names
+
+
+def _backend_options_html(*, selected: str = "auto") -> str:
+    def option(value: str, label: str) -> str:
+        selected_attr = " selected" if value == selected else ""
+        return f'<option value="{html.escape(value)}"{selected_attr}>{html.escape(label)}</option>'
+
+    rows = [
+        option("auto", f"Auto -> {WEB_AUTO_BACKEND} · {WEB_DIRECT_WORKER_URL}"),
+    ]
+    primary_url = WEB_DIRECT_WORKER_URL
+    rows.append(option("direct-worker", f"Direct Worker primary · {primary_url}"))
+    for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
+        rows.append(option(f"direct-worker:{name}", f"Direct Worker {name} · {url}"))
+    rows.append(option("direct-corridorkey", f"Direct Worker CorridorKey primary · {primary_url}"))
+    for name, url in sorted(WEB_DIRECT_WORKER_ENDPOINTS.items()):
+        rows.append(option(f"direct-corridorkey:{name}", f"Direct Worker CorridorKey {name} · {url}"))
+    rows.append(option("pymatting-known-b", "PyMatting Known-B local process"))
+    return "".join(rows)
+
+
+def _inject_backend_options(html: str) -> str:
+    old = (
+        '<option value="auto" selected>Auto</option>'
+        '<option value="direct-worker">direct-worker</option>'
+        '<option value="direct-corridorkey">Direct Worker CorridorKey</option>'
+        '<option value="pymatting-known-b">pymatting-known-b</option>'
+    )
+    return html.replace(old, _backend_options_html())
+
+
 def _game_sample_root() -> Path:
     return PROJECT_ROOT / GAME_SAMPLE_REL
 
@@ -216,6 +292,7 @@ def runtime_capabilities(
         "auto_backend": WEB_AUTO_BACKEND,
         "auto_fallback_backend": WEB_AUTO_FALLBACK_BACKEND,
         "direct_worker_url": WEB_DIRECT_WORKER_URL,
+        "direct_worker_endpoints": dict(WEB_DIRECT_WORKER_ENDPOINTS),
         "enable_comfy": WEB_ENABLE_COMFY,
     }
     return payload
@@ -388,7 +465,7 @@ def index() -> str:
 
 
 def _matte_page_html() -> str:
-    return """<!doctype html>
+    return _inject_backend_options("""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -684,7 +761,7 @@ def _matte_page_html() -> str:
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const directOk = payload.direct_worker && payload.direct_worker.status === "ok"; setRuntimePill("direct", "Direct", directOk ? "ok" : "error", directOk ? payload.direct_worker.url : (payload.direct_worker && payload.direct_worker.error) || "Direct Worker unavailable"); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
     function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowEnabled.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
-    function syncBackendSettings() { corridorSettings.classList.toggle("is-visible", backend.value === "comfy-corridorkey" || backend.value === "direct-corridorkey"); pymattingSettings.classList.toggle("is-visible", backend.value === "pymatting-known-b" || backend.value === "comfy-pymatting-known-b"); }
+    function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "comfy-corridorkey" || baseBackend === "direct-corridorkey"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting-known-b" || baseBackend === "comfy-pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
     function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
@@ -742,7 +819,7 @@ def _matte_page_html() -> str:
     loadPendingSlice();
   </script>
 </body>
-</html>"""
+</html>""")
 
     return """<!doctype html>
 <html lang="zh-CN">
@@ -1752,7 +1829,7 @@ def slice_page() -> str:
 
 
 def _slice_page_html() -> str:
-    return """<!doctype html>
+    return _inject_backend_options("""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -2041,7 +2118,7 @@ def _slice_page_html() -> str:
     restoreSliceState();
   </script>
 </body>
-</html>"""
+</html>""")
 
 
 def _png_data_url(rgba: np.ndarray) -> str:
@@ -2246,20 +2323,21 @@ def sam_mask_endpoint(
 
 
 def _effective_backend(requested_backend: str, result: MatteResponse) -> str:
+    requested_base = _direct_backend_base(requested_backend)
     if isinstance(result.debug, dict) and result.debug.get("backend") in {"direct-worker", "direct-corridorkey"}:
         return str(result.debug.get("backend"))
-    if requested_backend == "auto" and isinstance(result.debug, dict):
+    if requested_base == "auto" and isinstance(result.debug, dict):
         fallback = result.debug.get("web_auto_fallback_backend")
         if isinstance(fallback, str) and fallback:
             return fallback
     auto_route = result.debug.get("auto_route") if isinstance(result.debug, dict) else None
     if isinstance(auto_route, dict) and auto_route.get("requested_backend") in {"direct-worker", "direct-corridorkey"}:
         return str(auto_route.get("requested_backend"))
-    if requested_backend == "auto" and isinstance(auto_route, dict):
+    if requested_base == "auto" and isinstance(auto_route, dict):
         selected = auto_route.get("selected_backend")
         if isinstance(selected, str) and selected:
             return selected
-    return requested_backend
+    return requested_base
 
 
 def _route_metadata(result: MatteResponse) -> dict[str, Any]:
@@ -2372,13 +2450,15 @@ def _run_web_backend(
             raise ValueError(
                 "ERMBG_WEB_AUTO_BACKEND must be direct-worker, auto-local, or comfy-route-matte"
             )
-    if execution_backend in {"direct-worker", "direct-corridorkey"}:
+    execution_base = _direct_backend_base(execution_backend)
+    if execution_base in {"direct-worker", "direct-corridorkey"}:
+        direct_worker_url, endpoint_name = _direct_worker_url_for_backend(execution_backend)
         corridorkey_overrides: dict[str, Any] = {
             "corridorkey_screen_mode": corridorkey_screen_mode,
             "corridorkey_preset": corridorkey_preset,
             "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
         }
-        if execution_backend == "direct-corridorkey":
+        if execution_base == "direct-corridorkey":
             corridorkey_overrides.update(
                 {
                     "corridorkey_gamma_space": str(kwargs.get("corridorkey_gamma_space", "sRGB")),
@@ -2393,13 +2473,17 @@ def _run_web_backend(
                 }
             )
         try:
-            return matte_image_direct_worker(
+            result = matte_image_direct_worker(
                 image,
-                direct_worker_url=WEB_DIRECT_WORKER_URL,
-                execution_backend="direct-corridorkey" if execution_backend == "direct-corridorkey" else "auto",
+                direct_worker_url=direct_worker_url,
+                execution_backend="direct-corridorkey" if execution_base == "direct-corridorkey" else "auto",
                 shadow_mode=shadow_mode,
                 **corridorkey_overrides,
             )
+            result.debug.setdefault("web_direct_worker_url", direct_worker_url)
+            if endpoint_name is not None:
+                result.debug.setdefault("web_direct_worker_endpoint", endpoint_name)
+            return result
         except Exception as exc:
             fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
             if not requested_auto or fallback in {"", "none", "off", "disabled"}:
@@ -2419,7 +2503,10 @@ def _run_web_backend(
                 **kwargs,
             )
             result.debug.setdefault("web_auto_primary_error", str(exc))
-            result.debug.setdefault("web_auto_primary_backend", "direct-worker")
+            result.debug.setdefault("web_auto_primary_backend", execution_base)
+            result.debug.setdefault("web_auto_primary_direct_worker_url", direct_worker_url)
+            if endpoint_name is not None:
+                result.debug.setdefault("web_auto_primary_direct_worker_endpoint", endpoint_name)
             result.debug.setdefault("web_auto_fallback_backend", fallback)
             return result
     return matte_image(
@@ -2506,8 +2593,8 @@ def matte_endpoint(
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
 ) -> Response:
-    if backend not in ALLOWED_BACKENDS:
-        raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
+    if not _is_allowed_backend(backend):
+        raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
 
     image = _load_upload_image(file)
     shadow_mode = "on" if shadow_enabled else "off"
@@ -2595,8 +2682,8 @@ def matte_candidates_endpoint(
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
 ) -> dict[str, object]:
-    if backend not in ALLOWED_BACKENDS:
-        raise HTTPException(status_code=400, detail=f"backend must be one of {sorted(ALLOWED_BACKENDS)}")
+    if not _is_allowed_backend(backend):
+        raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
     if corridorkey_gamma_space not in {"sRGB", "Linear"}:
         raise HTTPException(status_code=400, detail="corridorkey_gamma_space must be sRGB or Linear")
     if corridorkey_auto_despeckle not in {"On", "Off"}:

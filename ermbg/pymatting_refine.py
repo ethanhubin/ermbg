@@ -260,6 +260,161 @@ def _smoothstep_array(edge0: float, edge1: float, value: np.ndarray) -> np.ndarr
     return (x * x * (3.0 - 2.0 * x)).astype(np.float32)
 
 
+def _known_background_hard_shadow_subject_evidence_release(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    sure_fg: np.ndarray,
+    shadow_unknown: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Release subject-side evidence when a hard shadow lacks subject color.
+
+    PyMatting consumes trimap evidence; it does not know that a smooth hard
+    shadow should become a separate shadow layer. When a high-alpha known-B
+    shadow touches an outlined UI subject, and the current unknown band contains
+    shadow/fringe but almost no true subject color, the shadow can be solved as
+    green/blue foreground. This pass locally releases a shallow sure-FG boundary
+    beside that shadow component so PyMatting sees enough subject-side evidence.
+    """
+    h, w = sure_fg.shape
+    release = np.zeros((h, w), dtype=bool)
+    bg = np.asarray(background_color, dtype=np.uint8)
+    bgf = bg.astype(np.float32).reshape(3)
+    dominant = int(np.argmax(bgf))
+    sorted_bg = np.sort(bgf)
+    info: dict[str, Any] = {
+        "enabled": True,
+        "released_pixels": 0,
+        "components": [],
+        "omitted_components": 0,
+        "reason": "",
+    }
+    if float(bgf[dominant]) < 64.0 or float(sorted_bg[-1] - sorted_bg[-2]) < 48.0:
+        info["reason"] = "background is not screen-dominant"
+        return release, info
+    if not bool(sure_fg.any()) or not bool(shadow_unknown.any()):
+        info["reason"] = "missing sure foreground or shadow evidence"
+        return release, info
+
+    img = image_srgb.astype(np.float32)
+    source_shadow_alpha = _known_background_display_shadow_alpha(image_srgb, bg)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(shadow_unknown.astype(np.uint8), 8)
+    min_area = max(32, int(round(float(h * w) * 0.003)))
+    release_px = 8.0
+    shadow_neighborhood_px = 15
+    fg_neighborhood_px = 7
+    dist_inside_fg = cv2.distanceTransform(sure_fg.astype(np.uint8), cv2.DIST_L2, 3)
+    _, fg_labels, _, _ = cv2.connectedComponentsWithStats(sure_fg.astype(np.uint8), 8)
+    shadow_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (shadow_neighborhood_px * 2 + 1, shadow_neighborhood_px * 2 + 1),
+    )
+    fg_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (fg_neighborhood_px * 2 + 1, fg_neighborhood_px * 2 + 1),
+    )
+    exact_bg = np.all(image_srgb == bg.reshape(1, 1, 3), axis=2)
+    components: list[dict[str, Any]] = []
+
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        values = source_shadow_alpha[comp]
+        alpha_p50 = float(np.percentile(values, 50.0)) if values.size else 0.0
+        alpha_p90 = float(np.percentile(values, 90.0)) if values.size else 0.0
+        # This pass is intentionally narrow: it is for high-alpha hard shadows
+        # that PyMatting can mistake for opaque subject. Lite shadows and soft
+        # ramps are left alone because their lower scalar alpha already gives
+        # the solver enough background evidence.
+        high_alpha_hard_shadow = bool(alpha_p50 >= 0.42 and alpha_p90 >= 0.46)
+
+        dilated_shadow = cv2.dilate(comp.astype(np.uint8), shadow_kernel, iterations=1).astype(bool)
+        local_sure_fg = sure_fg & dilated_shadow
+        near_fg = cv2.dilate(sure_fg.astype(np.uint8), fg_kernel, iterations=1).astype(bool)
+        # For evidence sufficiency we inspect the whole non-clean band beside
+        # the subject, not just pixels already protected as transition. B008
+        # has usable yellow subject evidence in this wider band; looking only
+        # at protected shadow/fringe pixels falsely classifies it as B003-like.
+        local_unknown = (~sure_fg) & ~exact_bg & dilated_shadow & near_fg
+        local_sure_pixels = int(local_sure_fg.sum())
+        local_unknown_pixels = int(local_unknown.sum())
+        component_info: dict[str, Any] = {
+            "area": area,
+            "bbox_xyxy": [
+                int(stats[label, cv2.CC_STAT_LEFT]),
+                int(stats[label, cv2.CC_STAT_TOP]),
+                int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+            ],
+            "shadow_alpha_p50": alpha_p50,
+            "shadow_alpha_p90": alpha_p90,
+            "local_sure_fg_pixels": local_sure_pixels,
+            "local_unknown_pixels": local_unknown_pixels,
+            "keep": False,
+        }
+        if not high_alpha_hard_shadow or local_sure_pixels < 20 or local_unknown_pixels < 20:
+            component_info["reason"] = "insufficient hard-shadow or local evidence"
+            components.append(component_info)
+            continue
+
+        subject_color = np.median(image_srgb[local_sure_fg], axis=0).astype(np.float32)
+        color_dist = np.sqrt(np.sum((img - subject_color.reshape(1, 1, 3)) ** 2, axis=2))
+        subject_like = local_unknown & (color_dist < 60.0)
+        other_max = np.max(np.delete(img, dominant, axis=2), axis=2)
+        screen_like = local_unknown & (img[..., dominant] > other_max + max(8.0, float(bgf[dominant]) * 0.04))
+        dark_outline = local_unknown & (np.max(img, axis=2) < 80.0)
+        subject_like_ratio = float(subject_like.sum()) / float(max(1, local_unknown_pixels))
+        screen_like_ratio = float(screen_like.sum()) / float(max(1, local_unknown_pixels))
+        dark_outline_ratio = float(dark_outline.sum()) / float(max(1, local_unknown_pixels))
+        # Evidence-poor means the local unknown is mostly screen spill or dark
+        # outline, while true subject-color pixels are scarce. That combination
+        # is the observed B003/B018/B033 failure mode; unoutlined hard shadows
+        # such as B008 retain enough subject-like pixels and are protected.
+        evidence_poor = bool(
+            subject_like_ratio < 0.12
+            and (screen_like_ratio >= 0.25 or dark_outline_ratio >= 0.05)
+        )
+        adjacent_fg_labels = np.unique(fg_labels[local_sure_fg])
+        adjacent_fg_labels = adjacent_fg_labels[adjacent_fg_labels > 0]
+        adjacent_subject = np.isin(fg_labels, adjacent_fg_labels) if adjacent_fg_labels.size else np.zeros_like(sure_fg)
+        # Once the evidence gap is proven by a hard-shadow component, release
+        # the adjacent subject component boundary, not only the shadow-facing
+        # edge. PyMatting needs a balanced local color manifold; a one-sided
+        # strip still lets the hard shadow dominate the unknown solve.
+        local_release = adjacent_subject & (dist_inside_fg <= release_px)
+        keep = bool(evidence_poor and local_release.any())
+        if keep:
+            release |= local_release
+        component_info.update(
+            {
+                "subject_color": [float(c) for c in subject_color],
+                "subject_like_ratio": subject_like_ratio,
+                "screen_like_ratio": screen_like_ratio,
+                "dark_outline_ratio": dark_outline_ratio,
+                "released_pixels": int(local_release.sum()) if keep else 0,
+                "release_px": float(release_px),
+                "keep": keep,
+                "reason": "" if keep else "subject evidence is sufficient",
+            }
+        )
+        components.append(component_info)
+
+    components.sort(key=lambda item: (item.get("keep", False), item.get("area", 0)), reverse=True)
+    info.update(
+        {
+            "released_pixels": int(release.sum()),
+            "component_min_area": int(min_area),
+            "release_px": float(release_px),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+            "reason": "" if bool(release.any()) else "no hard-shadow subject evidence gap",
+        }
+    )
+    return release, info
+
+
 def _build_known_background_ownership(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -375,6 +530,16 @@ def _build_known_background_ownership(
         subject_transition = np.zeros(image_srgb.shape[:2], dtype=bool)
 
     protected_transition = shadow_unknown | subject_transition
+    subject_evidence_release, subject_evidence_info = _known_background_hard_shadow_subject_evidence_release(
+        image_srgb,
+        bg,
+        sure_fg=sure_fg,
+        shadow_unknown=shadow_unknown,
+    )
+    if bool(subject_evidence_release.any()):
+        sure_fg = sure_fg & ~subject_evidence_release
+        protected_transition |= subject_evidence_release
+
     if require_exact_bg:
         exact_known_bg = np.all(image_srgb == bg.reshape(1, 1, 3), axis=2)
         clean_bg = exact_known_bg
@@ -407,6 +572,8 @@ def _build_known_background_ownership(
         "protected_transition_pixels": int(protected_transition.sum()),
         "subject_transition_pixels": int(subject_transition.sum()),
         "subject_transition_px": float(transition_px),
+        "hard_shadow_subject_evidence_release_pixels": int(subject_evidence_release.sum()),
+        "hard_shadow_subject_evidence": subject_evidence_info,
         "shadow_unknown_pixels": int(shadow_unknown.sum()),
         "exterior_bg_pixels": int(exterior_bg.sum()),
         "enclosed_bg_pixels": int(enclosed_bg.sum()),

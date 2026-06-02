@@ -63,3 +63,25 @@ def test_missing_config_uses_project_fallbacks(monkeypatch, tmp_path):
 
     assert settings.get_comfy_url() == settings.DEFAULT_COMFY_URL
     assert settings.get_direct_worker_url() == settings.DEFAULT_DIRECT_WORKER_URL
+
+
+def test_direct_worker_endpoints_keep_default_and_local_override(monkeypatch, tmp_path):
+    base = tmp_path / "ermbg.config.json"
+    local = tmp_path / "ermbg.local.json"
+    base.write_text(
+        json.dumps({"services": {"direct_worker_url": "http://127.0.0.1:7871"}}),
+        encoding="utf-8",
+    )
+    local.write_text(
+        json.dumps({"services": {"direct_worker_url": "http://192.168.0.8:7871"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "CONFIG_PATH", base)
+    monkeypatch.setattr(settings, "LOCAL_CONFIG_PATH", local)
+    monkeypatch.delenv("ERMBG_DIRECT_URL", raising=False)
+
+    assert settings.get_direct_worker_url() == "http://192.168.0.8:7871"
+    assert settings.get_direct_worker_endpoints() == {
+        "local": "http://127.0.0.1:7871",
+        "remote": "http://192.168.0.8:7871",
+    }

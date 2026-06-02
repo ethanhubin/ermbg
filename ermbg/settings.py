@@ -10,7 +10,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "ermbg.config.json"
 LOCAL_CONFIG_PATH = PROJECT_ROOT / "ermbg.local.json"
-DEFAULT_DIRECT_WORKER_URL = "http://192.168.0.8:7871"
+DEFAULT_DIRECT_WORKER_URL = "http://127.0.0.1:7871"
 DEFAULT_COMFY_URL = ""
 
 
@@ -39,6 +39,38 @@ def _load_config() -> dict[str, Any]:
     # ignored local config so switching between Mac/remote/Windows environments
     # does not dirty the tracked default config.
     return _deep_merge(_load_json_config(CONFIG_PATH), _load_json_config(LOCAL_CONFIG_PATH))
+
+
+def _configured_direct_worker_values() -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    for source, config in (("default", _load_json_config(CONFIG_PATH)), ("local", _load_json_config(LOCAL_CONFIG_PATH))):
+        services = config.get("services") if isinstance(config, dict) else None
+        if not isinstance(services, dict):
+            continue
+        direct_workers = services.get("direct_worker_urls")
+        if isinstance(direct_workers, dict):
+            for name, url in direct_workers.items():
+                if isinstance(url, str) and url.strip():
+                    values.append((str(name).strip() or source, url.strip()))
+        elif isinstance(direct_workers, list):
+            for index, item in enumerate(direct_workers, start=1):
+                if isinstance(item, str) and item.strip():
+                    values.append((f"{source}-{index}", item.strip()))
+                elif isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"].strip():
+                    values.append((str(item.get("name") or f"{source}-{index}").strip(), item["url"].strip()))
+        direct_worker_url = services.get("direct_worker_url")
+        if isinstance(direct_worker_url, str) and direct_worker_url.strip():
+            values.append((source, direct_worker_url.strip()))
+    return values
+
+
+def _direct_worker_endpoint_name(url: str, fallback: str) -> str:
+    lowered = url.lower()
+    if "127.0.0.1" in lowered or "localhost" in lowered or "[::1]" in lowered:
+        return "local"
+    if fallback in {"default", "local"}:
+        return "remote"
+    return fallback
 
 
 def _dotenv_paths() -> tuple[Path, ...]:
@@ -93,6 +125,35 @@ def get_direct_worker_url() -> str:
     return get_setting("services.direct_worker_url", env="ERMBG_DIRECT_URL", default=DEFAULT_DIRECT_WORKER_URL).rstrip("/")
 
 
+def get_direct_worker_endpoints() -> dict[str, str]:
+    """Return every configured Direct Worker endpoint, preserving local+remote.
+
+    `get_direct_worker_url()` returns the primary runtime URL after env/local
+    overrides. This companion intentionally reads the tracked and gitignored
+    configs separately so a local remote override does not hide the tracked
+    localhost default from Web diagnostics and backend selectors.
+    """
+    endpoints: dict[str, str] = {}
+    for fallback, raw_url in _configured_direct_worker_values():
+        url = raw_url.rstrip("/")
+        if not url:
+            continue
+        base_name = _direct_worker_endpoint_name(url, fallback)
+        name = base_name
+        suffix = 2
+        while name in endpoints and endpoints[name] != url:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+        endpoints[name] = url
+    env_url = os.environ.get("ERMBG_DIRECT_URL") or read_dotenv_value("ERMBG_DIRECT_URL")
+    if env_url and env_url.strip():
+        endpoints["env"] = env_url.strip().rstrip("/")
+    primary = get_direct_worker_url()
+    if primary not in endpoints.values():
+        endpoints.setdefault(_direct_worker_endpoint_name(primary, "primary"), primary)
+    return endpoints
+
+
 def get_comfy_url() -> str:
     return get_setting("services.comfy_url", env="COMFY_URL", default=DEFAULT_COMFY_URL).rstrip("/")
 
@@ -105,6 +166,7 @@ __all__ = [
     "PROJECT_ROOT",
     "get_bool_setting",
     "get_comfy_url",
+    "get_direct_worker_endpoints",
     "get_direct_worker_url",
     "get_setting",
     "read_dotenv_value",
