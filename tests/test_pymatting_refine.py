@@ -545,6 +545,51 @@ def test_known_background_trimap_releases_subject_evidence_only_for_hard_shadow_
             assert released == 0, case_id
 
 
+def test_known_background_trimap_releases_neutral_subject_edge_when_shadow_evidence_exists():
+    bg = np.array([253, 253, 253], dtype=np.uint8)
+    image = np.full((128, 160, 3), bg, dtype=np.uint8)
+    subject = np.zeros((128, 160), dtype=bool)
+    subject[34:82, 44:108] = True
+    shadow = np.zeros((128, 160), dtype=bool)
+    shadow[78:96, 50:118] = True
+    image[subject] = (18, 105, 246)
+    image[shadow] = (230, 230, 230)
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+    )
+
+    release = info["neutral_shadow_subject_evidence"]
+    released = int(info["neutral_shadow_subject_evidence_release_pixels"])
+    assert release["enabled"] is True
+    assert release["release_px"] <= 5
+    assert released > 0
+    assert info["shadow_background"]["unknown_ownership_pixels"] >= int(shadow.sum() * 0.8)
+    assert trimap.unknown[shadow].mean() > 0.8
+    assert not np.any(trimap.sure_fg & trimap.sure_bg)
+
+
+def test_known_background_trimap_does_not_release_neutral_subject_edge_without_shadow():
+    bg = np.array([253, 253, 253], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    image[28:68, 42:86] = (18, 105, 246)
+
+    _, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+    )
+
+    assert info["neutral_shadow_subject_evidence_release_pixels"] == 0
+    assert info["neutral_shadow_subject_evidence"]["reason"] == "missing sure foreground or shadow evidence"
+
+
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
     path = PROJECT_ROOT / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png"
     image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)

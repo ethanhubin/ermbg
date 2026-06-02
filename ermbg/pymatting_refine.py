@@ -522,6 +522,88 @@ def _known_background_hard_shadow_subject_evidence_release(
     return release, info
 
 
+def _known_background_neutral_shadow_subject_evidence_release(
+    background_color: np.ndarray,
+    *,
+    sure_fg: np.ndarray,
+    shadow_unknown: np.ndarray,
+    boundary_info: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Release neutral-background subject edges when shadow evidence is present.
+
+    White/gray known-B assets do not have a saturated screen channel, so
+    PyMatting can solve a strong neutral shadow as foreground unless the
+    unknown band contains enough true subject-side color. This pass is a trimap
+    evidence correction: it only runs when a coherent near-background shadow
+    has already been found, then moves a shallow sure-FG rim into unknown.
+    """
+    h, w = sure_fg.shape
+    release = np.zeros((h, w), dtype=bool)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    bg_chroma = float(bg.max() - bg.min())
+    info: dict[str, Any] = {
+        "enabled": True,
+        "released_pixels": 0,
+        "release_px": 0,
+        "reason": "",
+    }
+    if float(bg.min()) < 180.0 or bg_chroma > 12.0:
+        info["reason"] = "background is not light neutral"
+        return release, info
+    if not bool(sure_fg.any()) or not bool(shadow_unknown.any()):
+        info["reason"] = "missing sure foreground or shadow evidence"
+        return release, info
+
+    labels_count, _, stats, _ = cv2.connectedComponentsWithStats(shadow_unknown.astype(np.uint8), 8)
+    largest_shadow = int(stats[1:, cv2.CC_STAT_AREA].max()) if labels_count > 1 else 0
+    min_coherent_shadow = int(max(32.0, round(float(h * w) * 0.003)))
+    if largest_shadow < min_coherent_shadow:
+        info.update(
+            {
+                "reason": "no coherent neutral shadow component",
+                "largest_shadow_component_area": largest_shadow,
+                "coherent_shadow_min_area": min_coherent_shadow,
+            }
+        )
+        return release, info
+
+    fg_distance = cv2.distanceTransform(sure_fg.astype(np.uint8), cv2.DIST_L2, 3)
+    fg_values = fg_distance[fg_distance > 0.0].astype(np.float32)
+    if not fg_values.size:
+        info["reason"] = "empty foreground distance field"
+        return release, info
+    fg_radius_p50 = float(np.percentile(fg_values, 50.0))
+    boundary_px = float(boundary_info.get("boundary_band_px_effective", 2.0))
+
+    dist_to_shadow = cv2.distanceTransform((~shadow_unknown).astype(np.uint8), cv2.DIST_L2, 3)
+    # Keep the neutral-background pass narrow. It is a simple evidence release
+    # for clean white/gray assets like B017, not a general solution for thick
+    # outlined shadow cases such as B015.
+    measured_px = 5.0
+    thickness_cap = max(1.0, min(5.0, fg_radius_p50 * 0.45))
+    release_px = int(max(1, round(min(measured_px, thickness_cap))))
+    shadow_neighborhood_px = max(float(release_px) + 8.0, min(24.0, boundary_px + 6.0))
+    near_shadow = dist_to_shadow <= shadow_neighborhood_px
+    local_release = sure_fg & near_shadow & (fg_distance <= float(release_px))
+    if bool(local_release.any()):
+        release |= local_release
+
+    info.update(
+        {
+            "released_pixels": int(release.sum()),
+            "release_px": int(release_px),
+            "measured_release_px": float(measured_px),
+            "shadow_neighborhood_px": float(shadow_neighborhood_px),
+            "boundary_band_px_effective": boundary_px,
+            "foreground_radius_p50_px": fg_radius_p50,
+            "largest_shadow_component_area": largest_shadow,
+            "coherent_shadow_min_area": min_coherent_shadow,
+            "reason": "" if bool(release.any()) else "no adjacent sure foreground rim",
+        }
+    )
+    return release, info
+
+
 def _build_known_background_ownership(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -620,6 +702,16 @@ def _build_known_background_ownership(
         subject_seed=sure_fg,
     )
     shadow_unknown = shadow_bg & (~sure_fg | screen_dominant_shadow)
+    neutral_subject_evidence_release, neutral_subject_evidence_info = (
+        _known_background_neutral_shadow_subject_evidence_release(
+            bg,
+            sure_fg=sure_fg,
+            shadow_unknown=shadow_unknown,
+            boundary_info=boundary_info,
+        )
+    )
+    if bool(neutral_subject_evidence_release.any()):
+        sure_fg = sure_fg & ~neutral_subject_evidence_release
 
     if bool(sure_fg.any()):
         dist_to_subject = cv2.distanceTransform((~sure_fg).astype(np.uint8), cv2.DIST_L2, 3)
@@ -636,7 +728,7 @@ def _build_known_background_ownership(
         transition_px = 0.0
         subject_transition = np.zeros(image_srgb.shape[:2], dtype=bool)
 
-    protected_transition = shadow_unknown | subject_transition
+    protected_transition = shadow_unknown | subject_transition | neutral_subject_evidence_release
     subject_evidence_release, subject_evidence_info = _known_background_hard_shadow_subject_evidence_release(
         image_srgb,
         bg,
@@ -679,6 +771,8 @@ def _build_known_background_ownership(
         "protected_transition_pixels": int(protected_transition.sum()),
         "subject_transition_pixels": int(subject_transition.sum()),
         "subject_transition_px": float(transition_px),
+        "neutral_shadow_subject_evidence_release_pixels": int(neutral_subject_evidence_release.sum()),
+        "neutral_shadow_subject_evidence": neutral_subject_evidence_info,
         "hard_shadow_subject_evidence_release_pixels": int(subject_evidence_release.sum()),
         "hard_shadow_subject_evidence": subject_evidence_info,
         "shadow_unknown_pixels": int(shadow_unknown.sum()),
