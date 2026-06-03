@@ -55,7 +55,7 @@ def route_from_response(result: Any) -> dict[str, Any]:
     if not isinstance(auto_route, dict):
         auto_route = {}
     return {
-        "selected_backend": auto_route.get("selected_backend") or auto_route.get("backend"),
+        "algorithm": auto_route.get("algorithm") or auto_route.get("route"),
         "route": auto_route.get("route"),
         "asset_kind": auto_route.get("asset_kind"),
         "parameter_profile": auto_route.get("parameter_profile"),
@@ -79,6 +79,10 @@ def runtime_from_response(result: Any, *, requested_backend: str | None = None) 
         if isinstance(direct_worker, dict):
             runtime["kind"] = "direct-worker"
             runtime["execution_backend"] = direct_worker.get("execution_backend")
+            runtime["algorithm"] = direct_worker.get("algorithm") or direct_worker.get("route")
+            runtime["execution_server_url"] = debug.get("execution_server_url")
+            runtime["execution_server"] = debug.get("execution_server")
+            runtime["server_fallback_chain"] = debug.get("server_fallback_chain")
         elif str(runtime.get("backend") or "").startswith("comfy"):
             runtime["kind"] = "comfy"
         elif runtime.get("backend") == "direct-worker":

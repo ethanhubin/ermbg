@@ -35,10 +35,18 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 {
   "services": {
     "direct_worker_url": "...",
-    "direct_worker_urls": {
-      "local": "http://127.0.0.1:7871",
-      "remote": "http://192.168.0.8:7871"
-    },
+    "direct_worker_urls": [
+      {
+        "name": "loopback",
+        "url": "http://127.0.0.1:7871",
+        "priority": 10
+      },
+      {
+        "name": "lan-gpu",
+        "url": "http://192.168.0.8:7871",
+        "priority": 20
+      }
+    ],
     "comfy_url": "..."
   },
   "web": {
@@ -49,10 +57,12 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 }
 ```
 
-`services.direct_worker_url` 是 `backend=auto` 和旧的 `direct-worker` 选项使用的
-主地址。`services.direct_worker_urls` 是命名地址表;Web 后端下拉框会显示
-`direct-worker:<name>` / `direct-corridorkey:<name>` 以及对应 URL。这样本地
-和远端 worker 同时配置时,选择项会显式写出地址,不要再靠隐藏覆盖猜当前走哪台。
+`services.direct_worker_url` 是主 Direct Worker 地址。`services.direct_worker_urls`
+是 server URL 优先级列表;同一个 Direct Worker 服务可以配置多个 IP,例如
+`127.0.0.1` 和 `192.168.0.8`,按 `priority` 排序并自动 fallback。
+Web 下拉框只选择 algorithm,不会显示 local/remote 或 `direct-worker:<name>`
+这类服务标签;当前实际 server 会写入 debug 的 `execution_server_url` 和
+`server_fallback_chain`。
 
 环境变量 `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
 `ERMBG_WEB_AUTO_FALLBACK_BACKEND` 和 `ERMBG_ENABLE_COMFY` 可在单个 shell
@@ -60,8 +70,9 @@ uv pip install --python .\.venv\Scripts\python.exe -e ".[web,dev,torch]"
 
 配置优先级: 环境变量 / `.env` > `ermbg.local.json` > `ermbg.config.json` >
 代码默认值。切换机器或工作环境时优先改 `ermbg.local.json`,不要改共享默认配置。
-ComfyUI 不是默认运行路径; `services.comfy_url` 没有代码级 fallback。需要 Comfy
-路径的机器必须在 `ermbg.local.json`、`.env` 或环境变量里显式配置 `COMFY_URL`。
+ComfyUI 不是默认运行路径;它只作为外围插件/自定义 Comfy 图支持。
+`services.comfy_url` 没有代码级 fallback。需要 Comfy 路径的机器必须在
+`ermbg.local.json`、`.env` 或环境变量里显式配置 `COMFY_URL`。
 
 ## 用本地 Direct Worker 启动 Web
 
@@ -152,7 +163,7 @@ curl -fsS -X POST http://127.0.0.1:7860/api/matte-candidates \
   -F "backend=auto" \
   -F "shadow_enabled=true" \
   -o /tmp/ermbg_web_smoke.json
-jq '{backend,strategy,route,execution_backend,server_elapsed_sec}' /tmp/ermbg_web_smoke.json
+jq '{backend,strategy,algorithm,route,execution_backend,execution_url,server_elapsed_sec}' /tmp/ermbg_web_smoke.json
 ```
 
 如果本机 `.venv` 出现 `ModuleNotFoundError: No module named 'cv2'`,先修环境,
@@ -176,11 +187,12 @@ Comfy 图支持:
 4. 验证 `/object_info` 中包含 `ErmbgRouteMatte`、`ErmbgRouteStrategy`、
    `ErmbgPyMattingKnownB` 和 `ErmbgClassify`。
 
-Web 侧调试显式 Comfy 后端:
+Comfy 侧插件/节点调试:
 
 ```text
 ERMBG_ENABLE_COMFY=1
 COMFY_URL=<services.comfy_url>
 ```
 
-正常的 Web/API 使用保持 `ERMBG_ENABLE_COMFY=0`。
+正常的 Web/API 使用保持 `ERMBG_ENABLE_COMFY=0`;Web 主线不提供 `comfy-*`
+backend 下拉项。

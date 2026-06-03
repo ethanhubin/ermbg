@@ -28,7 +28,7 @@ def test_direct_matte_auto_reuses_route_corridorkey_analysis(monkeypatch):
         return RouteDecision(
             route="corridorkey",
             asset_kind="icon",
-            backend="comfy-corridorkey",
+            backend="corridorkey",
             params={"corridorkey_auto_mask": True},
             confidence=0.9,
             reasons=["test"],
@@ -54,7 +54,7 @@ def test_direct_matte_auto_reuses_route_corridorkey_analysis(monkeypatch):
 
     assert captured["analysis"] is ck_analysis
     assert captured["params"] == {"corridorkey_auto_mask": True}
-    assert result.metadata["selected_backend"] == "comfy-corridorkey"
+    assert result.metadata["algorithm"] == "corridorkey"
     assert result.metadata["execution_backend"] == "direct-corridorkey"
     assert result.metadata["execution_profile"] is None
     assert result.response.strategy_name == "direct_corridorkey"

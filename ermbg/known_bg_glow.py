@@ -312,8 +312,23 @@ def analyze_known_bg_glow(
         adaptive_accepted = False
         adaptive_reason = "missing continuous low-alpha exterior glow"
     elif adaptive["outer_roughness_p90"] > 0.06:
-        adaptive_accepted = False
-        adaptive_reason = "outer glow falloff is too textured"
+        long_side = max(image_srgb.shape[:2])
+        textured_but_coherent = (
+            long_side < 128
+            and adaptive["outer_roughness_p90"] <= 0.10
+            and adaptive["falloff_correlation"] >= 0.90
+            and adaptive["largest_component_fraction"] >= 0.985
+            and adaptive["outer_fraction"] >= 0.42
+            and adaptive["soft_fraction"] >= 0.60
+            and adaptive["component_count"] <= 2
+        )
+        # Low-resolution glows can quantize a coherent falloff into visible
+        # steps. Keep the normal texture guard for particles/noise, but accept
+        # small icons when continuity, a broad low-alpha exterior, and strong
+        # distance/alpha correlation still prove one glow field.
+        if not textured_but_coherent:
+            adaptive_accepted = False
+            adaptive_reason = "outer glow falloff is too textured"
     elif adaptive["falloff_correlation"] < 0.78:
         adaptive_accepted = False
         adaptive_reason = "outer glow does not fade coherently to background"

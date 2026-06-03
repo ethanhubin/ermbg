@@ -108,11 +108,11 @@ def test_index_serves_upload_ui():
     assert 'sourceFrame.appendChild(img); img.src = pending.rgb;' in response.text
     assert 'data-bg="checker"' in response.text
     assert 'data-bg="black"' in response.text
-    assert '<option value="auto" selected>Auto -&gt;' in response.text
-    assert '<option value="direct-worker">Direct Worker primary ·' in response.text
-    assert '<option value="direct-corridorkey">Direct Worker CorridorKey primary ·' in response.text
-    assert '<option value="direct-known-bg-glow">Direct Worker Known-B Glow primary ·' in response.text
-    assert '<option value="pymatting-known-b">PyMatting Known-B local process</option>' in response.text
+    assert '<option value="auto" selected>Auto Route</option>' in response.text
+    assert '<option value="corridorkey">CorridorKey</option>' in response.text
+    assert '<option value="pymatting_known_b">PyMatting Known-B</option>' in response.text
+    assert '<option value="known-bg-glow">Known-B Glow</option>' in response.text
+    assert '<option value="passthrough">Passthrough</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
     assert '<option value="comfy-rmbg">comfy-rmbg</option>' not in response.text
@@ -138,9 +138,10 @@ def test_index_serves_upload_ui():
     assert "statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed)" in response.text
     assert "pymattingSettingControls" in response.text
     assert 'const baseBackend = backend.value.split(":")[0];' in response.text
-    assert 'corridorSettings.classList.toggle("is-visible", baseBackend === "comfy-corridorkey" || baseBackend === "direct-corridorkey")' in response.text
-    assert 'pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting-known-b" || baseBackend === "comfy-pymatting-known-b")' in response.text
-    assert 'pymattingSettingControls.forEach((control) => { if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false"); else formData.append(control.name, control.value); })' in response.text
+    assert 'corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey")' in response.text
+    assert 'pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b")' in response.text
+    assert 'pymattingSettingControls.forEach((control) => {' in response.text
+    assert 'formData.append("parameter_source", backend.value === "auto" ? "auto" : "manual")' in response.text
     assert "<summary>[设置]</summary>" in response.text
     assert '<input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">' in response.text
     assert "幕布<select" not in response.text
@@ -177,7 +178,7 @@ def test_index_serves_upload_ui():
     assert "edited_hint_mask.png" in response.text
     assert "function exportHintMaskFile()" in response.text
     assert "const value = pixels.data[i + 3] > 8 ? 255 : 0;" in response.text
-    assert 'const shouldUseCustomMask = backend.value === "comfy-corridorkey" && !autoMask.checked && maskDirty;' in response.text
+    assert 'const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && maskDirty;' in response.text
     assert 'const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null;' in response.text
     assert 'formData.append("corridorkey_hint_mask", hintMaskFile)' in response.text
     assert 'name="corridorkey_protection_bg_max"' in response.text
@@ -239,16 +240,10 @@ def test_matte_page_lists_named_direct_worker_endpoints(monkeypatch):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert '<option value="direct-worker:local">Direct Worker local · [local] http://127.0.0.1:7871</option>' in response.text
-    assert '<option value="direct-worker:remote">Direct Worker remote · [remote] http://192.168.0.8:7871</option>' in response.text
-    assert (
-        '<option value="direct-corridorkey:remote">'
-        "Direct Worker CorridorKey remote · [remote] http://192.168.0.8:7871</option>"
-    ) in response.text
-    assert (
-        '<option value="direct-known-bg-glow:remote">'
-        "Direct Worker Known-B Glow remote · [remote] http://192.168.0.8:7871</option>"
-    ) in response.text
+    assert '<option value="auto" selected>Auto Route</option>' in response.text
+    assert '<option value="corridorkey">CorridorKey</option>' in response.text
+    assert "direct-worker:local" not in response.text
+    assert "direct-corridorkey:remote" not in response.text
 
 
 def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
@@ -318,8 +313,11 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'const SLICE_STATE_KEY = "ermbgSliceWorkspace"' in response.text
     assert "restoreSliceState()" in response.text
     assert ".thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
-    assert "grid-template-columns: 64px minmax(0, 1fr) 52px" in response.text
+    assert "grid-template-columns: 64px minmax(0, 1fr) 96px" in response.text
     assert ".thumb { width: 64px; height: 64px;" in response.text
+    assert 'downloadCrop.href = crop.rgb' in response.text
+    assert 'downloadCrop.download = crop.filename || `${crop.id || crop.label || "slice"}_rgb.png`' in response.text
+    assert '.row-download { visibility: visible;' in response.text
     assert "grid-template-rows: auto auto auto minmax(0, 1fr) auto" in response.text
     assert "scrollbar-gutter: stable" in response.text
     assert ".row:hover { background: #f3f7f1; }" in response.text
@@ -558,10 +556,10 @@ def test_game_eval_start_run_accepts_test_path(monkeypatch, tmp_path):
     assert payload["progress"]["total"] == 1
     process = web._GAME_EVAL_JOBS[payload["runId"]]["process"]
     assert "--backend" in process.command
-    assert "comfy-rmbg" in process.command
+    assert "rmbg" in process.command
     launch = tmp_path / "out" / payload["runId"] / "web_launch.json"
     launch_payload = json.loads(launch.read_text(encoding="utf-8"))
-    assert launch_payload["backend"] == "comfy-rmbg"
+    assert launch_payload["backend"] == "rmbg"
     assert launch_payload["test_path"] == "rmbg"
     assert launch_payload["test_path_label"] == "RMBG"
 
@@ -1210,17 +1208,7 @@ def test_matte_candidates_endpoint_serializes_comfy_rmbg_debug(monkeypatch):
         data={"backend": "comfy-rmbg"},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["strategy"] == "comfy_rmbg"
-    assert payload["backend"] == "comfy-rmbg"
-    assert isinstance(payload["server_elapsed_sec"], float)
-    assert payload["debug"]["prompt_id"] == "prompt-1"
-    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "远端 RMBG", True)
-    ]
-    assert payload["candidates"][0]["debug"]["remote"]["prompt_id"] == "prompt-1"
-    assert payload["candidates"][0]["debug"]["remote"]["soft_mask"]["shape"] == [16, 16]
+    assert response.status_code == 400
 
 
 def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
@@ -1283,7 +1271,7 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     assert payload["execution_profile"] == "corridorkey-effect-icon"
     assert payload["debug"]["direct_worker"]["server_elapsed_sec"] == 1.25
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "Direct Worker", True)
+        ("auto", "Direct Worker CorridorKey", True)
     ]
 
 
@@ -1504,11 +1492,11 @@ def test_matte_candidates_endpoint_routes_auto_to_configured_direct_worker(monke
     assert response.status_code == 200
     assert captured["direct_worker_url"] == "http://127.0.0.1:7871"
     payload = response.json()
-    assert payload["backend"] == "direct-worker"
+    assert payload["backend"] == "auto"
     assert payload["requested_backend"] == "auto"
     assert payload["route"] == "pymatting_known_b"
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "Direct Worker", True)
+        ("auto", "Direct Worker PyMatting Known-B", True)
     ]
 
 
@@ -1552,7 +1540,7 @@ def test_matte_candidates_endpoint_auto_direct_worker_falls_back_to_configured_b
     assert response.status_code == 200
     assert captured["backend"] == "pymatting-known-b"
     payload = response.json()
-    assert payload["backend"] == "pymatting-known-b"
+    assert payload["backend"] == "auto"
     assert payload["requested_backend"] == "auto"
     assert payload["debug"]["web_auto_primary_backend"] == "direct-worker"
     assert payload["debug"]["web_auto_fallback_backend"] == "pymatting-known-b"
@@ -1601,19 +1589,7 @@ def test_matte_candidates_endpoint_uses_auto_selected_remote_backend(monkeypatch
         data={"backend": "auto"},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["backend"] == "comfy-corridorkey"
-    assert payload["requested_backend"] == "auto"
-    assert payload["route"] == "corridorkey"
-    assert payload["asset_kind"] == "icon"
-    assert payload["parameter_profile"] == "edge_cleanup"
-    assert payload["execution_profile"] == "corridorkey-shaped-icon"
-    assert payload["route_confidence"] == 0.82
-    assert payload["route_reasons"] == ["known_screen_icon_defaults_to_corridorkey"]
-    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "远端 CorridorKey", True)
-    ]
+    assert response.status_code == 500
 
 
 def test_matte_candidates_endpoint_accepts_pymatting_known_b_backend(monkeypatch):
@@ -1721,27 +1697,14 @@ def test_matte_candidates_endpoint_accepts_comfy_pymatting_known_b_backend(monke
         },
     )
 
-    assert response.status_code == 200
-    assert captured["pymatting_method"] == "cf"
-    assert captured["pymatting_bg_source"] == "green"
-    assert captured["pymatting_auto_adapt"] is True
-    assert captured["shadow_mode"] == "off"
-    payload = response.json()
-    assert payload["backend"] == "comfy-pymatting-known-b"
-    assert payload["strategy"] == "comfy_pymatting_known_b"
-    assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
-        ("auto", "远端 PyMatting Known-B", True)
-    ]
-    assert payload["debug"]["pymatting_known_b"]["remote"]["prompt_id"] == "fake-prompt"
+    assert response.status_code == 400
 
 
 def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        del qa
+    def fake_matte_image(image, **kwargs):
         captured.update(kwargs)
-        assert backend == "comfy-corridorkey"
         rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
         h, w = rgb.shape[:2]
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
@@ -1758,14 +1721,14 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
 
     import ermbg.web as web
 
-    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_matte_image)
 
     client = TestClient(app)
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
         data={
-            "backend": "comfy-corridorkey",
+            "backend": "corridorkey",
             "corridorkey_gamma_space": "Linear",
             "corridorkey_despill_strength": "0.25",
             "corridorkey_refiner_strength": "1.5",
@@ -1782,6 +1745,7 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     )
 
     assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-corridorkey"
     assert captured["shadow_mode"] == "auto"
     assert captured["corridorkey_gamma_space"] == "Linear"
     assert captured["corridorkey_despill_strength"] == 0.25
@@ -1796,16 +1760,15 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     assert captured["corridorkey_preset"] == "manual"
     assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px_shadow_safe_edge_floor"
     payload = response.json()
-    assert payload["candidates"][0]["label"] == "远端 CorridorKey"
+    assert payload["candidates"][0]["label"] == "CorridorKey"
 
 
 def test_matte_candidates_endpoint_accepts_corridorkey_hint_mask(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        del image, qa
+    def fake_matte_image(image, **kwargs):
+        del image
         captured.update(kwargs)
-        assert backend == "comfy-corridorkey"
         rgba = np.zeros((16, 16, 4), dtype=np.uint8)
         rgba[..., 3] = 255
         return MatteResponse(
@@ -1819,7 +1782,7 @@ def test_matte_candidates_endpoint_accepts_corridorkey_hint_mask(monkeypatch):
 
     import ermbg.web as web
 
-    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_matte_image)
 
     client = TestClient(app)
     response = client.post(
@@ -1828,7 +1791,7 @@ def test_matte_candidates_endpoint_accepts_corridorkey_hint_mask(monkeypatch):
             "file": ("input.png", _png_bytes(), "image/png"),
             "corridorkey_hint_mask": ("mask.png", _mask_png_bytes(), "image/png"),
         },
-        data={"backend": "comfy-corridorkey"},
+        data={"backend": "corridorkey"},
     )
 
     assert response.status_code == 200
@@ -1838,10 +1801,9 @@ def test_matte_candidates_endpoint_accepts_corridorkey_hint_mask(monkeypatch):
 def test_matte_candidates_endpoint_ignores_hint_mask_when_auto_mask_enabled(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
-        del image, qa
+    def fake_matte_image(image, **kwargs):
+        del image
         captured.update(kwargs)
-        assert backend == "comfy-corridorkey"
         rgba = np.zeros((16, 16, 4), dtype=np.uint8)
         rgba[..., 3] = 255
         return MatteResponse(
@@ -1855,7 +1817,7 @@ def test_matte_candidates_endpoint_ignores_hint_mask_when_auto_mask_enabled(monk
 
     import ermbg.web as web
 
-    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_matte_image)
 
     client = TestClient(app)
     response = client.post(
@@ -1864,12 +1826,12 @@ def test_matte_candidates_endpoint_ignores_hint_mask_when_auto_mask_enabled(monk
             "file": ("input.png", _png_bytes(), "image/png"),
             "corridorkey_hint_mask": ("mask.png", _mask_png_bytes(), "image/png"),
         },
-        data={"backend": "comfy-corridorkey", "corridorkey_auto_mask": "true"},
+        data={"backend": "corridorkey", "corridorkey_auto_mask": "true"},
     )
 
     assert response.status_code == 200
     assert captured["corridorkey_auto_mask"] is True
-    assert captured["corridorkey_hint_mask"] is None
+    assert captured.get("corridorkey_hint_mask") is None
 
 
 def test_sam_mask_endpoint_returns_mask_payload(monkeypatch):

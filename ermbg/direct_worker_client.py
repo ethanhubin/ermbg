@@ -24,7 +24,12 @@ def _to_png_bytes(image: ImageLike) -> bytes:
         pil = image.convert("RGB")
     else:
         arr = np.asarray(image)
-        if arr.ndim == 3 and arr.shape[2] >= 3:
+        if arr.ndim == 2:
+            mask = arr.astype(np.float32)
+            if mask.max(initial=0.0) <= 1.0:
+                mask = mask * 255.0
+            pil = Image.fromarray(np.clip(mask + 0.5, 0, 255).astype(np.uint8), mode="L")
+        elif arr.ndim == 3 and arr.shape[2] >= 3:
             pil = Image.fromarray(arr[..., :3].astype(np.uint8), mode="RGB")
         else:
             raise ValueError("direct worker image must be path, PIL image, or HxWx3/4 numpy array")
@@ -55,12 +60,15 @@ def matte_image_direct_worker(
     corridorkey_protection_fg_min: float | None = None,
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
+    corridorkey_hint_mask: Any | None = None,
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     timeout: float = 240.0,
 ) -> MatteResponse:
     """Run one image through the remote direct-worker HTTP backend."""
     files = {"image": ("input.png", _to_png_bytes(image), "image/png")}
+    if corridorkey_hint_mask is not None:
+        files["corridorkey_hint_mask"] = ("hint_mask.png", _to_png_bytes(corridorkey_hint_mask), "image/png")
     data = {
         "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
@@ -111,7 +119,8 @@ def matte_image_direct_worker(
     requested_backend = "direct-worker" if execution_backend == "auto" else execution_backend
     auto_route = {
         "requested_backend": requested_backend,
-        "selected_backend": payload.get("selected_backend"),
+        "requested_algorithm": execution_backend,
+        "algorithm": payload.get("algorithm") or payload.get("route"),
         "execution_backend": payload.get("execution_backend"),
         "route": payload.get("route"),
         "asset_kind": payload.get("asset_kind"),
@@ -121,6 +130,7 @@ def matte_image_direct_worker(
     }
     debug = {
         "backend": requested_backend,
+        "execution_server_url": direct_worker_url.rstrip("/"),
         "direct_worker": payload,
         "auto_route": auto_route,
         "timings": payload.get("timings", {}),

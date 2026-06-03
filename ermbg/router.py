@@ -90,9 +90,10 @@ class RouteDecision:
         )
         payload = {
             "requested_backend": "auto",
+            "requested_algorithm": "auto",
             "route": self.route,
+            "algorithm": self.backend,
             "asset_kind": self.asset_kind,
-            "selected_backend": self.backend,
             "parameter_profile": parameter_profile,
             "execution_profile": self.params.get("execution_profile"),
             "params": self.params,
@@ -721,7 +722,7 @@ def classify_route(
         return RouteDecision(
             route="rgba_passthrough",
             asset_kind="rgba",
-            backend="passthrough",
+            backend="rgba_passthrough",
             params={},
             confidence=1.0,
             reasons=["clean_source_alpha"],
@@ -785,7 +786,7 @@ def classify_route(
             return RouteDecision(
                 route="known_bg_glow",
                 asset_kind="icon",
-                backend="direct-known-bg-glow",
+                backend="known_bg_glow",
                 params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
                 confidence=float(max(0.70, ck.background_confidence)),
                 reasons=reasons,
@@ -817,7 +818,7 @@ def classify_route(
         return RouteDecision(
             route="corridorkey",
             asset_kind=asset_kind,
-            backend="comfy-corridorkey",
+            backend="corridorkey",
             params=params,
             confidence=float(max(0.50, ck.background_confidence)),
             reasons=reasons,
@@ -836,7 +837,7 @@ def classify_route(
         return RouteDecision(
             route="pymatting_known_b",
             asset_kind=asset_kind if asset_kind != "unknown" else "known_bg_graphic",
-            backend="comfy-pymatting-known-b",
+            backend="pymatting_known_b",
             params=_pymatting_route_params(
                 stable_bg,
                 execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
@@ -859,7 +860,7 @@ def classify_route(
     return RouteDecision(
         route="pymatting_fallback",
         asset_kind=asset_kind if asset_kind != "unknown" else "unknown_fallback",
-        backend="comfy-pymatting-known-b",
+        backend="pymatting_fallback",
         # Fallback is intentionally deterministic and bounded: unknown inputs
         # may not have a true known-B screen, but the production auto path must
         # stay on the PyMatting/CorridorKey family and never trigger the slow

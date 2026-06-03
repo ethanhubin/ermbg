@@ -163,7 +163,7 @@ def diagnose(
 def matte(
     input_path: Path = typer.Argument(..., help="Input image path (clean solid-bg)"),
     out_dir: Path = typer.Option(Path("samples/outputs/matte"), help="Output directory"),
-    backend: str = typer.Option("auto", help="auto | comfy-rmbg | comfy-corridorkey | pymatting-known-b | comfy-pymatting-known-b"),
+    backend: str = typer.Option("auto", help="auto | corridorkey | pymatting_known_b | known_bg_glow | passthrough"),
     shadow_mode: str = typer.Option("auto", help="auto | on | off. Use on/off to force shadow recovery behavior."),
     bg_color: str = typer.Option(
         "0,200,0",
@@ -238,7 +238,7 @@ def phase1(
             "image": p.stem,
             "background_color": list(result.background_color),
             "strategy": result.strategy_name,
-            "backend": result.debug.get("auto_route", {}).get("selected_backend", backend),
+            "backend": result.debug.get("auto_route", {}).get("algorithm", backend),
         }
         row.update(result.report.get("qa", {}))
         summary.append(row)

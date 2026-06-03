@@ -52,18 +52,18 @@ out/auto_routematte_routefix_20260531/timing_report.md
 结果: 85/85 全部成功完成,使用 Web/API `backend=auto`,该基线运行提交远端
 `ErmbgRouteMatte` 节点（先于当前 Direct Worker 默认契约,作为历史记录保留）。
 Auto 不再调用 RMBG fallback;未知或不稳定背景作为 `pymatting_fallback` 路由到
-`comfy-pymatting-known-b`。
+PyMatting Known-B。当前主线使用 Direct Worker,该段属于历史 RouteMatte 基线记录。
 
 最新完整 B/I/C run 的 route 分布:
 
-| Route | 后端 | 数量 |
-|---|---|---:|
-| `pymatting_known_b` | `comfy-pymatting-known-b` | 37 |
-| `corridorkey` | `comfy-corridorkey` | 48 |
+| Route | Algorithm | Execution backend | 数量 |
+|---|---|---|---:|
+| `pymatting_known_b` | `pymatting_known_b` | `direct-pymatting-known-b` | 37 |
+| `corridorkey` | `corridorkey` | `direct-corridorkey` | 48 |
 
 类别/后端拆分:
 
-| 类别 | `comfy-pymatting-known-b` | `comfy-corridorkey` |
+| 类别 | `pymatting_known_b` | `corridorkey` |
 |---|---:|---:|
 | Button | 37 | 19 |
 | Icon / effect | 0 | 20 |
@@ -80,10 +80,10 @@ out/verify_route_profiles_character_glass_icon_20260531/summary.json
 
 | 样本族 | Execution profile | 后端 |
 |---|---|---|
-| B046-B049 真实玻璃按钮 | `corridorkey-transparent-button` | `comfy-corridorkey` |
-| I011-I012 软/特效图标 | `corridorkey-effect-icon` | `comfy-corridorkey` |
-| I019-I020 shaped glow 图标 | `corridorkey-shaped-icon` | `comfy-corridorkey` |
-| C001-C009 角色 | `corridorkey-character` | `comfy-corridorkey` |
+| B046-B049 真实玻璃按钮 | `corridorkey-transparent-button` | `direct-corridorkey` |
+| I011-I012 软/特效图标 | `corridorkey-effect-icon` | `direct-corridorkey` |
+| I019-I020 shaped glow 图标 | `corridorkey-shaped-icon` | `direct-corridorkey` |
+| C001-C009 角色 | `corridorkey-character` | `direct-corridorkey` |
 
 Profile 规则:
 
@@ -100,8 +100,8 @@ Profile 规则:
 | 范围 | 数量 | 均值 | 中位 | P95 | 最小 | 最大 |
 |---|---:|---:|---:|---:|---:|---:|
 | 整体 client elapsed | 85 | 1.073s | 0.936s | 3.961s | 0.190s | 5.172s |
-| `comfy-pymatting-known-b` client elapsed | 37 | 0.355s | 0.266s | 0.846s | 0.190s | 1.085s |
-| `comfy-corridorkey` client elapsed | 48 | 1.626s | 1.025s | 4.569s | 0.915s | 5.172s |
+| PyMatting Known-B client elapsed | 37 | 0.355s | 0.266s | 0.846s | 0.190s | 1.085s |
+| CorridorKey client elapsed | 48 | 1.626s | 1.025s | 4.569s | 0.915s | 5.172s |
 | Button client elapsed | 56 | 0.585s | 0.433s | 1.196s | 0.190s | 1.355s |
 | Icon client elapsed | 20 | 1.077s | 1.021s | 1.405s | 0.989s | 1.432s |
 | Character client elapsed | 9 | 4.097s | 3.985s | 4.949s | 3.173s | 5.172s |
@@ -145,7 +145,8 @@ known-B 孔洞按钮 B055/B056 移回 PyMatting。最慢的仍是角色 Corridor
 
 ```bash
 .venv/bin/python scripts/run_corridorkey_game_eval.py \
-  --backend comfy-corridorkey
+  --backend auto \
+  --fixed-execution-backend direct-corridorkey
 ```
 
 审计输出应写到 `out/` 下并包含 summary JSON。不要用参数调优来掩盖一个错误的

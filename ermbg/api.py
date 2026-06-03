@@ -124,7 +124,7 @@ def _manifest_route_from_report(report: dict[str, Any]) -> dict[str, Any]:
     auto_route = report.get("auto_route")
     if isinstance(auto_route, dict):
         return {
-            "selected_backend": auto_route.get("selected_backend") or auto_route.get("backend"),
+            "algorithm": auto_route.get("algorithm") or auto_route.get("route") or auto_route.get("backend"),
             "route": auto_route.get("route"),
             "asset_kind": auto_route.get("asset_kind"),
             "parameter_profile": auto_route.get("parameter_profile"),
@@ -134,7 +134,7 @@ def _manifest_route_from_report(report: dict[str, Any]) -> dict[str, Any]:
         }
     strategy = report.get("strategy") if isinstance(report.get("strategy"), dict) else {}
     return {
-        "selected_backend": report.get("backend"),
+        "algorithm": report.get("algorithm") or report.get("backend"),
         "route": strategy.get("bg_type"),
         "asset_kind": strategy.get("image_type"),
         "parameter_profile": None,
@@ -295,10 +295,10 @@ def matte_image(
             full halo/recomp/binarization metric block to the report.
         matting_model: deprecated compatibility argument for removed legacy
             full-matting backends. It is ignored by maintained route backends.
-        backend: ``auto`` | ``comfy-rmbg`` | ``comfy-corridorkey`` |
-            ``pymatting-known-b`` | ``comfy-pymatting-known-b``.
+        backend: ``auto`` | ``auto-local`` | ``corridorkey`` |
+            ``pymatting_known_b`` | ``known_bg_glow`` | ``passthrough``.
             ``auto`` routes through ERMBG's strategy layer, then dispatches to
-            CorridorKey, PyMatting Known-B, RMBG, or clean-RGBA passthrough.
+            CorridorKey, PyMatting Known-B, Known-B Glow, or clean-RGBA passthrough.
         input_size: deprecated compatibility argument for removed legacy
             full-matting backends.
         bg_color: fallback composite color used when an RGBA source needs to be
@@ -356,32 +356,7 @@ def matte_image(
 
     auto_route: dict[str, Any] | None = None
     auto_params: dict[str, Any] = {}
-    if backend == "auto":
-        return _matte_image_comfy_route_matte(
-            rgb,
-            source_alpha=alpha,
-            src_path=src_path,
-            output_dir=output_dir,
-            qa=qa,
-            bg_color=bg_color,
-            shadow_mode=shadow_mode,
-            comfy_url=comfy_url,
-            corridorkey_screen_mode=corridorkey_screen_mode,
-            corridorkey_preset=corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-            pymatting_method=pymatting_method,
-            pymatting_image_space=pymatting_image_space,
-            pymatting_bg_source=pymatting_bg_source,
-            pymatting_bg_color=pymatting_bg_color,
-            pymatting_bg_threshold=pymatting_bg_threshold,
-            pymatting_fg_threshold=pymatting_fg_threshold,
-            pymatting_boundary_band_px=pymatting_boundary_band_px,
-            pymatting_auto_adapt=pymatting_auto_adapt,
-            pymatting_cg_maxiter=pymatting_cg_maxiter,
-            pymatting_cg_rtol=pymatting_cg_rtol,
-        )
-
-    if backend == "auto-local":
+    if backend in {"auto", "auto-local"}:
         auto_decision: RouteDecision
         backend, auto_route, auto_decision = _auto_backend_for_image(
             rgb,
@@ -394,7 +369,7 @@ def matte_image(
     if backend == "passthrough":
         return _matte_image_passthrough(rgb, alpha, src_path=src_path, output_dir=output_dir, qa=qa, auto_route=auto_route)
 
-    remote_full_backends = {"comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg"}
+    remote_full_backends = {"corridorkey", "pymatting_known_b", "pymatting_fallback", "known_bg_glow"}
     local_known_bg_backends = {"pymatting-known-b", "direct-known-bg-glow"}
     if alpha is not None and (
         backend in remote_full_backends
@@ -406,7 +381,7 @@ def matte_image(
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
 
-    if backend == "comfy-corridorkey":
+    if backend == "corridorkey":
         return _matte_image_comfy_corridorkey(
             rgb,
             src_path=src_path,
@@ -443,9 +418,9 @@ def matte_image(
             auto_route=auto_route,
         )
 
-    if backend == "comfy-pymatting-known-b":
+    if backend in {"pymatting_known_b", "pymatting_fallback"}:
         if vlm_prior:
-            raise ValueError("backend='comfy-pymatting-known-b' does not support local vlm_prior")
+            raise ValueError("PyMatting Known-B does not support local vlm_prior")
         return _matte_image_comfy_pymatting_known_b(
             rgb,
             src_path=src_path,
@@ -466,7 +441,7 @@ def matte_image(
             auto_route=auto_route,
         )
 
-    if backend == "direct-known-bg-glow":
+    if backend in {"known_bg_glow", "direct-known-bg-glow"}:
         return _matte_image_known_bg_glow(
             rgb,
             src_path=src_path,
@@ -1281,7 +1256,7 @@ def _matte_image_comfy_pymatting_known_b(
                 "shadow": out_dir / f"{stem}_shadow.png",
             },
             report_path=report_path,
-            requested_backend="comfy-pymatting-known-b",
+            requested_backend="pymatting_known_b",
         )
     elif qa:
         qa_metrics = run_qa(
@@ -2843,7 +2818,7 @@ def _matte_image_known_bg_hard_ui_shadow(
                 "shadow": out_dir / f"{stem}_shadow.png",
             },
             report_path=report_path,
-            requested_backend="comfy-corridorkey",
+            requested_backend="corridorkey",
         )
     elif qa:
         qa_metrics = run_qa(
@@ -3203,7 +3178,7 @@ def _matte_image_comfy_corridorkey(
                 "shadow": out_dir / f"{stem}_shadow.png",
             },
             report_path=report_path,
-            requested_backend="comfy-corridorkey",
+            requested_backend="corridorkey",
         )
     elif qa:
         qa_metrics = run_qa(

@@ -38,6 +38,10 @@ def _route_params(params: dict[str, Any], key: str, fallback: Any) -> Any:
     return params.get(key, fallback)
 
 
+def _algorithm_from_backend(value: str) -> str:
+    return "rgba_passthrough" if value == "passthrough" else value
+
+
 class DirectCorridorKeyClientFactory:
     def __init__(self) -> None:
         self._client: Any | None = None
@@ -429,6 +433,7 @@ def direct_matte_from_decision(
     source_alpha: np.ndarray | None = None,
     shadow_mode: str = "auto",
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    corridorkey_hint_mask: np.ndarray | None = None,
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     ck_factory: DirectCorridorKeyClientFactory | None = None,
     route_sec: float | None = None,
@@ -443,14 +448,14 @@ def direct_matte_from_decision(
     if route_sec is not None:
         timings["route_sec"] = float(route_sec)
     auto_route = decision.to_dict()
-    selected_backend = decision.backend
+    algorithm = _algorithm_from_backend(decision.backend)
     params = dict(decision.params)
     shadow_mode = str(shadow_mode or "auto").strip().lower()
     if shadow_mode not in {"auto", "on", "off"}:
         raise ValueError("shadow_mode must be 'auto', 'on', or 'off'")
 
     t = time.perf_counter()
-    if selected_backend == "passthrough":
+    if algorithm == "rgba_passthrough":
         response = _matte_image_passthrough(
             rgb,
             source_alpha,
@@ -462,7 +467,7 @@ def direct_matte_from_decision(
         response.strategy_name = "direct_passthrough"
         response.debug["backend"] = "direct-passthrough"
         execution_backend = "direct-passthrough"
-    elif selected_backend == "comfy-pymatting-known-b":
+    elif algorithm in {"pymatting_known_b", "pymatting_fallback"}:
         response = _matte_image_pymatting_known_b(
             rgb,
             src_path=None,
@@ -484,7 +489,7 @@ def direct_matte_from_decision(
         response.strategy_name = "direct_pymatting_known_b"
         response.debug["backend"] = "direct-pymatting-known-b"
         execution_backend = "direct-pymatting-known-b"
-    elif selected_backend == "direct-known-bg-glow":
+    elif algorithm == "known_bg_glow":
         response = matte_known_bg_glow_direct(
             rgb,
             params=params,
@@ -493,7 +498,7 @@ def direct_matte_from_decision(
             auto_route=auto_route,
         )
         execution_backend = "direct-known-bg-glow"
-    elif selected_backend == "comfy-corridorkey":
+    elif algorithm == "corridorkey":
         ck_analysis = decision.analysis.get("corridorkey_analysis")
         if not isinstance(ck_analysis, dict):
             raise RuntimeError("CorridorKey direct route requires corridorkey_analysis metadata")
@@ -504,6 +509,7 @@ def direct_matte_from_decision(
             bg_color=fallback_bg_color,
             shadow_mode=shadow_mode,
             hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            hint_alpha=corridorkey_hint_mask,
             execution_profile=_route_params(params, "corridorkey_execution_profile", "auto"),
             corridorkey_client=(ck_factory or DirectCorridorKeyClientFactory()).get(),
             auto_route=auto_route,
@@ -511,10 +517,10 @@ def direct_matte_from_decision(
         response.debug["backend"] = "direct-corridorkey"
         execution_backend = "direct-corridorkey"
     else:
-        raise RuntimeError(f"Unsupported direct backend: {selected_backend}")
+        raise RuntimeError(f"Unsupported direct algorithm: {algorithm}")
     timings["backend_sec"] = time.perf_counter() - t
     metadata = {
-        "selected_backend": selected_backend,
+        "algorithm": algorithm,
         "execution_backend": execution_backend,
         "route": auto_route.get("route"),
         "asset_kind": auto_route.get("asset_kind"),

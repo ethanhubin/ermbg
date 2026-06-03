@@ -143,7 +143,7 @@ def test_route_clean_rgba_passthrough():
     rgb, a = _make_clean_rgba()
     decision = classify_route(rgb, source_alpha=a)
     assert decision.route == "rgba_passthrough"
-    assert decision.backend == "passthrough"
+    assert decision.backend == "rgba_passthrough"
     assert decision.asset_kind == "rgba"
 
 
@@ -159,7 +159,7 @@ def test_route_hard_button_uses_pymatting_known_b():
     img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
     decision = classify_route(img)
     assert decision.route == "pymatting_known_b"
-    assert decision.backend == "comfy-pymatting-known-b"
+    assert decision.backend == "pymatting_known_b"
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
@@ -177,7 +177,7 @@ def test_route_translucent_button_uses_corridorkey():
     img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
     decision = classify_route(img)
     assert decision.route == "corridorkey"
-    assert decision.backend == "comfy-corridorkey"
+    assert decision.backend == "corridorkey"
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "corridorkey-transparent-button"
 
@@ -215,7 +215,7 @@ def test_route_hard_shadow_buttons_do_not_use_corridorkey_semialpha_shadow_gate(
         img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
         decision = classify_route(img)
         assert decision.route == "pymatting_known_b", rel
-        assert decision.backend == "comfy-pymatting-known-b", rel
+        assert decision.backend == "pymatting_known_b", rel
         complex_info = decision.analysis["complex_button_boundary"]
         assert complex_info["semi_alpha_gate"] is False, rel
 
@@ -229,7 +229,7 @@ def test_route_square_known_b_hole_buttons_stay_pymatting_not_character():
         img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
         decision = classify_route(img)
         assert decision.route == "pymatting_known_b", rel
-        assert decision.backend == "comfy-pymatting-known-b", rel
+        assert decision.backend == "pymatting_known_b", rel
         assert decision.asset_kind == "button", rel
 
 
@@ -278,7 +278,7 @@ def test_route_unknown_unstable_background_uses_pymatting_fallback():
     img[32:96, 32:96] = (20, 40, 180)
     decision = classify_route(img, fallback_background_color=(0, 200, 0))
     assert decision.route == "pymatting_fallback"
-    assert decision.backend == "comfy-pymatting-known-b"
+    assert decision.backend == "pymatting_fallback"
     assert decision.asset_kind == "unknown_fallback"
     assert decision.params["execution_profile"] == "pymatting-fallback"
     assert "unknown_or_unstable_background_uses_pymatting_fallback" in decision.reasons

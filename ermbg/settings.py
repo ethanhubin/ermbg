@@ -41,26 +41,31 @@ def _load_config() -> dict[str, Any]:
     return _deep_merge(_load_json_config(CONFIG_PATH), _load_json_config(LOCAL_CONFIG_PATH))
 
 
-def _configured_direct_worker_values() -> list[tuple[str, str]]:
-    values: list[tuple[str, str]] = []
+def _configured_direct_worker_values() -> list[tuple[str, str, int]]:
+    values: list[tuple[str, str, int]] = []
     for source, config in (("default", _load_json_config(CONFIG_PATH)), ("local", _load_json_config(LOCAL_CONFIG_PATH))):
         services = config.get("services") if isinstance(config, dict) else None
         if not isinstance(services, dict):
             continue
         direct_workers = services.get("direct_worker_urls")
         if isinstance(direct_workers, dict):
-            for name, url in direct_workers.items():
+            for index, (name, url) in enumerate(direct_workers.items(), start=1):
                 if isinstance(url, str) and url.strip():
-                    values.append((str(name).strip() or source, url.strip()))
+                    values.append((str(name).strip() or source, url.strip(), index * 100))
         elif isinstance(direct_workers, list):
             for index, item in enumerate(direct_workers, start=1):
                 if isinstance(item, str) and item.strip():
-                    values.append((f"{source}-{index}", item.strip()))
+                    values.append((f"{source}-{index}", item.strip(), index * 100))
                 elif isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"].strip():
-                    values.append((str(item.get("name") or f"{source}-{index}").strip(), item["url"].strip()))
+                    priority_raw = item.get("priority", index * 100)
+                    try:
+                        priority = int(priority_raw)
+                    except (TypeError, ValueError):
+                        priority = index * 100
+                    values.append((str(item.get("name") or f"{source}-{index}").strip(), item["url"].strip(), priority))
         direct_worker_url = services.get("direct_worker_url")
         if isinstance(direct_worker_url, str) and direct_worker_url.strip():
-            values.append((source, direct_worker_url.strip()))
+            values.append((source, direct_worker_url.strip(), 0 if source == "local" else 50))
     return values
 
 
@@ -85,6 +90,32 @@ def direct_worker_location(url: str) -> str:
     if "127.0.0.1" in lowered or "localhost" in lowered or "[::1]" in lowered:
         return "local"
     return "remote"
+
+
+def get_direct_worker_servers() -> list[dict[str, Any]]:
+    """Return configured Direct Worker servers ordered by priority.
+
+    A local worker and a LAN/remote worker are the same kind of runtime here:
+    just named URLs with priority and fallback order.
+    """
+    servers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name, raw_url, priority in _configured_direct_worker_values():
+        url = raw_url.rstrip("/")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        servers.append({"name": name or f"server-{len(servers) + 1}", "url": url, "priority": int(priority)})
+    env_url = os.environ.get("ERMBG_DIRECT_URL") or read_dotenv_value("ERMBG_DIRECT_URL")
+    if env_url and env_url.strip():
+        url = env_url.strip().rstrip("/")
+        servers = [server for server in servers if str(server.get("url")) != url]
+        servers.insert(0, {"name": "env", "url": url, "priority": -100})
+    primary = get_direct_worker_url()
+    if primary and primary not in {str(server.get("url")) for server in servers}:
+        servers.append({"name": "primary", "url": primary, "priority": 0})
+    servers.sort(key=lambda server: (int(server.get("priority", 0)), str(server.get("name", ""))))
+    return servers
 
 
 def _dotenv_paths() -> tuple[Path, ...]:
@@ -148,7 +179,7 @@ def get_direct_worker_endpoints() -> dict[str, str]:
     localhost default from Web diagnostics and backend selectors.
     """
     endpoints: dict[str, str] = {}
-    for fallback, raw_url in _configured_direct_worker_values():
+    for fallback, raw_url, _priority in _configured_direct_worker_values():
         url = raw_url.rstrip("/")
         if not url:
             continue
@@ -182,6 +213,7 @@ __all__ = [
     "get_bool_setting",
     "get_comfy_url",
     "get_direct_worker_endpoints",
+    "get_direct_worker_servers",
     "get_direct_worker_url",
     "get_setting",
     "read_dotenv_value",

@@ -45,7 +45,7 @@ def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button"
         response=response,
         timings={"route_sec": 0.01, "backend_sec": 0.02},
         metadata={
-            "selected_backend": "comfy-pymatting-known-b",
+            "algorithm": "pymatting_known_b",
             "execution_backend": "direct-pymatting-known-b",
             "route": "pymatting_known_b",
             "asset_kind": "button",
@@ -64,7 +64,7 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
         lambda *args, **kwargs: RouteDecision(
             route="pymatting_known_b",
             asset_kind="button",
-            backend="comfy-pymatting-known-b",
+            backend="pymatting_known_b",
             params={"execution_profile": "pymatting-hard-button"},
             confidence=1.0,
             reasons=["test"],
@@ -118,7 +118,7 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
         lambda *args, **kwargs: RouteDecision(
             route="pymatting_known_b",
             asset_kind="button",
-            backend="comfy-pymatting-known-b",
+            backend="pymatting_known_b",
             params={"execution_profile": "pymatting-hard-button"},
             confidence=1.0,
             reasons=["test"],
@@ -131,7 +131,7 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
         captured["route"] = prepared.decision.route
         captured["params"] = prepared.decision.params
         result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
-        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["algorithm"] = prepared.decision.backend
         result.metadata["execution_backend"] = "direct-corridorkey"
         result.metadata["route"] = prepared.decision.route
         return result
@@ -160,7 +160,7 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured["backend"] == "comfy-corridorkey"
+    assert captured["backend"] == "corridorkey"
     assert captured["route"] == "corridorkey"
     assert captured["params"]["corridorkey_gamma_space"] == "Linear"
     assert captured["params"]["corridorkey_despill_strength"] == 0.25
@@ -174,7 +174,8 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
     assert captured["params"]["corridorkey_preset"] == "detail_safe"
     assert captured["params"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"
     payload = response.json()
-    assert payload["selected_backend"] == "comfy-corridorkey"
+    assert payload["algorithm"] == "corridorkey"
+    assert payload["execution_backend"] == "direct-corridorkey"
     assert payload["execution_backend"] == "direct-corridorkey"
     assert payload["route"] == "corridorkey"
 
@@ -190,7 +191,7 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
         lambda *args, **kwargs: RouteDecision(
             route="pymatting_known_b",
             asset_kind="button",
-            backend="comfy-pymatting-known-b",
+            backend="pymatting_known_b",
             params={"execution_profile": "pymatting-hard-button"},
             confidence=1.0,
             reasons=["test"],
@@ -206,7 +207,7 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
         result = _result(prepared.rgb, execution_profile="known-bg-glow")
         result.response.strategy_name = "direct_known_bg_glow"
         result.response.debug["known_bg_glow"] = {"mode": prepared.decision.params["known_bg_glow_mode"]}
-        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["algorithm"] = prepared.decision.backend
         result.metadata["execution_backend"] = "direct-known-bg-glow"
         result.metadata["route"] = prepared.decision.route
         result.metadata["execution_profile"] = prepared.decision.params["execution_profile"]
@@ -222,14 +223,15 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
     )
 
     assert response.status_code == 200
-    assert captured["backend"] == "direct-known-bg-glow"
+    assert captured["backend"] == "known_bg_glow"
     assert captured["route"] == "known_bg_glow"
     assert captured["params"]["execution_profile"] == "known-bg-glow"
     assert captured["params"]["known_bg_glow_mode"] in {"single_target_line", "adaptive_ray"}
     assert captured["params"]["known_bg_glow_bg_color"] == (0, 200, 0)
     assert captured["analysis"]["known_bg_glow"]["background_color"] == [0, 200, 0]
     payload = response.json()
-    assert payload["selected_backend"] == "direct-known-bg-glow"
+    assert payload["algorithm"] == "known_bg_glow"
+    assert payload["execution_backend"] == "direct-known-bg-glow"
     assert payload["execution_backend"] == "direct-known-bg-glow"
     assert payload["route"] == "known_bg_glow"
     assert payload["algorithm_debug"]["known_bg_glow"]["mode"] == captured["params"]["known_bg_glow_mode"]
@@ -245,7 +247,7 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
         lambda *args, **kwargs: RouteDecision(
             route="corridorkey",
             asset_kind="icon",
-            backend="comfy-corridorkey",
+            backend="corridorkey",
             params={
                 "execution_profile": "corridorkey-shaped-icon",
                 "corridorkey_auto_mask": True,
@@ -261,7 +263,7 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
     def fake_run(prepared, **kwargs):
         captured["params"] = prepared.decision.params
         result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
-        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["algorithm"] = prepared.decision.backend
         result.metadata["execution_backend"] = "direct-corridorkey"
         result.metadata["route"] = prepared.decision.route
         return result
@@ -287,7 +289,7 @@ def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
         RouteDecision(
             route="pymatting_known_b",
             asset_kind="button",
-            backend="comfy-pymatting-known-b",
+            backend="pymatting_known_b",
             params={"execution_profile": "pymatting-hard-button"},
             confidence=1.0,
             reasons=["test"],
@@ -295,7 +297,7 @@ def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
         RouteDecision(
             route="corridorkey",
             asset_kind="icon",
-            backend="comfy-corridorkey",
+            backend="corridorkey",
             params={"execution_profile": "corridorkey-effect-icon"},
             confidence=1.0,
             reasons=["test"],
@@ -311,9 +313,9 @@ def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
 
     def fake_run(prepared, **kwargs):
         profile = prepared.decision.params["execution_profile"]
-        backend = "direct-corridorkey" if prepared.decision.backend == "comfy-corridorkey" else "direct-pymatting-known-b"
+        backend = "direct-corridorkey" if prepared.decision.backend == "corridorkey" else "direct-pymatting-known-b"
         result = _result(prepared.rgb, execution_profile=profile)
-        result.metadata["selected_backend"] = prepared.decision.backend
+        result.metadata["algorithm"] = prepared.decision.backend
         result.metadata["execution_backend"] = backend
         return result
 

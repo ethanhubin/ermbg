@@ -7,15 +7,15 @@
 - Web/API 的 `backend=auto` 使用 Direct Worker。
 - 服务端点与 Web 默认值都写在 `ermbg.config.json` 中。
 - `services.direct_worker_url` 是主 Direct Worker 地址；
-  `services.direct_worker_urls` 是命名地址表。若本地和远端 worker
-  同时存在，必须显式配置并在 Web 后端列表显示地址，例如
-  `direct-worker:local` / `direct-worker:remote`。
+  `services.direct_worker_urls` 是 server URL 优先级列表。若同一个 worker
+  可通过本机和远端 IP 访问，必须显式配置 `name`、`url`、`priority`，
+  由 Web/API 按优先级尝试并 fallback。
 - 允许用环境变量在单个 shell 会话内临时覆盖：
   `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
   `ERMBG_WEB_AUTO_FALLBACK_BACKEND`、`ERMBG_ENABLE_COMFY`。
 - 正常的 Web 启动和运行时能力检查都走 Direct Worker。
-- ComfyUI 是可选的扩展支持，仅用于自定义 Comfy 图，或显式
-  `comfy-*` 后端调试。
+- ComfyUI 是可选的外围插件支持，仅用于自定义 Comfy 图；主线 Web/API
+  不保留 `comfy-*` backend。
 
 ## 去哪里查
 
@@ -54,6 +54,8 @@
 - 复杂的绿幕/蓝幕素材使用 CorridorKey。
 - 图片特征分类在执行前决定算法和参数。执行阶段消费
   `execution_profile`；它不得重新推断素材类别。
+- 路由决策只输出 algorithm 和 profile；具体执行 server 由本地配置的
+  Direct Worker server URL 列表决定。
 - 算法修复必须由机制驱动。不要围绕样本 ID、文件名、坐标、图标尺寸或单一
   观测到的颜色去调参，除非 Ethan 要求做一次性的特例处理。
 - 启发式阈值、置信度门限、过渡带宽度、面积比和重映射常数，都需要在附近写
@@ -69,12 +71,13 @@
 2. 用 `scripts\start_local.ps1` 或等价方式重启本地 Web；如果走远端,
    Web 必须连接 `ermbg.local.json` 或 `ERMBG_DIRECT_URL` 中的远端 URL。
 3. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
-4. 确认首页包含改动后的标记，例如 `Auto Direct Worker`
+4. 确认首页包含改动后的标记，例如 `Auto Route`、`CorridorKey`
    或相关 UI 文案。
 5. 用 `/api/runtime-capabilities` 确认 Direct Worker URL、health
    `git_sha`/同步标记和 GPU/CPU 能力。
 6. 用 `backend=auto` 对 `/api/matte-candidates` 跑一次真实 HTTP smoke，
-   确认 HTTP 200、route/profile 元数据以及 `server_elapsed_sec`。
+   确认 HTTP 200、`algorithm`、route/profile 元数据、`execution_backend`、
+   `execution_server_url` 以及 `server_elapsed_sec`。
 7. 如果 Web 报告 Direct Worker 连接错误，先检查
    `<services.direct_worker_url>/health`、远端 `7871` 监听和本机 `.venv`
    import `cv2`，再去改算法代码。
@@ -84,6 +87,6 @@
 
 ## 可选的 Comfy 工作
 
-- 仅在需要自定义图支持或显式 `comfy-*` 后端工作时才使用 Comfy。
+- 仅在需要自定义图支持时才使用 Comfy。
 - 如果 `comfy_nodes/` 有改动，需重新安装/同步自定义节点并重启 ComfyUI。
 - Comfy 包装层要保持轻薄，覆盖在共享的 ERMBG API 和 CorridorKey runner 之上。

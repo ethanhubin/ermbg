@@ -148,7 +148,7 @@ def _case_payload(
         "height": int(result.response.rgba.shape[0]),
         "strategy": result.response.strategy_name,
         "background": list(result.response.background_color),
-        "selected_backend": result.metadata.get("selected_backend"),
+        "algorithm": result.metadata.get("algorithm"),
         "execution_backend": result.metadata.get("execution_backend"),
         "route": result.metadata.get("route"),
         "asset_kind": result.metadata.get("asset_kind"),
@@ -217,6 +217,34 @@ def _apply_execution_backend_override(
     requested = execution_backend.strip().lower()
     if requested in {"", "auto", "direct-worker"}:
         return decision
+    if requested in {"direct-pymatting-known-b", "pymatting-known-b", "pymatting_known_b"}:
+        from .pymatting_refine import estimate_stable_background_color
+
+        stable_bg, stable_info = estimate_stable_background_color(rgb)
+        bg_color = stable_bg if stable_info.get("accepted", False) else fallback_bg_color
+        params = {
+            "execution_profile": "pymatting-known-bg",
+            "pymatting_method": "cf",
+            "pymatting_image_space": "linear",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": tuple(int(c) for c in bg_color),
+            "pymatting_bg_threshold": 3.5,
+            "pymatting_fg_threshold": 24.0,
+            "pymatting_boundary_band_px": 2,
+            "pymatting_auto_adapt": True,
+            "pymatting_cg_maxiter": 1000,
+            "pymatting_cg_rtol": 1e-6,
+        }
+        return replace(
+            decision,
+            route="pymatting_known_b",
+            asset_kind=decision.asset_kind if decision.asset_kind != "unknown" else "known_bg_graphic",
+            backend="pymatting_known_b",
+            params=params,
+            confidence=max(0.50, float(decision.confidence)),
+            reasons=[*decision.reasons, "manual_pymatting_known_b_algorithm"],
+            analysis={**decision.analysis, "manual_stable_background": stable_info},
+        )
     if requested == "direct-known-bg-glow":
         from .known_bg_glow import analyze_known_bg_glow
 
@@ -233,7 +261,7 @@ def _apply_execution_backend_override(
             decision,
             route="known_bg_glow",
             asset_kind="icon",
-            backend="direct-known-bg-glow",
+            backend="known_bg_glow",
             params=params,
             confidence=max(0.50, float(decision.confidence)),
             reasons=[*decision.reasons, "manual_direct_known_bg_glow_backend"],
@@ -242,7 +270,7 @@ def _apply_execution_backend_override(
     if requested != "direct-corridorkey":
         raise HTTPException(
             status_code=400,
-            detail="execution_backend must be auto, direct-worker, direct-corridorkey, or direct-known-bg-glow",
+            detail="execution_backend must be auto, direct-worker, direct-corridorkey, direct-pymatting-known-b, or direct-known-bg-glow",
         )
     if not isinstance(decision.analysis.get("corridorkey_analysis"), dict):
         raise HTTPException(status_code=400, detail="direct-corridorkey requires corridorkey analysis metadata")
@@ -252,7 +280,7 @@ def _apply_execution_backend_override(
     return replace(
         decision,
         route="corridorkey",
-        backend="comfy-corridorkey",
+        backend="corridorkey",
         params=params,
         reasons=[*decision.reasons, "manual_direct_corridorkey_backend"],
     )
@@ -307,7 +335,7 @@ def _corridorkey_form_params(
 
 
 def _is_cpu_parallel_route(decision: RouteDecision) -> bool:
-    return decision.backend in {"comfy-pymatting-known-b", "direct-known-bg-glow"}
+    return decision.backend in {"pymatting_known_b", "pymatting_fallback", "known_bg_glow"}
 
 
 def _run_prepared_main(
@@ -315,15 +343,17 @@ def _run_prepared_main(
     *,
     shadow_mode: str,
     corridorkey_hard_ui_hint_mode: str,
+    corridorkey_hint_mask: np.ndarray | None,
     fallback_bg_color: tuple[int, int, int],
 ) -> DirectWorkerResult:
-    if prepared.decision.backend == "comfy-corridorkey":
+    if prepared.decision.backend == "corridorkey":
         with _GPU_LOCK:
             return direct_matte_from_decision(
                 prepared.rgb,
                 decision=prepared.decision,
                 shadow_mode=shadow_mode,
                 corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                corridorkey_hint_mask=corridorkey_hint_mask,
                 fallback_bg_color=fallback_bg_color,
                 ck_factory=_CK_FACTORY,
                 route_sec=prepared.route_sec,
@@ -331,10 +361,11 @@ def _run_prepared_main(
     return direct_matte_from_decision(
         prepared.rgb,
         decision=prepared.decision,
-        shadow_mode=shadow_mode,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-        fallback_bg_color=fallback_bg_color,
-        ck_factory=_CK_FACTORY,
+            shadow_mode=shadow_mode,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            corridorkey_hint_mask=corridorkey_hint_mask,
+            fallback_bg_color=fallback_bg_color,
+            ck_factory=_CK_FACTORY,
         route_sec=prepared.route_sec,
     )
 
@@ -412,6 +443,7 @@ def health() -> dict[str, Any]:
 @app.post("/matte")
 async def matte_endpoint(
     image: UploadFile = File(...),
+    corridorkey_hint_mask: UploadFile | None = File(None),
     execution_backend: str = Form("auto"),
     shadow_mode: str = Form("auto"),
     corridorkey_gamma_space: str | None = Form(None),
@@ -446,6 +478,11 @@ async def matte_endpoint(
         corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
     )
     data = await image.read()
+    hint_mask = None
+    if corridorkey_hint_mask is not None and corridorkey_auto_mask is not True:
+        hint_data = await corridorkey_hint_mask.read()
+        hint = np.asarray(Image.open(io.BytesIO(hint_data)).convert("L"), dtype=np.float32) / 255.0
+        hint_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
     try:
         prepared = _prepare_request(
             0,
@@ -466,6 +503,7 @@ async def matte_endpoint(
             prepared,
             shadow_mode=shadow_mode,
             corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            corridorkey_hint_mask=hint_mask,
             fallback_bg_color=bg,
         )
     except HTTPException:
@@ -567,6 +605,7 @@ async def batch_matte_endpoint(
                 item,
                 shadow_mode=shadow_mode,
                 corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                corridorkey_hint_mask=None,
                 fallback_bg_color=bg,
             )
             rows[item.index] = _case_payload(
@@ -596,7 +635,7 @@ async def batch_matte_endpoint(
                 "height": int(payload.get("height", item.rgb.shape[0])),
                 "strategy": payload.get("response_strategy"),
                 "background": payload.get("background"),
-                "selected_backend": payload.get("selected_backend"),
+                "algorithm": payload.get("algorithm"),
                 "execution_backend": payload.get("execution_backend"),
                 "route": payload.get("route"),
                 "asset_kind": payload.get("asset_kind"),

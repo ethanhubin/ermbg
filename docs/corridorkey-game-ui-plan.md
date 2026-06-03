@@ -120,8 +120,8 @@ subject layer    CorridorKey 的 RGBA/alpha,保持为硬边的所有者
 
 ## 蓝幕支持
 
-不要把蓝幕支持仅仅当作修改 `bg_color`。当前的 `comfy-corridorkey` 包装层现在
-会通过 Comfy workflow 传入显式的 `screen_mode`,蓝幕样本也是活跃完整 eval 的
+不要把蓝幕支持仅仅当作修改 `bg_color`。当前的 CorridorKey runner 会通过
+Direct Worker 参数传入显式的 `screen_mode`,蓝幕样本也是活跃完整 eval 的
 一部分,但蓝幕语义应限定在绿幕无法覆盖的问题上。
 
 B016-B030 蓝色按钮块在 2026-05-31 从黄色按钮改为蓝幕上的绿色按钮。理由:
@@ -169,8 +169,8 @@ Web UI 应呈现 route 决策,而不是强迫用户去推理原始后端:
 - 游戏 UI 工作的默认后端: `auto`。
 - 显示 `requested_backend`、选中后端、route、asset kind、`execution_profile`、
   parameter profile、测得背景、置信度、server elapsed time 和 route 原因。
-- 手动/debug 控件仍可指向 `comfy-corridorkey` 或 `comfy-pymatting-known-b`,
-  但生产质量审计应从 `backend=auto` 开始。
+- 手动/debug 控件只选择 algorithm,例如 `corridorkey` 或 `pymatting_known_b`;
+  生产质量审计应从 `backend=auto` 开始,实际 server 由 Direct Worker 配置决定。
 - 掩码编辑仍是 debug/操作员辅助。它应提供粗略的 hint 或保护信号,而不是直接
   替换最终的细节 alpha。
 
@@ -195,13 +195,14 @@ Web UI 应呈现 route 决策,而不是强迫用户去推理原始后端:
 
 远端/Web 验证:
 
-- 通过 ComfyUI 跑 direct `ErmbgRouteMatte` smoke;
+- 通过 Direct Worker 跑真实 HTTP smoke;
 - 对 `direct-worker`,在使用其耗时数据前,先在同一 manifest 子集上验证它与
-  `backend=auto` 的 parity。`selected_backend`、`parameter_profile`、
+  `backend=auto` 的 parity。`algorithm`、`parameter_profile`、
   `execution_profile` 和 hint source 应一致;大幅的 alpha/RGBA 差异意味着执行层
   发生了分叉,必须在共享代码中修复,而不是作为独立后端去调参。
-- 当某个 profile 专属后端被改动时,跑针对性的 direct `comfy-corridorkey` 和
-  `comfy-pymatting-known-b` smoke;
+- 当某个 profile 专属执行路径被改动时,跑针对性的
+  `--fixed-execution-backend direct-corridorkey` 或
+  `--fixed-execution-backend direct-pymatting-known-b` smoke;
 - 通过 `127.0.0.1:7860` 跑真实 HTTP `/api/matte-candidates` smoke;
 - 把批量 summary 保存到 `out/` 下,含选中后端、route、`execution_profile`、
   设置、耗时和质量指标。

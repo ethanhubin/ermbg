@@ -1,11 +1,12 @@
 # ERMBG Route 策略
 
 本文档定义 Web、API、Direct Worker、Game Eval 和可选适配器共用的
-route/profile/backend 契约。
+route/profile/algorithm/execution 契约。
 
 Web `backend="auto"` 把图片提交给配置的 Direct Worker 服务。worker 运行
-`ermbg.router.classify_route()`,选择一个 execution profile,并分发到维护中的
-matting 路径。可选的 ComfyUI 节点对自定义图使用同一套 route 契约。
+`ermbg.router.classify_route()`,只选择 algorithm、execution profile 和参数,
+再由服务配置决定实际 server URL。可选的 ComfyUI 节点对自定义图使用同一套
+route 契约。
 
 route 选择必须在 matting 开始前完成。执行代码直接消费
 `RouteDecision.params.execution_profile` 及相关参数。profile 专属的调参应放在
@@ -115,16 +116,18 @@ Direct Worker 和可选 Comfy 节点都调用同一个 runner,以保持 hint 转
 `backend="direct-worker"` 是 Web/API 和 Game Eval 的服务后端。服务 URL 来自
 配置中的 `services.direct_worker_url`: 共享默认值在 `ermbg.config.json`,本机
 覆盖在 gitignored `ermbg.local.json`,并可用 `ERMBG_DIRECT_URL` 作为环境覆盖。
-当本机和远端 worker 同时存在时,把命名地址写入
-`services.direct_worker_urls`,例如 `local` 和 `remote`。Web 会把它们渲染成
-`direct-worker:local`、`direct-worker:remote`、`direct-corridorkey:local`
-等显式选项,选项文本必须包含实际 URL。
+当同一个 worker 可通过多个 IP 访问时,把 server URL 列表写入
+`services.direct_worker_urls`,例如 `loopback` 和 `lan-gpu`,并用 `priority`
+控制尝试顺序。Web 下拉框只选择 algorithm,不再渲染 local/remote 或
+`direct-worker:<name>` 服务选项。
 
-Direct Worker 报告两层后端元数据:
+Direct Worker 报告两层元数据:
 
-- `selected_backend`: router 选择的逻辑 route 后端;
+- `algorithm`: router 选择的逻辑算法,例如 `corridorkey`、`pymatting_known_b`;
 - `debug.direct_worker.execution_backend`: 具体的 direct 执行路径,例如
   `direct-corridorkey` 或 `direct-pymatting-known-b`。
+- `execution_server_url` / `server_fallback_chain`: Web 选择的实际 Direct Worker
+  server 和 fallback 记录。
 
 对同一输入,Web auto 和 Direct Worker run 应保持 `parameter_profile` 和
 `execution_profile` 稳定。适配器之间预期的输出差异应停留在浮点或 8-bit
@@ -134,8 +137,9 @@ rounding 级别。
 
 ComfyUI 支持位于 `comfy_nodes/`,用于自定义 Comfy 图。它使用同一套
 route/profile 契约,并通过 `services.comfy_url` 或 `COMFY_URL` 配置。Web 默认
-配置使用 Direct Worker。Comfy 不是默认运行路径,没有代码级 URL fallback; 使用
-Comfy 后端前必须在本机配置或环境变量中显式设置地址。
+配置使用 Direct Worker。Comfy 不是默认运行路径,没有代码级 URL fallback;
+Web 主线不再提供 `comfy-*` backend; 使用 Comfy 节点前必须在本机配置或环境变量中
+显式设置地址。
 
 节点细节和安装步骤见 `comfy_nodes/README.md` 和 `DEPLOY.md`。
 
@@ -161,10 +165,11 @@ Comfy 后端前必须在本机配置或环境变量中显式设置地址。
 在 Web 侧 route 改动之后:
 
 1. 重启本地 Web 服务。
-2. 验证首页包含 `Auto` 和 `direct-worker`。
+2. 验证首页包含 `Auto Route`、`CorridorKey`、`PyMatting Known-B`。
 3. 用 `backend=auto` 向 `/api/matte-candidates` 提交真实样本。
-4. 确认 `requested_backend`、`backend`、`debug.auto_route.selected_backend`、
-   `debug.auto_route.route`、`execution_profile` 和 `server_elapsed_sec`。
+4. 确认 `requested_backend`、`backend`、`debug.auto_route.algorithm`、
+   `debug.auto_route.route`、`execution_backend`、`execution_server_url`、
+   `execution_profile` 和 `server_elapsed_sec`。
 5. 对 Direct Worker 改动,还要用 `backend=direct-worker` 提交一个 CorridorKey
    样本,并确认 `debug.direct_worker.execution_backend`。
 
