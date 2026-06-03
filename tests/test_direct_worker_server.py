@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,6 +11,8 @@ import ermbg.direct_worker_server as server
 from ermbg.api import MatteResponse
 from ermbg.direct_worker import DirectWorkerResult
 from ermbg.router import RouteDecision
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _png_bytes(rgb: np.ndarray) -> bytes:
@@ -219,15 +222,20 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
     response = client.post(
         "/matte",
         files={"image": ("case.png", _png_bytes(rgb), "image/png")},
-        data={"include_image": "false", "execution_backend": "direct-known-bg-glow"},
+        data={
+            "include_image": "false",
+            "execution_backend": "direct-known-bg-glow",
+            "known_bg_glow_material_strength": "1.7",
+        },
     )
 
     assert response.status_code == 200
     assert captured["backend"] == "known_bg_glow"
     assert captured["route"] == "known_bg_glow"
     assert captured["params"]["execution_profile"] == "known-bg-glow"
-    assert captured["params"]["known_bg_glow_mode"] in {"single_target_line", "adaptive_ray"}
+    assert captured["params"]["known_bg_glow_mode"] in {"single_target_line", "adaptive_ray", "chromatic_swap_ray"}
     assert captured["params"]["known_bg_glow_bg_color"] == (0, 200, 0)
+    assert captured["params"]["known_bg_glow_material_strength"] == 1.7
     assert captured["analysis"]["known_bg_glow"]["background_color"] == [0, 200, 0]
     payload = response.json()
     assert payload["algorithm"] == "known_bg_glow"
@@ -235,6 +243,32 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
     assert payload["execution_backend"] == "direct-known-bg-glow"
     assert payload["route"] == "known_bg_glow"
     assert payload["algorithm_debug"]["known_bg_glow"]["mode"] == captured["params"]["known_bg_glow_mode"]
+
+
+def test_direct_worker_manual_known_bg_glow_preserves_chromatic_swap_ray_mode():
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT / "samples/corridorkey_semantic/icon/icon_icon_d01_soft_alpha_glow_hard_core/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+    decision = server.classify_route(image)
+
+    assert decision.backend == "known_bg_glow"
+    assert decision.params["known_bg_glow_mode"] == "chromatic_swap_ray"
+
+    forced = server._apply_execution_backend_override(
+        decision,
+        "direct-known-bg-glow",
+        rgb=image,
+        fallback_bg_color=(0, 200, 0),
+    )
+
+    assert forced.backend == "known_bg_glow"
+    assert forced.route == "known_bg_glow"
+    assert forced.params["known_bg_glow_mode"] == "chromatic_swap_ray"
+    assert forced.params["known_bg_glow_bg_color"] == decision.params["known_bg_glow_bg_color"]
+    assert forced.params["known_bg_glow_target_color"] == decision.params["known_bg_glow_target_color"]
 
 
 def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(monkeypatch):

@@ -7,7 +7,7 @@ import json
 import numpy as np
 from PIL import Image
 
-from ermbg.slicer import SliceBox, classify_ui_slice, crop_slice, save_slices, slice_image
+from ermbg.slicer import SliceBox, classify_ui_slice, crop_slice, merge_overlapping_slice_boxes, save_slices, slice_image
 
 
 def test_slice_image_finds_separated_subject_rectangles(tmp_path):
@@ -19,7 +19,8 @@ def test_slice_image_finds_separated_subject_rectangles(tmp_path):
     result = slice_image(image, min_area=80, padding=3)
 
     assert result.background_color == (0, 200, 0)
-    assert [box.bbox for box in result.boxes] == [(9, 7, 28, 27), (67, 41, 40, 34)]
+    assert result.padding == 3
+    assert [box.bbox for box in result.boxes] == [(12, 10, 22, 21), (70, 44, 34, 28)]
 
     out_dir = tmp_path / "slices"
     paths = save_slices(image, result, out_dir, stem="sheet")
@@ -31,12 +32,71 @@ def test_slice_image_finds_separated_subject_rectangles(tmp_path):
     assert (out_dir / "sheet_mask.png").exists()
 
 
+def test_slice_image_merges_overlapping_subject_rectangles():
+    image = np.full((80, 120, 3), [0, 200, 0], dtype=np.uint8)
+    image[10:13, 10:50] = [230, 40, 40]
+    image[47:50, 10:50] = [230, 40, 40]
+    image[10:50, 10:13] = [230, 40, 40]
+    image[10:50, 47:50] = [230, 40, 40]
+    image[25:31, 25:31] = [250, 250, 255]
+    image[56:64, 12:42] = [40, 80, 240]
+    image[20:36, 75:95] = [240, 220, 30]
+
+    result = slice_image(image, min_area=10, padding=2)
+
+    assert [box.bbox for box in result.boxes] == [(10, 10, 40, 40), (75, 20, 20, 16), (12, 56, 30, 8)]
+
+
+def test_slice_image_padding_does_not_merge_adjacent_rectangles():
+    image = np.full((80, 140, 3), [0, 200, 0], dtype=np.uint8)
+    image[20:50, 20:50] = [230, 40, 40]
+    image[20:50, 60:90] = [40, 80, 240]
+    image[20:50, 100:130] = [240, 220, 30]
+
+    result = slice_image(image, min_area=50, padding=12)
+
+    assert [box.bbox for box in result.boxes] == [(20, 20, 30, 30), (60, 20, 30, 30), (100, 20, 30, 30)]
+    padded = [crop_slice(image, result.foreground_mask, box, padding=result.padding).shape[:2] for box in result.boxes]
+    assert padded == [(54, 54), (54, 54), (54, 52)]
+
+
+def test_merge_slice_boxes_joins_aligned_touching_shadow_strip():
+    boxes = [
+        SliceBox(id=1, bbox=(609, 707, 206, 85), area=16974),
+        SliceBox(id=2, bbox=(613, 792, 195, 10), area=963),
+        SliceBox(id=3, bbox=(609, 819, 207, 96), area=19497),
+    ]
+
+    merged = merge_overlapping_slice_boxes(boxes)
+
+    assert [box.bbox for box in merged] == [(609, 707, 206, 95), (609, 819, 207, 96)]
+
+
+def test_merge_slice_boxes_does_not_chain_through_union_rectangles():
+    boxes = [
+        SliceBox(id=1, bbox=(57, 338, 366, 180), area=12759),
+        SliceBox(id=2, bbox=(385, 436, 292, 124), area=9539),
+        SliceBox(id=3, bbox=(328, 559, 28, 36), area=735),
+        SliceBox(id=4, bbox=(198, 562, 25, 32), area=591),
+        SliceBox(id=5, bbox=(318, 580, 108, 244), area=8146),
+        SliceBox(id=6, bbox=(49, 584, 217, 152), area=8403),
+        SliceBox(id=7, bbox=(487, 629, 152, 230), area=7319),
+        SliceBox(id=8, bbox=(96, 789, 199, 271), area=18997),
+        SliceBox(id=9, bbox=(353, 907, 285, 147), area=9951),
+    ]
+
+    merged = merge_overlapping_slice_boxes(boxes)
+
+    assert len(merged) == 6
+    assert [box.bbox for box in merged[:3]] == [(57, 338, 620, 222), (318, 559, 108, 265), (49, 562, 217, 174)]
+
+
 def test_transparent_crop_uses_detected_foreground_as_alpha():
     image = np.full((32, 48, 3), [255, 255, 255], dtype=np.uint8)
     image[8:20, 10:24] = [10, 120, 230]
 
     result = slice_image(image, min_area=20, padding=2)
-    rgba = crop_slice(image, result.foreground_mask, result.boxes[0], transparent=True)
+    rgba = crop_slice(image, result.foreground_mask, result.boxes[0], padding=result.padding, transparent=True)
 
     assert rgba.shape == (16, 18, 4)
     assert rgba[..., 3].max() == 255

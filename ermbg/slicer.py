@@ -29,12 +29,14 @@ class SliceResult:
     background_color: tuple[int, int, int]
     foreground_mask: np.ndarray
     boxes: list[SliceBox]
+    padding: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
             "background_color": list(self.background_color),
             "count": len(self.boxes),
             "boxes": [box.to_dict() for box in self.boxes],
+            "padding": self.padding,
         }
 
 
@@ -132,14 +134,93 @@ def find_slice_boxes(
         x, y, bw, bh, area = (int(v) for v in stats[label])
         if area < min_area:
             continue
-        x0 = max(0, x - padding)
-        y0 = max(0, y - padding)
-        x1 = min(w, x + bw + padding)
-        y1 = min(h, y + bh + padding)
-        boxes.append(SliceBox(id=0, bbox=(x0, y0, x1 - x0, y1 - y0), area=area))
+        boxes.append(SliceBox(id=0, bbox=(x, y, bw, bh), area=area))
 
+    boxes = merge_overlapping_slice_boxes(boxes)
     boxes.sort(key=lambda box: (box.bbox[1], box.bbox[0]))
     return [SliceBox(id=i + 1, bbox=box.bbox, area=box.area) for i, box in enumerate(boxes)]
+
+
+def _boxes_overlap(a: SliceBox, b: SliceBox) -> bool:
+    ax, ay, aw, ah = a.bbox
+    bx, by, bw, bh = b.bbox
+    return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def _boxes_are_near_aligned_parts(a: SliceBox, b: SliceBox) -> bool:
+    ax, ay, aw, ah = a.bbox
+    bx, by, bw, bh = b.bbox
+    x_overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    y_overlap = max(0, min(ay + ah, by + bh) - max(ay, by))
+    x_gap = max(0, max(ax, bx) - min(ax + aw, bx + bw))
+    y_gap = max(0, max(ay, by) - min(ay + ah, by + bh))
+    if x_gap > 0 or y_overlap > 0:
+        return False
+    overlap_ratio = x_overlap / float(max(1, min(aw, bw)))
+    thin_ratio = min(ah, bh) / float(max(1, max(ah, bh)))
+    # Sprite sheets often render a button/drop shadow as a separate thin
+    # component whose bbox touches the main control. Merge only when the pieces
+    # are vertically adjacent, strongly horizontally aligned, and one piece is
+    # clearly a shallow appendage, so stacked independent controls stay split.
+    return y_gap <= 2 and overlap_ratio >= 0.65 and thin_ratio <= 0.22
+
+
+def _boxes_should_merge(a: SliceBox, b: SliceBox) -> bool:
+    return _boxes_overlap(a, b) or _boxes_are_near_aligned_parts(a, b)
+
+
+def _merge_pair(a: SliceBox, b: SliceBox) -> SliceBox:
+    ax, ay, aw, ah = a.bbox
+    bx, by, bw, bh = b.bbox
+    x0 = min(ax, bx)
+    y0 = min(ay, by)
+    x1 = max(ax + aw, bx + bw)
+    y1 = max(ay + ah, by + bh)
+    return SliceBox(id=0, bbox=(x0, y0, x1 - x0, y1 - y0), area=a.area + b.area)
+
+
+def merge_overlapping_slice_boxes(boxes: list[SliceBox]) -> list[SliceBox]:
+    """Collapse any intersecting slice rectangles into their union rectangle.
+
+    A fragmented translucent object can produce a main component plus interior
+    highlight/bubble components. Once padded, those boxes overlap and should be
+    exported as one larger slice, not as duplicate crops over the same pixels.
+    """
+    if not boxes:
+        return []
+
+    parents = list(range(len(boxes)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(a: int, b: int) -> None:
+        root_a = find(a)
+        root_b = find(b)
+        if root_a != root_b:
+            parents[root_b] = root_a
+
+    for i, box in enumerate(boxes):
+        for j in range(i + 1, len(boxes)):
+            if _boxes_should_merge(box, boxes[j]):
+                union(i, j)
+
+    groups: dict[int, list[SliceBox]] = {}
+    for i, box in enumerate(boxes):
+        groups.setdefault(find(i), []).append(box)
+
+    merged: list[SliceBox] = []
+    for group in groups.values():
+        current = group[0]
+        for box in group[1:]:
+            current = _merge_pair(current, box)
+        merged.append(current)
+
+    merged.sort(key=lambda box: (box.bbox[1], box.bbox[0]))
+    return [SliceBox(id=i + 1, bbox=box.bbox, area=box.area) for i, box in enumerate(merged)]
 
 
 def slice_image(
@@ -162,7 +243,19 @@ def slice_image(
         padding=padding,
         close_iterations=close_iterations,
     )
-    return SliceResult(background_color=bg, foreground_mask=mask.astype(np.float32), boxes=boxes)
+    return SliceResult(background_color=bg, foreground_mask=mask.astype(np.float32), boxes=boxes, padding=max(0, int(padding)))
+
+
+def pad_slice_box(box: SliceBox, image_shape: tuple[int, int], padding: int) -> SliceBox:
+    if padding <= 0:
+        return box
+    h, w = image_shape[:2]
+    x, y, bw, bh = box.bbox
+    x0 = max(0, x - padding)
+    y0 = max(0, y - padding)
+    x1 = min(w, x + bw + padding)
+    y1 = min(h, y + bh + padding)
+    return SliceBox(id=box.id, bbox=(x0, y0, x1 - x0, y1 - y0), area=box.area)
 
 
 def crop_slice(
@@ -170,8 +263,10 @@ def crop_slice(
     mask: np.ndarray,
     box: SliceBox,
     *,
+    padding: int = 0,
     transparent: bool = False,
 ) -> np.ndarray:
+    box = pad_slice_box(box, image_srgb.shape[:2], padding)
     x, y, w, h = box.bbox
     crop = image_srgb[y : y + h, x : x + w]
     if not transparent:
@@ -253,7 +348,7 @@ def save_slices(
     for box in result.boxes:
         suffix = "rgba" if transparent else "rgb"
         path = out_dir / f"{stem}_{box.id:03d}_{suffix}.png"
-        crop = crop_slice(image_srgb, result.foreground_mask, box, transparent=transparent)
+        crop = crop_slice(image_srgb, result.foreground_mask, box, padding=result.padding, transparent=transparent)
         if transparent:
             io.save_rgba(path, crop)
         else:
@@ -273,6 +368,8 @@ __all__ = [
     "estimate_background_color",
     "find_slice_boxes",
     "foreground_mask_from_background",
+    "merge_overlapping_slice_boxes",
+    "pad_slice_box",
     "save_slices",
     "slice_image",
 ]

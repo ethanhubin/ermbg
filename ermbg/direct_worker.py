@@ -86,7 +86,14 @@ def matte_known_bg_glow_direct(
     selected_bg_color = _rgb_param(params, "known_bg_glow_bg_color", bg_color)
     target_color = _rgb_param(params, "known_bg_glow_target_color", (255, 255, 255))
     mode = str(params.get("known_bg_glow_mode") or "single_target_line")
-    result = matte_known_bg_glow(rgb, selected_bg_color, target_color, mode=mode)
+    material_strength = float(np.clip(float(params.get("known_bg_glow_material_strength", 1.0)), 0.0, 2.0))
+    result = matte_known_bg_glow(
+        rgb,
+        selected_bg_color,
+        target_color,
+        mode=mode,
+        material_strength=material_strength,
+    )
     report: dict[str, Any] = {
         "diagnosis": None,
         "background_color": list(selected_bg_color),

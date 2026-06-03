@@ -112,6 +112,7 @@ def test_index_serves_upload_ui():
     assert '<option value="corridorkey">CorridorKey</option>' in response.text
     assert '<option value="pymatting_known_b">PyMatting Known-B</option>' in response.text
     assert '<option value="known-bg-glow">Known-B Glow</option>' in response.text
+    assert 'name="known_bg_glow_material_strength"' in response.text
     assert '<option value="passthrough">Passthrough</option>' in response.text
     assert '<option value="comfy-pymatting-known-b">comfy-pymatting-known-b</option>' not in response.text
     assert '<option value="comfy-corridorkey">comfy-corridorkey</option>' not in response.text
@@ -317,6 +318,18 @@ def test_slice_page_serves_slice_mode_entry():
     assert ".thumb { width: 64px; height: 64px;" in response.text
     assert 'downloadCrop.href = crop.rgb' in response.text
     assert 'downloadCrop.download = crop.filename || `${crop.id || crop.label || "slice"}_rgb.png`' in response.text
+    assert 'padding.addEventListener("keydown"' in response.text
+    assert 'padding.addEventListener("blur", refreshPreviewFromPadding)' in response.text
+    assert 'padding.addEventListener("change", refreshPreviewFromPadding)' in response.text
+    assert "minArea.disabled = isBusy" not in response.text
+    assert "padding.disabled = isBusy" not in response.text
+    assert "function createImagePanZoomViewport" in response.text
+    assert 'viewport.addEventListener("wheel"' in response.text
+    assert 'viewport.addEventListener("pointerdown"' in response.text
+    assert 'viewport.addEventListener("dblclick", reset)' in response.text
+    assert "image.draggable = false" in response.text
+    assert 'viewport.addEventListener("dragstart"' in response.text
+    assert "处边距重叠" in response.text
     assert '.row-download { visibility: visible;' in response.text
     assert "grid-template-rows: auto auto auto minmax(0, 1fr) auto" in response.text
     assert "scrollbar-gutter: stable" in response.text
@@ -1433,11 +1446,12 @@ def test_matte_candidates_endpoint_accepts_direct_known_bg_glow_backend(monkeypa
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "direct-known-bg-glow"},
+        data={"backend": "direct-known-bg-glow", "known_bg_glow_material_strength": "1.65"},
     )
 
     assert response.status_code == 200
     assert captured["execution_backend"] == "direct-known-bg-glow"
+    assert captured["known_bg_glow_material_strength"] == 1.65
     payload = response.json()
     assert payload["backend"] == "direct-known-bg-glow"
     assert payload["requested_backend"] == "direct-known-bg-glow"
@@ -1445,6 +1459,57 @@ def test_matte_candidates_endpoint_accepts_direct_known_bg_glow_backend(monkeypa
     assert [(c["id"], c["label"], c["selected"]) for c in payload["candidates"]] == [
         ("auto", "Direct Worker Known-B Glow", True)
     ]
+
+
+def test_matte_candidates_endpoint_routes_known_bg_glow_option_to_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 180
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.full((h, w), 180 / 255.0, dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_known_bg_glow",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-known-bg-glow",
+                "direct_worker": {"server_elapsed_sec": 1.25, "execution_backend": "direct-known-bg-glow"},
+                "auto_route": {
+                    "requested_backend": "direct-known-bg-glow",
+                    "selected_backend": "direct-known-bg-glow",
+                    "execution_backend": "direct-known-bg-glow",
+                    "route": "known_bg_glow",
+                    "asset_kind": "icon",
+                    "parameter_profile": "effect_icon",
+                    "execution_profile": "known-bg-glow",
+                },
+            },
+        )
+
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "known-bg-glow"},
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-known-bg-glow"
+    payload = response.json()
+    assert payload["backend"] == "known-bg-glow"
+    assert payload["requested_backend"] == "known-bg-glow"
+    assert payload["route"] == "known_bg_glow"
+    assert payload["execution_backend"] == "direct-known-bg-glow"
 
 
 def test_matte_candidates_endpoint_routes_auto_to_configured_direct_worker(monkeypatch):
@@ -2006,9 +2071,39 @@ def test_slice_preview_endpoint_returns_annotated_boxes():
     payload = response.json()
     assert payload["count"] == 2
     assert payload["background_color"] == [0, 200, 0]
+    assert [box["bbox"] for box in payload["raw_boxes"]] == [[8, 8, 16, 14], [44, 25, 20, 17]]
+    assert [box["bbox"] for box in payload["boxes"]] == [[7, 7, 18, 16], [43, 24, 22, 19]]
+    assert payload["overlap_count"] == 0
     assert payload["annotated"].startswith("data:image/png;base64,")
     png = base64.b64decode(payload["annotated"].split(",", 1)[1])
     assert Image.open(BytesIO(png)).mode == "RGBA"
+
+
+def test_slice_preview_marks_overlapping_padded_boxes():
+    img = np.full((48, 96, 3), [0, 200, 0], dtype=np.uint8)
+    img[12:28, 20:36] = [240, 30, 30]
+    img[12:28, 44:60] = [20, 40, 220]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice-preview",
+        files={"file": ("sheet.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "8"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["overlap_count"] == 1
+    assert payload["overlaps"] == [[36, 4, 8, 32]]
+    png = base64.b64decode(payload["annotated"].split(",", 1)[1])
+    rgba = np.asarray(Image.open(BytesIO(png)).convert("RGBA"))
+    overlap = rgba[4:36, 36:44]
+    assert int(overlap[..., 0].max()) == 255
+    assert int(overlap[..., 3].min()) == 255
+    assert float(overlap[..., 0].mean()) > float(overlap[..., 1].mean())
 
 
 def test_slice_crops_endpoint_returns_list_payload():

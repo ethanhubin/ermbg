@@ -43,7 +43,7 @@ from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_
 from .local_ownership import generate_local_ownership_candidate
 from .runtime_capabilities import collect_runtime_capabilities
 from .settings import get_bool_setting, get_direct_worker_endpoints, get_direct_worker_servers, get_setting
-from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, slice_image
+from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, merge_overlapping_slice_boxes, pad_slice_box, slice_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -574,7 +574,12 @@ def _matte_page_html() -> str:
     .mask-mode-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
     #mask-brush-size { width: 104px; min-height: 32px; }
     .mask-actions { display: flex; gap: 8px; flex: 0 0 auto; }
-    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 104px 56px; overflow: hidden; }
+    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 112px 56px; overflow: hidden; }
+    .preview > .preview-bar { grid-row: 1; }
+    .preview > .mask-toolbar { grid-row: 2; }
+    .preview > .canvas { grid-row: 3; }
+    .preview > .candidate-panel { grid-row: 4; }
+    .preview > .preview-actions { grid-row: 5; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
     .preview-actions { height: 56px; min-height: 56px; max-height: 56px; border-top: 1px solid #d9dfd7; border-bottom: 0; overflow: hidden; }
     .preview-actions a.download { flex: 0 0 auto; min-width: 128px; padding: 0 18px; white-space: nowrap; }
@@ -597,17 +602,17 @@ def _matte_page_html() -> str:
     .canvas img { max-width: 100%; max-height: 100%; }
     .result-image { width: 100%; height: 100%; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
-    .candidate-panel { height: 104px; min-height: 104px; max-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .candidate-panel { height: 112px; min-height: 112px; max-height: 112px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
     .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }
     .preview.is-mask-mode .candidate-panel { display: none; min-height: 0; padding: 0; border: 0; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
     .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
-    .candidate-tab { width: 92px; min-width: 92px; min-height: 76px; display: grid; grid-template-rows: 48px auto; gap: 5px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
+    .candidate-tab { width: 76px; min-width: 76px; display: grid; grid-template-rows: 64px auto; gap: 4px; padding: 4px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
     .candidate-tab[aria-selected="true"] { border-color: #196f5a; box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18); color: #1c2320; }
-    .candidate-thumb { width: 100%; height: 48px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
-    .candidate-thumb img { width: 100%; height: 100%; object-fit: contain; }
+    .candidate-thumb { width: 68px; height: 64px; display: block; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
+    .candidate-thumb img { width: 64px; height: 64px; object-fit: contain; display: block; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 104px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
+    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 112px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
   </style>
 </head>
 <body>
@@ -656,6 +661,13 @@ def _matte_page_html() -> str:
             </div>
             <div class="range-labels"><span>背景</span><span>过渡</span><span>保护</span></div>
           </div>
+        </div>
+      </details>
+      <details class="settings" id="known-bg-glow-settings" open>
+        <summary>[Known-B Glow]</summary>
+        <div class="settings-grid">
+          <label>Background removal<input id="glow-material-strength" name="known_bg_glow_material_strength" type="range" min="0" max="2" step="0.05" value="1"></label>
+          <output class="range-value" id="glow-material-strength-value">1.00</output>
         </div>
       </details>
       <details class="settings" id="pymatting-settings" open>
@@ -748,8 +760,10 @@ def _matte_page_html() -> str:
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
     const corridorSettings = document.getElementById("corridorkey-settings");
+    const knownBgGlowSettings = document.getElementById("known-bg-glow-settings");
     const pymattingSettings = document.getElementById("pymatting-settings");
     const corridorSettingControls = Array.from(document.querySelectorAll("[name^='corridorkey_']"));
+    const knownBgGlowSettingControls = Array.from(document.querySelectorAll("[name^='known_bg_glow_']"));
     const pymattingSettingControls = Array.from(document.querySelectorAll("[name^='pymatting_']"));
     const shadowMode = document.getElementById("shadow-mode");
     const autoMask = document.getElementById("ck-auto-mask");
@@ -765,6 +779,8 @@ def _matte_page_html() -> str:
     const protectBg = document.getElementById("ck-protect-bg");
     const protectFg = document.getElementById("ck-protect-fg");
     const protectRangeValue = document.getElementById("ck-protect-range-value");
+    const glowMaterialStrength = document.getElementById("glow-material-strength");
+    const glowMaterialStrengthValue = document.getElementById("glow-material-strength-value");
     const backgroundTabs = Array.from(document.querySelectorAll("[data-bg]"));
     const viewTabs = Array.from(document.querySelectorAll("[data-view]"));
     const maskToolbarControls = Array.from(document.querySelectorAll("#mask-toolbar input, #mask-toolbar select, #mask-toolbar button"));
@@ -809,9 +825,10 @@ def _matte_page_html() -> str:
     }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
-    function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
+    function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
     function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
     function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
     function syncPreviewMode() { const maskMode = activeView === "mask"; previewPanel.classList.toggle("is-mask-mode", maskMode); canvas.classList.toggle("is-mask-mode", maskMode); viewTabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.view === activeView))); backgroundTabs.forEach((tab) => tab.setAttribute("aria-selected", String(activeView === "preview" && tab.dataset.bg === activeBackground))); if (maskMode) layoutMaskCanvas(); }
@@ -847,6 +864,7 @@ def _matte_page_html() -> str:
     backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
     protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
     protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
+    glowMaterialStrength.addEventListener("input", syncGlowMaterialStrength);
     autoMask.addEventListener("change", () => syncAutoMaskControls());
     samMaskButton.addEventListener("click", () => generateSamMask());
     maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
@@ -870,6 +888,9 @@ def _matte_page_html() -> str:
       corridorSettingControls.forEach((control) => {
         if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false");
         else formData.append(control.name, control.value);
+      });
+      knownBgGlowSettingControls.forEach((control) => {
+        formData.append(control.name, control.value);
       });
       pymattingSettingControls.forEach((control) => {
         if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false");
@@ -907,6 +928,7 @@ def _matte_page_html() -> str:
       }
     });
     syncColorProtectionRange();
+    syncGlowMaterialStrength();
     syncBackendSettings();
     syncAutoMaskControls();
     syncPreviewMode();
@@ -1996,8 +2018,9 @@ def _slice_page_html() -> str:
     .workspace { min-height: 640px; display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
     .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
     .status { color: #5d6862; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .preview { min-height: 420px; display: grid; place-items: center; padding: 16px; overflow: hidden; }
-    .preview img { max-width: 100%; max-height: 72vh; object-fit: contain; }
+    .preview { min-height: 420px; display: grid; place-items: center; padding: 16px; overflow: hidden; touch-action: none; cursor: grab; }
+    .preview.is-dragging { cursor: grabbing; }
+    .preview img { max-width: 100%; max-height: 72vh; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; }
     .empty { color: #6a746f; font-size: 14px; }
     .left-list { min-width: 0; min-height: 0; height: 100%; max-height: 100%; display: block; overflow-y: auto; overflow-x: hidden; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; scrollbar-gutter: stable; }
     .row { width: 100%; min-width: 0; height: 72px; display: grid; grid-template-columns: 64px minmax(0, 1fr) 96px; gap: 8px; align-items: center; padding: 4px 6px; border: 0; border-bottom: 1px solid #d9dfd7; border-radius: 0; background: #ffffff; text-align: left; cursor: pointer; }
@@ -2055,14 +2078,15 @@ def _slice_page_html() -> str:
     let hasPreview = false;
     let currentCrops = [];
     let selectedCrop = null;
+    let previewRequestId = 0;
+    let previewTimer = null;
+    let lastPreviewSettingsKey = "";
     const SLICE_STATE_KEY = "ermbgSliceWorkspace";
 
     function setBusy(isBusy) {
       confirmButton.disabled = isBusy || !hasPreview;
       matteSelected.disabled = isBusy || !selectedCrop;
       file.disabled = isBusy;
-      minArea.disabled = isBusy;
-      padding.disabled = isBusy;
     }
 
     function formData() {
@@ -2095,15 +2119,90 @@ def _slice_page_html() -> str:
       sessionStorage.removeItem(SLICE_STATE_KEY);
     }
 
+    function createImagePanZoomViewport(viewport, options = {}) {
+      const minScale = options.minScale || 0.25;
+      const maxScale = options.maxScale || 8;
+      let image = null;
+      let transform = { scale: 1, x: 0, y: 0 };
+      let drag = null;
+      function apply() {
+        if (!image) return;
+        image.style.transform = `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`;
+      }
+      function reset() {
+        transform = { scale: 1, x: 0, y: 0 };
+        apply();
+      }
+      function setImage(src, alt) {
+        viewport.innerHTML = "";
+        image = document.createElement("img");
+        image.src = src;
+        image.alt = alt;
+        image.draggable = false;
+        viewport.appendChild(image);
+        reset();
+      }
+      function clear(html) {
+        image = null;
+        drag = null;
+        viewport.classList.remove("is-dragging");
+        viewport.innerHTML = html || "";
+      }
+      viewport.addEventListener("wheel", (event) => {
+        if (!image) return;
+        event.preventDefault();
+        const rect = viewport.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const pointerX = event.clientX - centerX;
+        const pointerY = event.clientY - centerY;
+        const previousScale = transform.scale;
+        const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+        transform.scale = Math.max(minScale, Math.min(maxScale, transform.scale * factor));
+        transform.x = pointerX - ((pointerX - transform.x) * transform.scale) / previousScale;
+        transform.y = pointerY - ((pointerY - transform.y) * transform.scale) / previousScale;
+        apply();
+      }, { passive: false });
+      viewport.addEventListener("pointerdown", (event) => {
+        if (!image) return;
+        event.preventDefault();
+        drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: transform.x, startY: transform.y };
+        viewport.classList.add("is-dragging");
+        viewport.setPointerCapture(event.pointerId);
+      });
+      viewport.addEventListener("pointermove", (event) => {
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        transform.x = drag.startX + event.clientX - drag.x;
+        transform.y = drag.startY + event.clientY - drag.y;
+        apply();
+      });
+      function endDrag(event) {
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        drag = null;
+        viewport.classList.remove("is-dragging");
+        try { viewport.releasePointerCapture(event.pointerId); } catch (_) {}
+      }
+      viewport.addEventListener("pointerup", endDrag);
+      viewport.addEventListener("pointercancel", endDrag);
+      viewport.addEventListener("dblclick", reset);
+      viewport.addEventListener("dragstart", (event) => event.preventDefault());
+      return { setImage, clear, reset, hasImage: () => Boolean(image) };
+    }
+
+    const previewViewport = createImagePanZoomViewport(preview);
+
+    function renderPreviewImage(src, alt) {
+      previewViewport.setImage(src, alt);
+    }
+
     function showPreview(payload) {
       hasPreview = Boolean(payload.count);
-      preview.innerHTML = "";
-      const img = document.createElement("img");
-      img.src = payload.annotated;
-      img.alt = "自动标注预览";
-      preview.appendChild(img);
+      renderPreviewImage(payload.annotated, "自动标注预览");
       list.innerHTML = '<span class="empty">确认标注后生成切图列表</span>';
-      statusEl.textContent = `标注完成 · ${payload.count || 0} 个矩形`;
+      const overlapCount = payload.overlap_count || 0;
+      statusEl.textContent = overlapCount
+        ? `标注完成 · ${payload.count || 0} 个矩形 · ${overlapCount} 处边距重叠`
+        : `标注完成 · ${payload.count || 0} 个矩形`;
       confirmButton.disabled = !hasPreview;
       saveSliceState({ preview: payload, crops: null });
     }
@@ -2119,11 +2218,7 @@ def _slice_page_html() -> str:
       Array.from(list.querySelectorAll(".row")).forEach((row) => {
         row.setAttribute("aria-selected", String(row.dataset.cropId === crop.id));
       });
-      preview.innerHTML = "";
-      const img = document.createElement("img");
-      img.src = crop.rgb;
-      img.alt = `${crop.label} 预览`;
-      preview.appendChild(img);
+      renderPreviewImage(crop.rgb, `${crop.label} 预览`);
       statusEl.textContent = `已选择 ${crop.label}`;
       saveSliceState({ selectedCropId: crop.id || crop.filename });
     }
@@ -2200,23 +2295,48 @@ def _slice_page_html() -> str:
       selectedActions.classList.remove("is-visible");
       clearSliceState();
       confirmButton.disabled = true;
-      preview.innerHTML = '<span class="empty">自动标注会显示在这里</span>';
+      previewViewport.clear('<span class="empty">自动标注会显示在这里</span>');
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
       runAnnotate();
     });
 
+    function refreshPreviewFromPadding() {
+      if (!file.files.length) return;
+      window.clearTimeout(previewTimer);
+      runAnnotate();
+    }
+
+    padding.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      refreshPreviewFromPadding();
+    });
+    padding.addEventListener("blur", refreshPreviewFromPadding);
+    padding.addEventListener("change", refreshPreviewFromPadding);
+
     async function runAnnotate() {
       if (!file.files.length) return;
+      const settingsKey = JSON.stringify(currentSettings());
+      if (settingsKey === lastPreviewSettingsKey && hasPreview) return;
+      const requestId = ++previewRequestId;
       setBusy(true);
       statusEl.textContent = "正在自动标注";
       try {
         const response = await fetch("/api/slice-preview", { method: "POST", body: formData() });
         if (!response.ok) throw new Error((await response.json()).detail || "标注失败");
-        showPreview(await response.json());
+        const payload = await response.json();
+        if (requestId === previewRequestId) {
+          lastPreviewSettingsKey = settingsKey;
+          showPreview(payload);
+        }
       } catch (error) {
-        statusEl.textContent = error.message;
+        if (requestId === previewRequestId) {
+          statusEl.textContent = error.message;
+        }
       } finally {
-        setBusy(false);
+        if (requestId === previewRequestId) {
+          setBusy(false);
+        }
       }
     }
 
@@ -2337,18 +2457,43 @@ def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object
 
 def _slice_annotated_preview(image_rgb: np.ndarray, boxes: list[SliceBox]) -> np.ndarray:
     preview = Image.fromarray(image_rgb, mode="RGB").convert("RGBA")
+    overlay = Image.new("RGBA", preview.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    for x0, y0, x1, y1 in _slice_box_overlaps(boxes):
+        overlay_draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=(255, 0, 0, 110), outline=(255, 0, 0, 255), width=2)
+    preview = Image.alpha_composite(preview, overlay)
     draw = ImageDraw.Draw(preview)
     for box in boxes:
         x, y, w, h = box.bbox
         color = (255, 160, 0, 255)
-        draw.rectangle((x, y, x + w - 1, y + h - 1), outline=color, width=3)
+        draw.rectangle((x, y, x + w - 1, y + h - 1), outline=color, width=1)
         label = f"{box.id}"
         text_box = draw.textbbox((x, y), label)
         tw = text_box[2] - text_box[0]
         th = text_box[3] - text_box[1]
         draw.rectangle((x, y, x + tw + 8, y + th + 6), fill=(25, 111, 90, 235))
         draw.text((x + 4, y + 3), label, fill=(255, 255, 255, 255))
+    preview.putalpha(255)
     return np.asarray(preview, dtype=np.uint8)
+
+
+def _slice_display_boxes(result: SliceResult, image_shape: tuple[int, int]) -> list[SliceBox]:
+    return [pad_slice_box(box, image_shape, result.padding) for box in result.boxes]
+
+
+def _slice_box_overlaps(boxes: list[SliceBox]) -> list[tuple[int, int, int, int]]:
+    overlaps: list[tuple[int, int, int, int]] = []
+    for i, a in enumerate(boxes):
+        ax, ay, aw, ah = a.bbox
+        for b in boxes[i + 1 :]:
+            bx, by, bw, bh = b.bbox
+            x0 = max(ax, bx)
+            y0 = max(ay, by)
+            x1 = min(ax + aw, bx + bw)
+            y1 = min(ay + ah, by + bh)
+            if x0 < x1 and y0 < y1:
+                overlaps.append((x0, y0, x1, y1))
+    return overlaps
 
 
 def _cached_slice_result(
@@ -2358,12 +2503,18 @@ def _cached_slice_result(
     min_area: int,
     padding: int,
 ) -> SliceResult:
-    key = (image_digest, int(min_area), int(padding))
+    padding = max(0, int(padding))
+    key = (image_digest, int(min_area))
     with _SLICE_CACHE_LOCK:
         cached = _SLICE_CACHE.get(key)
         if cached is not None:
             _SLICE_CACHE.move_to_end(key)
-            return cached
+            return SliceResult(
+                background_color=cached.background_color,
+                foreground_mask=cached.foreground_mask,
+                boxes=cached.boxes,
+                padding=padding,
+            )
 
     h, w = image_rgb.shape[:2]
     pixels = h * w
@@ -2377,38 +2528,48 @@ def _cached_slice_result(
         small_h = max(1, int(round(h * scale)))
         small = cv2.resize(image_rgb, (small_w, small_h), interpolation=cv2.INTER_AREA)
         small_min_area = max(1, int(round(min_area * scale * scale)))
-        small_padding = max(1, int(round(padding * scale)))
-        small_result = slice_image(small, min_area=small_min_area, padding=small_padding)
+        small_result = slice_image(small, min_area=small_min_area, padding=0)
         boxes: list[SliceBox] = []
         mask = np.zeros((h, w), dtype=np.float32)
         for box in small_result.boxes:
             x, y, bw, bh = box.bbox
-            x0 = max(0, int(np.floor(x / scale)) - padding)
-            y0 = max(0, int(np.floor(y / scale)) - padding)
-            x1 = min(w, int(np.ceil((x + bw) / scale)) + padding)
-            y1 = min(h, int(np.ceil((y + bh) / scale)) + padding)
+            x0 = max(0, int(np.floor(x / scale)))
+            y0 = max(0, int(np.floor(y / scale)))
+            x1 = min(w, int(np.ceil((x + bw) / scale)))
+            y1 = min(h, int(np.ceil((y + bh) / scale)))
             mask[y0:y1, x0:x1] = 1.0
             boxes.append(SliceBox(id=box.id, bbox=(x0, y0, x1 - x0, y1 - y0), area=int(box.area / max(scale * scale, 1e-6))))
-        result = SliceResult(background_color=small_result.background_color, foreground_mask=mask, boxes=boxes)
+        boxes = merge_overlapping_slice_boxes(boxes)
+        result = SliceResult(background_color=small_result.background_color, foreground_mask=mask, boxes=boxes, padding=0)
     else:
-        result = slice_image(image_rgb, min_area=min_area, padding=padding)
+        result = slice_image(image_rgb, min_area=min_area, padding=0)
 
     with _SLICE_CACHE_LOCK:
         _SLICE_CACHE[key] = result
         _SLICE_CACHE.move_to_end(key)
         while len(_SLICE_CACHE) > _SLICE_CACHE_MAX:
             _SLICE_CACHE.popitem(last=False)
-    return result
+    return SliceResult(
+        background_color=result.background_color,
+        foreground_mask=result.foreground_mask,
+        boxes=result.boxes,
+        padding=padding,
+    )
 
 
 def _slice_preview_payload(image_rgb: np.ndarray, stem: str, result: SliceResult) -> dict[str, object]:
-    annotated = _slice_annotated_preview(image_rgb, result.boxes)
+    display_boxes = _slice_display_boxes(result, image_rgb.shape[:2])
+    overlaps = _slice_box_overlaps(display_boxes)
+    annotated = _slice_annotated_preview(image_rgb, display_boxes)
     payload = result.to_dict()
     payload.update(
         {
             "stem": stem,
             "annotated": _png_data_url(annotated),
-            "boxes": [box.to_dict() for box in result.boxes],
+            "boxes": [box.to_dict() for box in display_boxes],
+            "raw_boxes": [box.to_dict() for box in result.boxes],
+            "overlap_count": len(overlaps),
+            "overlaps": [[x0, y0, x1 - x0, y1 - y0] for x0, y0, x1, y1 in overlaps],
         }
     )
     return payload
@@ -2418,12 +2579,13 @@ def _slice_crop_payloads(image_rgb: np.ndarray, stem: str, result: SliceResult) 
     crops = []
     kind_counts: dict[str, int] = {}
     for box in result.boxes:
-        crop = crop_slice(image_rgb, result.foreground_mask, box, transparent=False)
-        prediction = classify_ui_slice(crop, box, image_rgb.shape[:2], result.foreground_mask)
+        padded_box = pad_slice_box(box, image_rgb.shape[:2], result.padding)
+        crop = crop_slice(image_rgb, result.foreground_mask, box, padding=result.padding, transparent=False)
+        prediction = classify_ui_slice(crop, padded_box, image_rgb.shape[:2], result.foreground_mask)
         kind = prediction.kind if prediction.confidence >= 0.6 else "asset"
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
         name = f"{kind}_{kind_counts[kind]:03d}"
-        x, y, w, h = box.bbox
+        x, y, w, h = padded_box.bbox
         crops.append(
             {
                 "id": name,
@@ -2643,6 +2805,10 @@ def _run_web_backend(
                     "corridorkey_protection_bg_max": float(kwargs.get("corridorkey_protection_bg_max", 12.0)),
                     "corridorkey_protection_fg_min": float(kwargs.get("corridorkey_protection_fg_min", 28.0)),
                 }
+            )
+        if direct_execution_backend == "direct-known-bg-glow" and manual_params:
+            corridorkey_overrides["known_bg_glow_material_strength"] = float(
+                kwargs.get("known_bg_glow_material_strength", 1.0)
             )
         fallback_chain: list[dict[str, Any]] = []
         last_exc: Exception | None = None
@@ -2883,6 +3049,7 @@ def matte_candidates_endpoint(
     pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
+    known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
 ) -> dict[str, object]:
     if not _is_allowed_backend(backend):
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
@@ -2917,6 +3084,8 @@ def matte_candidates_endpoint(
         raise HTTPException(status_code=400, detail="corridorkey_refiner_strength must be between 0 and 4")
     if not 0 <= corridorkey_despeckle_size <= 4096:
         raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
+    if not 0.0 <= known_bg_glow_material_strength <= 2.0:
+        raise HTTPException(status_code=400, detail="known_bg_glow_material_strength must be between 0 and 2")
     if corridorkey_protection_fg_min <= corridorkey_protection_bg_max:
         raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
     shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
@@ -2957,6 +3126,7 @@ def matte_candidates_endpoint(
             corridorkey_screen_mode=corridorkey_screen_mode,
             corridorkey_preset=corridorkey_preset,
             corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            known_bg_glow_material_strength=known_bg_glow_material_strength,
             parameter_source=parameter_source,
             corridorkey_hint_mask=hint_mask,
             **pymatting_params,
@@ -3057,7 +3227,7 @@ def slice_endpoint(
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{stem}.slices.json", json.dumps(result.to_dict(), indent=2))
         for box in result.boxes:
-            crop = crop_slice(image_rgb, result.foreground_mask, box, transparent=transparent)
+            crop = crop_slice(image_rgb, result.foreground_mask, box, padding=result.padding, transparent=transparent)
             png = _encode_png(crop) if transparent else _encode_rgb_png(crop)
             suffix = "rgba" if transparent else "rgb"
             zf.writestr(f"{stem}_{box.id:03d}_{suffix}.png", png)

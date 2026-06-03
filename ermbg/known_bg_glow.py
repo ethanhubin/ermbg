@@ -28,6 +28,7 @@ class KnownBgGlowAnalysis:
     alpha_mean: float
     outer_roughness_p90: float = 0.0
     falloff_correlation: float = 0.0
+    strong_core_gradient_p90: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +49,7 @@ class KnownBgGlowAnalysis:
             "alpha_mean": self.alpha_mean,
             "outer_roughness_p90": self.outer_roughness_p90,
             "falloff_correlation": self.falloff_correlation,
+            "strong_core_gradient_p90": self.strong_core_gradient_p90,
         }
 
 
@@ -249,32 +251,117 @@ def _is_chromatic_swap_target(
     return bool(np.max(delta) >= 80.0 and np.min(delta) <= -80.0)
 
 
+def _smoothstep(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
+    if edge1 <= edge0:
+        return (value >= edge1).astype(np.float32)
+    t = np.clip((value.astype(np.float32) - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+
+
+def _chromatic_background_removal_fields(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+    material_strength: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rgb = image_srgb.astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32)
+    target = np.asarray(target_color, dtype=np.float32)
+    strength = float(np.clip(material_strength, 0.0, 2.0))
+    luma = rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+    chroma = np.max(rgb, axis=2) - np.min(rgb, axis=2)
+    source_distance = np.linalg.norm(rgb - bg.reshape(1, 1, 3), axis=2)
+
+    delta = target - bg
+    positive_channel = int(np.argmax(delta))
+    negative_channel = int(np.argmin(delta))
+    material_weight = np.zeros(source_distance.shape, dtype=np.float32)
+    screen_hue_conflict = (rgb[..., negative_channel] >= rgb[..., positive_channel] + 20.0) & (chroma >= 64.0)
+    material_weight = np.where(screen_hue_conflict, material_weight * 0.15, material_weight)
+    material_weight = np.where(source_distance >= 48.0, material_weight, 0.0)
+
+    # Slider semantics: background removal only. Highlights are not protected
+    # or classified here; the knob controls how much known-screen contribution
+    # is removed where the source is still plausibly near the screen color.
+    bg_nearness = 1.0 - _smoothstep(130.0, 230.0, source_distance)
+    removal_field = np.clip(bg_nearness * strength, 0.0, 1.0).astype(np.float32)
+    protected_material = material_weight >= 0.985
+    return (
+        np.clip(material_weight, 0.0, 1.0).astype(np.float32),
+        protected_material,
+        removal_field,
+    )
+
+
+def _chromatic_material_weight(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+    material_strength: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    material_weight, protected_material, _removal_field = _chromatic_background_removal_fields(
+        image_srgb,
+        background_color,
+        target_color,
+        material_strength=material_strength,
+    )
+    return material_weight, protected_material
+
+
 def _solve_chromatic_swap_ray(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
     target_color: tuple[int, int, int],
+    material_strength: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     target = np.asarray(target_color, dtype=np.float32)
     alpha, residual = _solve_alpha(image_srgb, background_color, target)
     rgb = image_srgb.astype(np.float32)
     bg = np.asarray(background_color, dtype=np.float32)
-    luma = rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
-    chroma = np.max(rgb, axis=2) - np.min(rgb, axis=2)
-    source_distance = np.linalg.norm(rgb - bg.reshape(1, 1, 3), axis=2)
-    bright_core = (luma >= 205.0) & (chroma <= 92.0) & (source_distance >= 160.0)
-    # In chromatic-swap glows, the transition from saturated glow color to
-    # white highlight is foreground material, not transparency. Only the
-    # transition from that material field back to the known screen should be
-    # solved as alpha.
-    chromatic_material = (
-        (rgb[..., 1] >= 150.0)
-        & (rgb[..., 1] >= rgb[..., 2] + 35.0)
-        & (source_distance >= 120.0)
+    adaptive_alpha, _adaptive_foreground, source_distance = _solve_adaptive_ray(image_srgb, background_color)
+    far_from_screen = _smoothstep(150.0, 230.0, source_distance)
+    # Chromatic-swap assets can move through colors that are not on the
+    # background->target line, especially white highlights inside green glow.
+    # Use the per-pixel known-B ray away from the screen color so those colors
+    # keep their natural opacity; the slider below still only controls removal
+    # of pixels that remain plausibly close to the screen.
+    alpha = alpha * (1.0 - far_from_screen) + np.maximum(alpha, adaptive_alpha) * far_from_screen
+    material_weight, _protected_material, removal_field = _chromatic_background_removal_fields(
+        image_srgb,
+        background_color,
+        target_color,
+        material_strength=material_strength,
     )
-    foreground_material = bright_core | chromatic_material
-    foreground = np.broadcast_to(np.clip(target + 0.5, 0, 255).astype(np.uint8).reshape(1, 1, 3), image_srgb.shape).copy()
-    foreground[foreground_material] = image_srgb[foreground_material]
-    alpha = np.where(foreground_material, 1.0, alpha).astype(np.float32)
+    background_alpha = alpha * (1.0 - 0.82 * removal_field * (1.0 - material_weight))
+    alpha = (background_alpha * (1.0 - material_weight) + material_weight).astype(np.float32)
+    foreground_float = np.broadcast_to(target.reshape(1, 1, 3), image_srgb.shape).copy()
+    solved = alpha > 1e-4
+    foreground_float[solved] = (
+        rgb[solved] - bg.reshape(1, 3) * (1.0 - alpha[solved, None])
+    ) / np.maximum(alpha[solved, None], 1e-4)
+    source_luma = rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+    foreground_luma = (
+        foreground_float[..., 0] * 0.2126
+        + foreground_float[..., 1] * 0.7152
+        + foreground_float[..., 2] * 0.0722
+    )
+    # Low-alpha known-B inversion can amplify tiny screen perturbations into
+    # implausibly dark foreground endpoints. When the source pixel is visibly
+    # bright but the solved endpoint is much darker, prefer the stable glow
+    # target line so chromatic-swap exports do not develop black speckles.
+    dark_endpoint = (
+        solved
+        & (alpha <= 0.62)
+        & (source_luma >= 95.0)
+        & (foreground_luma <= 70.0)
+        & (foreground_luma <= source_luma - 55.0)
+    )
+    low_alpha_off_line = solved & (alpha <= 0.16) & (residual >= 28.0)
+    low_confidence_dark_endpoint = (dark_endpoint & (alpha <= 0.16)) | low_alpha_off_line
+    alpha[low_confidence_dark_endpoint] = 0.0
+    foreground_float[low_confidence_dark_endpoint] = 0.0
+    foreground_float[dark_endpoint & ~low_confidence_dark_endpoint] = target.reshape(1, 3)
+    foreground = np.clip(foreground_float + 0.5, 0, 255).astype(np.uint8)
     return alpha.astype(np.float32), foreground, residual
 
 
@@ -345,16 +432,31 @@ def analyze_known_bg_glow(
         kept_alpha = alpha[keep]
         kept_residual = residual[keep]
         soft_fraction = float(np.count_nonzero((kept_alpha >= 0.05) & (kept_alpha <= 0.75)) / support_pixels)
+        outer_fraction = float(np.count_nonzero((kept_alpha >= 0.025) & (kept_alpha <= 0.35)) / support_pixels)
         strong_fraction = float(np.count_nonzero(kept_alpha >= 0.45) / support_pixels)
         residual_median = float(np.median(kept_residual))
         residual_p90 = float(np.percentile(kept_residual, 90.0))
         alpha_mean = float(kept_alpha.mean())
+        distance_to_exterior = cv2.distanceTransform(keep.astype(np.uint8), cv2.DIST_L2, 3)
+        line_mid = keep & (alpha >= 0.025) & (alpha <= 0.75)
+        if int(line_mid.sum()) >= 100:
+            distance_values = distance_to_exterior[line_mid].ravel()
+            alpha_values = alpha[line_mid].ravel()
+            if float(distance_values.std()) > 1e-6 and float(alpha_values.std()) > 1e-6:
+                corr = np.corrcoef(distance_values, alpha_values)[0, 1]
+                falloff_correlation = float(corr) if np.isfinite(corr) else 0.0
+            else:
+                falloff_correlation = 0.0
+        else:
+            falloff_correlation = 0.0
     else:
         soft_fraction = 0.0
+        outer_fraction = 0.0
         strong_fraction = 0.0
         residual_median = 0.0
         residual_p90 = 0.0
         alpha_mean = 0.0
+        falloff_correlation = 0.0
 
     accepted = True
     reason = "accepted"
@@ -373,6 +475,17 @@ def analyze_known_bg_glow(
     elif soft_fraction < 0.45:
         accepted = False
         reason = "transition band is too narrow"
+    elif outer_fraction < 0.40:
+        # A translucent button face can fit one background->highlight mixing
+        # line, but it is mostly mid-alpha material rather than an exterior
+        # halo. True single-color glow needs a dominant low-alpha outer band.
+        accepted = False
+        reason = "missing dominant continuous low-alpha exterior glow"
+    elif falloff_correlation < 0.80:
+        # The low-alpha band must also fade outward coherently; otherwise a
+        # broad flat panel or interior material gradient masquerades as glow.
+        accepted = False
+        reason = "single-line glow does not fade coherently to background"
     elif strong_fraction < 0.08:
         accepted = False
         reason = "missing bright glow core"
@@ -392,16 +505,25 @@ def analyze_known_bg_glow(
             support_fraction=support_fraction,
             largest_component_fraction=largest_component_fraction,
             soft_fraction=soft_fraction,
-            outer_fraction=0.0,
+            outer_fraction=outer_fraction,
             strong_fraction=strong_fraction,
             residual_median=residual_median,
             residual_p90=residual_p90,
             target_distance=target_distance,
             alpha_mean=alpha_mean,
+            falloff_correlation=falloff_correlation,
         )
 
     adaptive_alpha, adaptive_foreground, _distance = _solve_adaptive_ray(image_srgb, background_color)
     adaptive = _adaptive_ray_metrics(adaptive_alpha)
+    adaptive_strong_core_gradient_p90 = 0.0
+    adaptive_strong_core = adaptive["main_component"] & (adaptive_alpha >= 0.45)
+    if bool(adaptive_strong_core.any()):
+        gray = cv2.cvtColor(image_srgb, cv2.COLOR_RGB2GRAY)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        gradient = np.sqrt(gx * gx + gy * gy)
+        adaptive_strong_core_gradient_p90 = float(np.percentile(gradient[adaptive_strong_core], 90.0))
     adaptive_reason = "accepted"
     adaptive_accepted = True
     # Adaptive-ray glow allows the foreground hue to vary pixel-by-pixel. The
@@ -409,10 +531,24 @@ def analyze_known_bg_glow(
     # fixed target color: a large main component, a real low-alpha exterior
     # falloff band, and low outer roughness. Speckled particle effects fail the
     # roughness/correlation gates even when they cover a similar area.
+    support_covers_most_frame = adaptive["support_fraction"] > 0.75
+    # Tiny horizontal effect exports can be mostly glow pixels because the
+    # canvas is tightly cropped around the halo. Keep the old >75% frame guard
+    # for glass buttons, shadows, and hard UI, but allow it when the measured
+    # field is one connected, smooth, low-alpha exterior with strong
+    # distance-to-edge/alpha falloff correlation.
+    coherent_full_frame_glow = (
+        adaptive["support_fraction"] <= 0.82
+        and adaptive["largest_component_fraction"] >= 0.985
+        and adaptive["soft_fraction"] >= 0.65
+        and adaptive["outer_fraction"] >= 0.45
+        and adaptive["outer_roughness_p90"] <= 0.055
+        and adaptive["falloff_correlation"] >= 0.90
+    )
     if adaptive["support_fraction"] < 0.08:
         adaptive_accepted = False
         adaptive_reason = "insufficient adaptive glow support"
-    elif adaptive["support_fraction"] > 0.75:
+    elif support_covers_most_frame and not coherent_full_frame_glow:
         adaptive_accepted = False
         adaptive_reason = "adaptive support covers too much of frame"
     elif adaptive["largest_component_fraction"] < 0.94:
@@ -424,6 +560,14 @@ def analyze_known_bg_glow(
     elif adaptive["outer_fraction"] < 0.25:
         adaptive_accepted = False
         adaptive_reason = "missing continuous low-alpha exterior glow"
+    elif adaptive["strong_fraction"] >= 0.60 and adaptive_strong_core_gradient_p90 >= 160.0:
+        # Complex hard-core effect icons can have a smooth exterior halo but
+        # still need CorridorKey for the opaque/textured interior. A true glow
+        # field has low-gradient high-alpha support; high p90 gradient over a
+        # large strong core means internal line art, particles, or hard material
+        # would be flattened by the known-B glow solver.
+        adaptive_accepted = False
+        adaptive_reason = "strong glow core is too textured"
     elif adaptive["outer_roughness_p90"] > 0.06:
         long_side = max(image_srgb.shape[:2])
         adaptive_target_probe = tuple(int(c) for c in np.median(adaptive_foreground[adaptive["main_component"]], axis=0)) if adaptive["support_pixels"] else target_u8
@@ -437,7 +581,10 @@ def analyze_known_bg_glow(
         )
         textured_but_coherent = (
             long_side < 128
-            and adaptive["outer_roughness_p90"] <= 0.10
+            # Tiny starburst glows quantize sharp points into a rougher outer
+            # alpha band than smooth round halos. Keep this below particle-like
+            # texture, and require strong falloff coherence/connectivity below.
+            and adaptive["outer_roughness_p90"] <= 0.11
             and adaptive["falloff_correlation"] >= 0.90
             and adaptive["largest_component_fraction"] >= 0.985
             and adaptive["outer_fraction"] >= 0.42
@@ -475,6 +622,7 @@ def analyze_known_bg_glow(
         alpha_mean=float(adaptive["alpha_mean"]),
         outer_roughness_p90=float(adaptive["outer_roughness_p90"]),
         falloff_correlation=float(adaptive["falloff_correlation"]),
+        strong_core_gradient_p90=adaptive_strong_core_gradient_p90,
     )
 
 
@@ -484,10 +632,12 @@ def matte_known_bg_glow(
     target_color: tuple[int, int, int] | None = None,
     *,
     mode: str = "auto",
+    material_strength: float = 1.0,
 ) -> KnownBgGlowResult:
     """Return straight RGBA for a simple known-background glow."""
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("matte_known_bg_glow() expects HxWx3 sRGB uint8")
+    material_strength = float(np.clip(material_strength, 0.0, 2.0))
     if mode == "auto":
         analysis = analyze_known_bg_glow(image_srgb, background_color)
         mode = analysis.mode if analysis.accepted else "single_target_line"
@@ -496,7 +646,12 @@ def matte_known_bg_glow(
     if mode == "chromatic_swap_ray":
         if target_color is None:
             target_color = tuple(int(c) for c in _estimate_target_color(image_srgb, background_color))
-        alpha, foreground, _residual = _solve_chromatic_swap_ray(image_srgb, background_color, tuple(int(c) for c in target_color))
+        alpha, foreground, _residual = _solve_chromatic_swap_ray(
+            image_srgb,
+            background_color,
+            tuple(int(c) for c in target_color),
+            material_strength=material_strength,
+        )
         metrics = _adaptive_ray_metrics(alpha)
         keep = metrics["main_component"].astype(bool)
         alpha = np.where(keep, alpha, 0.0).astype(np.float32)
@@ -510,6 +665,8 @@ def matte_known_bg_glow(
             "mode": "chromatic_swap_ray",
             "background_color": [int(c) for c in background_color],
             "target_color": [int(c) for c in target_color],
+            "material_strength": float(material_strength),
+            "background_removal_strength": float(material_strength),
             "support_pixels": int((alpha > 0.0).sum()),
             "alpha_mean": float(alpha.mean()),
             "outer_roughness_p90": float(metrics["outer_roughness_p90"]),
@@ -548,6 +705,8 @@ def matte_known_bg_glow(
             "mode": "adaptive_ray",
             "background_color": [int(c) for c in background_color],
             "target_color": [int(c) for c in target],
+            "material_strength": float(material_strength),
+            "background_removal_strength": float(material_strength),
             "support_pixels": int((alpha > 0.0).sum()),
             "alpha_mean": float(alpha.mean()),
             "outer_roughness_p90": float(metrics["outer_roughness_p90"]),
@@ -583,6 +742,8 @@ def matte_known_bg_glow(
         "mode": "single_target_line",
         "background_color": [int(c) for c in background_color],
         "target_color": [int(c) for c in target_u8],
+        "material_strength": float(material_strength),
+        "background_removal_strength": float(material_strength),
         "support_pixels": int((alpha > 0.0).sum()),
         "alpha_mean": float(alpha.mean()),
         "residual_median": float(np.median(residual[keep])) if keep.any() else 0.0,

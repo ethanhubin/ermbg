@@ -62,6 +62,7 @@ def matte_image_direct_worker(
     corridorkey_preset: str = "auto",
     corridorkey_hint_mask: Any | None = None,
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    known_bg_glow_material_strength: float | None = None,
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     timeout: float = 240.0,
 ) -> MatteResponse:
@@ -96,6 +97,8 @@ def matte_image_direct_worker(
         data["corridorkey_protection_bg_max"] = str(float(corridorkey_protection_bg_max))
     if corridorkey_protection_fg_min is not None:
         data["corridorkey_protection_fg_min"] = str(float(corridorkey_protection_fg_min))
+    if known_bg_glow_material_strength is not None:
+        data["known_bg_glow_material_strength"] = str(float(known_bg_glow_material_strength))
     response = requests.post(
         f"{direct_worker_url.rstrip('/')}/matte",
         files=files,

@@ -250,7 +250,11 @@ def _apply_execution_backend_override(
 
         bg_color = _decision_background_color(decision, fallback_bg_color)
         glow = analyze_known_bg_glow(rgb, bg_color)
-        mode = glow.mode if glow.accepted and glow.mode in {"single_target_line", "adaptive_ray"} else "adaptive_ray"
+        mode = (
+            glow.mode
+            if glow.accepted and glow.mode in {"single_target_line", "adaptive_ray", "chromatic_swap_ray"}
+            else "adaptive_ray"
+        )
         params = {
             "execution_profile": "known-bg-glow",
             "known_bg_glow_mode": mode,
@@ -290,6 +294,17 @@ def _with_corridorkey_params(decision: RouteDecision, params: dict[str, Any]) ->
     if not params:
         return decision
     return replace(decision, params={**decision.params, **params})
+
+
+def _with_known_bg_glow_params(
+    decision: RouteDecision,
+    *,
+    known_bg_glow_material_strength: float | None,
+) -> RouteDecision:
+    if known_bg_glow_material_strength is None or decision.backend != "known_bg_glow":
+        return decision
+    strength = float(np.clip(float(known_bg_glow_material_strength), 0.0, 2.0))
+    return replace(decision, params={**decision.params, "known_bg_glow_material_strength": strength})
 
 
 def _corridorkey_form_params(
@@ -458,6 +473,7 @@ async def matte_endpoint(
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
+    known_bg_glow_material_strength: float | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
     include_image: bool = Form(True),
 ) -> dict[str, Any]:
@@ -498,6 +514,10 @@ async def matte_endpoint(
             rgb=prepared.rgb,
             fallback_bg_color=bg,
         )
+        decision = _with_known_bg_glow_params(
+            decision,
+            known_bg_glow_material_strength=known_bg_glow_material_strength,
+        )
         prepared = replace(prepared, decision=_with_corridorkey_params(decision, ck_params))
         result = _run_prepared_main(
             prepared,
@@ -537,6 +557,7 @@ async def batch_matte_endpoint(
     corridorkey_screen_mode: str = Form("auto"),
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
+    known_bg_glow_material_strength: float | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
     include_images: bool = Form(True),
 ) -> dict[str, Any]:
@@ -574,6 +595,10 @@ async def batch_matte_endpoint(
                 execution_backend,
                 rgb=item.rgb,
                 fallback_bg_color=bg,
+            )
+            decision = _with_known_bg_glow_params(
+                decision,
+                known_bg_glow_material_strength=known_bg_glow_material_strength,
             )
             prepared.append(replace(item, decision=_with_corridorkey_params(decision, ck_params)))
         except Exception as exc:

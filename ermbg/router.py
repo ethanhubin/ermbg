@@ -755,13 +755,6 @@ def classify_route(
     known_corridor_screen = ck.screen_mode in {"green", "blue"} and (
         screen_mode != "auto" or ck.background_confidence >= 0.45
     )
-    asset_kind = _route_asset_kind(
-        image_srgb,
-        profile,
-        ck.screen_mode if known_corridor_screen else "unknown",
-        foreground_aspect_ratio=ck.foreground_aspect_ratio,
-        foreground_long_side=ck.foreground_long_side,
-    )
     reasons: list[str] = []
     analysis: dict[str, Any] = {
         "strategy": {
@@ -773,6 +766,30 @@ def classify_route(
         "corridorkey_analysis": ck.to_dict(),
     }
 
+    if known_corridor_screen:
+        from .known_bg_glow import analyze_known_bg_glow
+
+        glow = analyze_known_bg_glow(image_srgb, ck.background_color)
+        analysis["known_bg_glow"] = glow.to_dict()
+        if glow.accepted:
+            reasons.append(f"known_bg_{glow.mode}_glow_uses_known_bg_glow")
+            return RouteDecision(
+                route="known_bg_glow",
+                asset_kind="glow",
+                backend="known_bg_glow",
+                params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
+                confidence=float(max(0.70, ck.background_confidence)),
+                reasons=reasons,
+                analysis=analysis,
+            )
+
+    asset_kind = _route_asset_kind(
+        image_srgb,
+        profile,
+        ck.screen_mode if known_corridor_screen else "unknown",
+        foreground_aspect_ratio=ck.foreground_aspect_ratio,
+        foreground_long_side=ck.foreground_long_side,
+    )
     button_corridor_profiles = {"translucent_button"}
     complex_button_boundary, complex_button_info = _wide_button_complex_boundary_score(
         image_srgb,
@@ -780,22 +797,6 @@ def classify_route(
         foreground_aspect_ratio=ck.foreground_aspect_ratio,
     )
     analysis["complex_button_boundary"] = complex_button_info
-    if known_corridor_screen and asset_kind == "icon":
-        from .known_bg_glow import analyze_known_bg_glow
-
-        glow = analyze_known_bg_glow(image_srgb, ck.background_color)
-        analysis["known_bg_glow"] = glow.to_dict()
-        if glow.accepted:
-            reasons.append(f"icon_{profile}_uses_known_bg_glow")
-            return RouteDecision(
-                route="known_bg_glow",
-                asset_kind="icon",
-                backend="known_bg_glow",
-                params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
-                confidence=float(max(0.70, ck.background_confidence)),
-                reasons=reasons,
-                analysis=analysis,
-            )
     if known_corridor_screen and (
         asset_kind in {"icon", "character"}
         or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
