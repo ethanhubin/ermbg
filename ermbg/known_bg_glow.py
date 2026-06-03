@@ -188,6 +188,57 @@ def _adaptive_ray_metrics(alpha: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _repair_additive_adaptive_foreground(
+    image_srgb: np.ndarray,
+    foreground: np.ndarray,
+    alpha: np.ndarray,
+    keep: np.ndarray,
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, int]:
+    bg = np.asarray(background_color, dtype=np.float32)
+    target = np.asarray(target_color, dtype=np.float32)
+    target_delta = target - bg
+    max_target_delta = float(np.max(np.abs(target_delta)))
+    # This repair is only for additive glow fields: every target channel moves
+    # away from the known screen in the same positive direction. Blue/purple
+    # adaptive glows over green screens need their real negative green channel,
+    # so they keep the unconstrained adaptive endpoint.
+    if max_target_delta < 50.0 or bool(np.any(target_delta < -4.0)):
+        return foreground, alpha, 0
+
+    fg_float = foreground.astype(np.float32)
+    fg_min = np.min(fg_float, axis=2)
+    fg_max = np.max(fg_float, axis=2)
+    fg_chroma = fg_max - fg_min
+    bright_highlight = keep & (alpha >= 0.35) & (fg_max >= 225.0) & (fg_min >= 150.0) & (fg_chroma <= 96.0)
+    endpoint = foreground.astype(np.int16)
+    screen_hue_endpoint = (
+        (endpoint[..., 1] > endpoint[..., 0] + 20)
+        | (endpoint[..., 2] > endpoint[..., 0] + 20)
+    )
+    repair = keep & (alpha > 0.0) & ~bright_highlight & screen_hue_endpoint
+    if not bool(repair.any()):
+        return foreground, alpha, 0
+
+    repaired_float = foreground.astype(np.float32).copy()
+    # For additive glow, screen-hued adaptive endpoints are not real
+    # foreground colors. Project them back onto the robust glow color line, then
+    # re-fit alpha against the known background so replay over the original
+    # screen stays close while complementary previews have no green speckles.
+    repaired_float[repair] = target.reshape(1, 1, 3)
+    rgb = image_srgb.astype(np.float32)
+    direction = repaired_float - bg.reshape(1, 1, 3)
+    denom = np.sum(direction * direction, axis=2)
+    delta = rgb - bg.reshape(1, 1, 3)
+    repaired_alpha = alpha.copy()
+    solved = repair & (denom > 1e-6)
+    alpha_fit = np.clip(np.sum(delta * direction, axis=2) / np.maximum(denom, 1e-6), 0.0, 1.0)
+    repaired_alpha[solved] = alpha_fit[solved]
+    repaired = np.clip(repaired_float + 0.5, 0, 255).astype(np.uint8)
+    return repaired, repaired_alpha.astype(np.float32), int(repair.sum())
+
+
 def analyze_known_bg_glow(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
@@ -368,15 +419,29 @@ def matte_known_bg_glow(
     if mode == "auto":
         analysis = analyze_known_bg_glow(image_srgb, background_color)
         mode = analysis.mode if analysis.accepted else "single_target_line"
-        if target_color is None and analysis.mode == "single_target_line":
+        if target_color is None and analysis.accepted:
             target_color = analysis.target_color
     if mode == "adaptive_ray":
         alpha, foreground, _distance = _solve_adaptive_ray(image_srgb, background_color)
         metrics = _adaptive_ray_metrics(alpha)
         keep = metrics["main_component"].astype(bool)
         alpha = np.where(keep, alpha, 0.0).astype(np.float32)
-        target = np.median(foreground[keep], axis=0).astype(np.uint8) if keep.any() else np.zeros(3, dtype=np.uint8)
+        if target_color is not None:
+            target = np.asarray(target_color, dtype=np.uint8)
+        elif keep.any():
+            core = keep & (alpha >= 0.35)
+            target = np.median(foreground[core if core.any() else keep], axis=0).astype(np.uint8)
+        else:
+            target = np.zeros(3, dtype=np.uint8)
         foreground = foreground.copy()
+        foreground, alpha, repaired_pixels = _repair_additive_adaptive_foreground(
+            image_srgb,
+            foreground,
+            alpha,
+            keep,
+            background_color,
+            tuple(int(c) for c in target),
+        )
         foreground[~keep] = 0
         alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
         rgba = np.dstack([foreground, alpha_u8]).astype(np.uint8)
@@ -389,6 +454,7 @@ def matte_known_bg_glow(
             "alpha_mean": float(alpha.mean()),
             "outer_roughness_p90": float(metrics["outer_roughness_p90"]),
             "falloff_correlation": float(metrics["falloff_correlation"]),
+            "foreground_repaired_pixels": repaired_pixels,
         }
         return KnownBgGlowResult(rgba=rgba, alpha=alpha, foreground_srgb=foreground, debug=debug)
 

@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 
 from ermbg.direct_worker import direct_matte_auto
-from ermbg.known_bg_glow import analyze_known_bg_glow
+from ermbg.known_bg_glow import analyze_known_bg_glow, matte_known_bg_glow
 from ermbg.router import classify_route
 
 
@@ -81,6 +81,30 @@ def test_known_bg_glow_accepts_small_textured_but_coherent_halo():
     assert analysis.falloff_correlation > 0.90
     assert decision.route == "known_bg_glow"
     assert decision.params["known_bg_glow_mode"] == "adaptive_ray"
+
+
+def test_adaptive_known_bg_glow_repairs_additive_screen_color_endpoints():
+    image = _small_textured_coherent_glow()
+    image[39, 36] = (255, 255, 255)
+    for y, x in [(14, 33), (15, 33), (16, 33), (42, 41), (55, 37), (58, 39)]:
+        image[y, x] = (12, 185, 7)
+
+    result = matte_known_bg_glow(
+        image,
+        (3, 182, 5),
+        target_color=(255, 219, 44),
+        mode="adaptive_ray",
+    )
+    visible = result.alpha > 0.01
+    foreground = result.foreground_srgb.astype(np.int16)
+    screen_green = visible & (foreground[..., 1] > foreground[..., 0] + 20) & (foreground[..., 1] > foreground[..., 2] + 20)
+
+    changed = result.foreground_srgb[[14, 15, 16, 42, 55, 58], [33, 33, 33, 41, 37, 39]]
+
+    assert result.debug["foreground_repaired_pixels"] > 0
+    assert np.all(changed[:, 0] >= changed[:, 1])
+    assert int(screen_green.sum()) == 0
+    assert result.foreground_srgb[39, 36].min() >= 220
 
 
 def test_auto_route_sends_i019_to_direct_known_bg_glow():
