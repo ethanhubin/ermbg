@@ -156,12 +156,17 @@ def test_known_bg_glow_uses_chromatic_swap_ray_for_blue_screen_green_glow():
         | (foreground[..., 1] < foreground[..., 2] + 20)
     )
     blue_dirty = visible & ~bright_core & (foreground[..., 2] > foreground[..., 1] + 20) & (foreground[..., 2] > foreground[..., 0] + 20)
+    source_distance = np.linalg.norm(image.astype(np.float32) - np.array([1, 4, 233], dtype=np.float32), axis=2)
+    source_i16 = image.astype(np.int16)
+    material = visible & (source_i16[..., 1] >= 150) & (source_i16[..., 1] >= source_i16[..., 2] + 35) & (source_distance >= 120)
+    material_error = np.abs(result.foreground_srgb.astype(np.int16) - image.astype(np.int16)).max(axis=2)
 
     assert analysis.accepted is True
     assert analysis.mode == "chromatic_swap_ray"
     assert result.debug["mode"] == "chromatic_swap_ray"
     assert int(blue_dirty.sum()) == 0
     assert int(non_green.sum()) < 24
+    assert float(np.percentile(material_error[material], 95.0)) <= 1.0
 
 
 def test_auto_route_sends_i019_to_direct_known_bg_glow():

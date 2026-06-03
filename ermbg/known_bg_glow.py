@@ -262,9 +262,19 @@ def _solve_chromatic_swap_ray(
     chroma = np.max(rgb, axis=2) - np.min(rgb, axis=2)
     source_distance = np.linalg.norm(rgb - bg.reshape(1, 1, 3), axis=2)
     bright_core = (luma >= 205.0) & (chroma <= 92.0) & (source_distance >= 160.0)
+    # In chromatic-swap glows, the transition from saturated glow color to
+    # white highlight is foreground material, not transparency. Only the
+    # transition from that material field back to the known screen should be
+    # solved as alpha.
+    chromatic_material = (
+        (rgb[..., 1] >= 150.0)
+        & (rgb[..., 1] >= rgb[..., 2] + 35.0)
+        & (source_distance >= 120.0)
+    )
+    foreground_material = bright_core | chromatic_material
     foreground = np.broadcast_to(np.clip(target + 0.5, 0, 255).astype(np.uint8).reshape(1, 1, 3), image_srgb.shape).copy()
-    foreground[bright_core] = image_srgb[bright_core]
-    alpha = np.where(bright_core, 1.0, alpha).astype(np.float32)
+    foreground[foreground_material] = image_srgb[foreground_material]
+    alpha = np.where(foreground_material, 1.0, alpha).astype(np.float32)
     return alpha.astype(np.float32), foreground, residual
 
 
