@@ -7,6 +7,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from scipy import ndimage
 
 from . import io
 from .colorspace import oklab_distance, srgb_to_oklab
@@ -1224,6 +1225,60 @@ def _build_same_key_opaque_body_outline_trimap(
     }
 
 
+def build_same_key_opaque_proxy_subject_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    bg_threshold: float,
+    expand_px: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build the subject-domain mask used for same-key proxy color replacement.
+
+    Same-key opaque UI can have body pixels that are almost identical to the
+    screen color. A hard body mask is not enough: antialiased corners left in
+    the original color look like background to PyMatting and get erased. The
+    one-pixel expansion is intentionally tied to the measured outline trace and
+    reused for both proxy painting and source-color restoration, so the solver
+    sees subject evidence without leaking restored blue into the shadow layer.
+    """
+    bg = np.asarray(background_color, dtype=np.uint8)
+    trace = _same_key_opaque_body_outline_trace(
+        image_srgb,
+        bg,
+        bg_threshold=float(bg_threshold),
+    )
+    if not trace.get("accepted", False):
+        raise ValueError(f"same-key proxy subject route contract failed: {trace.get('reason', 'unknown')}")
+
+    body_fill = np.asarray(trace["body_fill"], dtype=bool)
+    body_labels_count, body_labels, body_stats, _ = cv2.connectedComponentsWithStats(body_fill.astype(np.uint8), 8)
+    if body_labels_count <= 1:
+        raise ValueError("same-key proxy subject mask body fill is empty after outline trace")
+    body_label = 1 + int(np.argmax(body_stats[1:, cv2.CC_STAT_AREA]))
+    body_fill = body_labels == body_label
+
+    proxy_mask = body_fill
+    expand = max(0, int(expand_px))
+    if expand > 0:
+        # The expansion covers one-pixel antialias stair steps that otherwise
+        # remain same-key blue/green and are accepted as sure background by the
+        # standard trimap. It is deliberately small; broader growth would start
+        # painting outline/shadow evidence as solid subject.
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        proxy_mask = cv2.dilate(body_fill.astype(np.uint8), kernel, iterations=expand).astype(bool)
+        proxy_mask = np.asarray(ndimage.binary_fill_holes(proxy_mask), dtype=bool)
+
+    return proxy_mask, {
+        "enabled": True,
+        **_public_same_key_outline_trace(trace),
+        "method": "same_key_opaque_proxy_subject_mask",
+        "expand_px": int(expand),
+        "body_pixels": int(body_fill.sum()),
+        "mask_pixels": int(proxy_mask.sum()),
+        "expanded_pixels": int((proxy_mask & ~body_fill).sum()),
+    }
+
+
 def _known_background_local_material_core_support(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -2354,6 +2409,7 @@ def estimate_alpha_with_pymatting(
 __all__ = [
     "PyMattingAlphaResult",
     "analyze_same_key_opaque_body_outline",
+    "build_same_key_opaque_proxy_subject_mask",
     "build_known_background_trimap",
     "estimate_stable_background_color",
     "estimate_alpha_with_pymatting",

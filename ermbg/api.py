@@ -284,6 +284,8 @@ def matte_image(
     pymatting_auto_adapt: bool = True,
     pymatting_cg_maxiter: int = 1000,
     pymatting_cg_rtol: float = 1e-6,
+    pymatting_trimap_mode: str = "standard",
+    pymatting_unknown_grow_px: int = 0,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -472,8 +474,8 @@ def matte_image(
             auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
             cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
-            trimap_mode=auto_params.get("pymatting_trimap_mode", "standard"),
-            unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", 0),
+            trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
+            unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", pymatting_unknown_grow_px),
             auto_route=auto_route,
         )
 
@@ -805,6 +807,7 @@ def _matte_image_pymatting_known_b(
     auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
     from .pymatting_refine import (
+        build_same_key_opaque_proxy_subject_mask,
         build_known_background_trimap,
         estimate_alpha_with_pymatting,
         estimate_stable_background_color,
@@ -856,8 +859,37 @@ def _matte_image_pymatting_known_b(
         selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
         bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
 
+    requested_trimap_mode = str(trimap_mode or "standard")
+    effective_trimap_mode = requested_trimap_mode
+    solver_rgb = rgb
+    proxy_input_rgb: np.ndarray | None = None
+    proxy_subject_mask: np.ndarray | None = None
+    proxy_subject_info: dict[str, Any] = {"enabled": False}
+    if requested_trimap_mode == "same_key_opaque_body_outline":
+        proxy_subject_mask, proxy_subject_info = build_same_key_opaque_proxy_subject_mask(
+            rgb,
+            selected_bg,
+            bg_threshold=float(bg_threshold),
+            expand_px=1,
+        )
+        # Same-key opaque UI needs a non-screen subject color so the standard
+        # trimap and PyMatting solve see clear foreground evidence. Red is far
+        # from the blue/green known-B backgrounds used by this profile and stays
+        # obvious in debug artifacts.
+        proxy_color = np.asarray((238, 64, 48), dtype=np.uint8)
+        solver_rgb = rgb.copy()
+        solver_rgb[proxy_subject_mask] = proxy_color
+        proxy_input_rgb = solver_rgb
+        proxy_subject_info = {
+            **proxy_subject_info,
+            "proxy_color": [int(c) for c in proxy_color],
+            "restore_uses_same_mask": True,
+            "solver_trimap_mode": "standard",
+        }
+        effective_trimap_mode = "standard"
+
     processing_rgb, background_normalization = normalize_known_background_field(
-        rgb,
+        solver_rgb,
         selected_bg,
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
@@ -871,7 +903,7 @@ def _matte_image_pymatting_known_b(
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
         adaptive=effective_auto_adapt,
-        trimap_mode=str(trimap_mode or "standard"),
+        trimap_mode=effective_trimap_mode,
         unknown_grow_px=int(unknown_grow_px),
     )
     pm = estimate_alpha_with_pymatting(
@@ -928,6 +960,14 @@ def _matte_image_pymatting_known_b(
         shadow_mode=shadow_mode,
         repair_domain=trimap.unknown,
     )
+    if proxy_subject_mask is not None:
+        # Restore only the exact proxy-painted domain. This keeps antialiased
+        # subject corners from being erased while preventing original same-key
+        # blue/green shadow pixels from re-entering the exported shadow layer.
+        subject_foreground_srgb = subject_foreground_srgb.copy()
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        subject_foreground_srgb[proxy_subject_mask] = rgb[proxy_subject_mask]
+        rgba_rgb_srgb[proxy_subject_mask] = rgb[proxy_subject_mask]
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
 
@@ -966,9 +1006,11 @@ def _matte_image_pymatting_known_b(
                     "requested_auto_adapt": bool(auto_adapt),
                     "cg_maxiter": int(cg_maxiter),
                     "cg_rtol": float(cg_rtol),
-                    "trimap_mode": str(trimap_mode or "standard"),
+                    "trimap_mode": requested_trimap_mode,
+                    "effective_trimap_mode": effective_trimap_mode,
                     "unknown_grow_px": int(unknown_grow_px),
                 },
+                "same_key_proxy_subject": proxy_subject_info,
             },
         },
     }
@@ -988,6 +1030,9 @@ def _matte_image_pymatting_known_b(
         ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
         ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
         ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", trimap_to_uint8(trimap))
+        if proxy_input_rgb is not None and proxy_subject_mask is not None:
+            ermbg_io.save_rgb(out_dir / f"{stem}_proxy_input.png", proxy_input_rgb)
+            ermbg_io.save_mask(out_dir / f"{stem}_proxy_subject_mask.png", proxy_subject_mask.astype(np.float32))
         if background_normalization.get("applied", False):
             ermbg_io.save_rgb(out_dir / f"{stem}_normalized_input.png", processing_rgb)
         if qa:
@@ -1015,6 +1060,14 @@ def _matte_image_pymatting_known_b(
                 "rgba_rgb": out_dir / f"{stem}_rgba_rgb.png",
                 "trimap": out_dir / f"{stem}_trimap.png",
                 "shadow": out_dir / f"{stem}_shadow.png",
+                **(
+                    {
+                        "proxy_input": out_dir / f"{stem}_proxy_input.png",
+                        "proxy_subject_mask": out_dir / f"{stem}_proxy_subject_mask.png",
+                    }
+                    if proxy_input_rgb is not None and proxy_subject_mask is not None
+                    else {}
+                ),
             },
             report_path=report_path,
             requested_backend="pymatting-known-b",
@@ -1046,9 +1099,13 @@ def _matte_image_pymatting_known_b(
             "pymatting": pm.debug,
             "alpha_pinhole_repair": alpha_pinhole_repair,
             "parameters": report["strategy"]["extras"]["parameters"],
+            "same_key_proxy_subject": proxy_subject_info,
         },
         "shadow": shadow_info,
     }
+    if proxy_subject_mask is not None:
+        debug["proxy_subject_mask"] = proxy_subject_mask
+        debug["proxy_input_srgb"] = proxy_input_rgb
     if auto_route is not None:
         debug["auto_route"] = auto_route
     return MatteResponse(

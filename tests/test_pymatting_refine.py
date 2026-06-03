@@ -14,6 +14,7 @@ from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
     analyze_same_key_opaque_body_outline,
     build_known_background_trimap,
+    build_same_key_opaque_proxy_subject_mask,
     estimate_known_background_alpha_with_pymatting,
     estimate_stable_background_color,
     normalize_known_background_field,
@@ -688,6 +689,56 @@ def test_same_key_opaque_body_outline_trimap_supports_closed_plateau_shapes():
     assert trimap.sure_fg[center].mean() > 0.95
     assert trimap.unknown[edge].mean() > 0.30
     assert not np.any(trimap.sure_fg & trimap.sure_bg)
+
+
+def test_same_key_opaque_proxy_subject_mask_expands_antialias_coverage():
+    bg = (1, 95, 248)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+
+    base_mask, base_info = build_same_key_opaque_proxy_subject_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        expand_px=0,
+    )
+    expanded_mask, expanded_info = build_same_key_opaque_proxy_subject_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        expand_px=1,
+    )
+
+    assert base_info["accepted"] is True
+    assert expanded_info["accepted"] is True
+    assert expanded_info["expand_px"] == 1
+    assert int(expanded_mask.sum()) > int(base_mask.sum())
+    assert int((expanded_mask & ~base_mask).sum()) == expanded_info["expanded_pixels"]
+
+
+def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
+    bg = (1, 95, 248)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+
+    result = matte_image(
+        image,
+        backend="pymatting-known-b",
+        shadow_mode="off",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=bg,
+        pymatting_trimap_mode="same_key_opaque_body_outline",
+    )
+
+    proxy_info = result.debug["pymatting_known_b"]["same_key_proxy_subject"]
+    assert proxy_info["enabled"] is True
+    assert proxy_info["expand_px"] == 1
+    assert result.report["strategy"]["extras"]["parameters"]["trimap_mode"] == "same_key_opaque_body_outline"
+    assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "standard"
+    assert result.debug["proxy_subject_mask"].shape == image.shape[:2]
+    assert np.all(result.rgba[..., :3][result.debug["proxy_subject_mask"]] == image[result.debug["proxy_subject_mask"]])
 
 
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
