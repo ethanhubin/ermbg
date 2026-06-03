@@ -45,6 +45,36 @@ def _small_textured_coherent_glow() -> np.ndarray:
     return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
 
 
+def _blue_screen_green_chromatic_glow() -> np.ndarray:
+    h = w = 160
+    bg = np.array([1, 4, 233], dtype=np.float32)
+    green = np.array([1, 254, 11], dtype=np.float32)
+    white = np.array([255, 255, 255], dtype=np.float32)
+    y, x = np.mgrid[:h, :w]
+    cx = (w - 1) / 2.0
+    cy = (h - 1) / 2.0
+    dx = x - cx
+    dy = y - cy
+    radius = np.sqrt(dx * dx + dy * dy)
+    halo = np.clip(1.0 - radius / 60.0, 0.0, 1.0) ** 1.45
+    rays = np.zeros((h, w), dtype=np.float32)
+    for angle in np.linspace(0.0, np.pi, 4, endpoint=False):
+        normal = np.abs(dx * np.sin(angle) - dy * np.cos(angle))
+        along = np.abs(dx * np.cos(angle) + dy * np.sin(angle))
+        rays = np.maximum(rays, np.exp(-(normal / 1.3) ** 2) * np.exp(-along / 58.0))
+    alpha = np.clip(np.maximum(halo * 0.70, rays), 0.0, 1.0)
+    core = np.clip(1.0 - radius / 15.0, 0.0, 1.0) ** 0.6
+    foreground = green.reshape(1, 1, 3) * (1.0 - core[..., None]) + white.reshape(1, 1, 3) * core[..., None]
+    rgb = bg.reshape(1, 1, 3) * (1.0 - alpha[..., None]) + foreground * alpha[..., None]
+
+    # Blue-screen perturbations inside the low-alpha halo are the failure mode:
+    # unconstrained adaptive rays can extend them back to blue foreground
+    # endpoints that show up as speckles on complementary backgrounds.
+    noise_band = (alpha > 0.04) & (alpha < 0.40) & (((x * 17 + y * 31) % 19) == 0)
+    rgb[noise_band] = rgb[noise_band] * 0.65 + bg.reshape(1, 1, 3) * 0.35
+    return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
+
+
 def test_known_bg_glow_detects_i019_smooth_white_glow():
     image = _rgb("samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png")
 
@@ -105,6 +135,33 @@ def test_adaptive_known_bg_glow_repairs_additive_screen_color_endpoints():
     assert np.all(changed[:, 0] >= changed[:, 1])
     assert int(screen_green.sum()) == 0
     assert result.foreground_srgb[39, 36].min() >= 220
+
+
+def test_known_bg_glow_uses_chromatic_swap_ray_for_blue_screen_green_glow():
+    image = _blue_screen_green_chromatic_glow()
+
+    analysis = analyze_known_bg_glow(image, (1, 4, 233))
+    result = matte_known_bg_glow(
+        image,
+        (1, 4, 233),
+        target_color=analysis.target_color,
+        mode=analysis.mode,
+    )
+    visible = result.alpha > 0.005
+    foreground = result.foreground_srgb.astype(np.int16)
+    fg_float = result.foreground_srgb.astype(np.float32)
+    bright_core = visible & (fg_float.max(axis=2) >= 205.0) & ((fg_float.max(axis=2) - fg_float.min(axis=2)) <= 92.0)
+    non_green = visible & ~bright_core & (
+        (foreground[..., 1] < foreground[..., 0] + 20)
+        | (foreground[..., 1] < foreground[..., 2] + 20)
+    )
+    blue_dirty = visible & ~bright_core & (foreground[..., 2] > foreground[..., 1] + 20) & (foreground[..., 2] > foreground[..., 0] + 20)
+
+    assert analysis.accepted is True
+    assert analysis.mode == "chromatic_swap_ray"
+    assert result.debug["mode"] == "chromatic_swap_ray"
+    assert int(blue_dirty.sum()) == 0
+    assert int(non_green.sum()) < 24
 
 
 def test_auto_route_sends_i019_to_direct_known_bg_glow():

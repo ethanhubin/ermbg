@@ -239,6 +239,58 @@ def _repair_additive_adaptive_foreground(
     return repaired, repaired_alpha.astype(np.float32), int(repair.sum())
 
 
+def _is_chromatic_swap_target(
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+) -> bool:
+    bg = np.asarray(background_color, dtype=np.float32)
+    target = np.asarray(target_color, dtype=np.float32)
+    delta = target - bg
+    return bool(np.max(delta) >= 80.0 and np.min(delta) <= -80.0)
+
+
+def _solve_chromatic_swap_ray(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    target_color: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    target = np.asarray(target_color, dtype=np.float32)
+    alpha, residual = _solve_alpha(image_srgb, background_color, target)
+    rgb = image_srgb.astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32)
+    luma = rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722
+    chroma = np.max(rgb, axis=2) - np.min(rgb, axis=2)
+    source_distance = np.linalg.norm(rgb - bg.reshape(1, 1, 3), axis=2)
+    bright_core = (luma >= 205.0) & (chroma <= 92.0) & (source_distance >= 160.0)
+    foreground = np.broadcast_to(np.clip(target + 0.5, 0, 255).astype(np.uint8).reshape(1, 1, 3), image_srgb.shape).copy()
+    foreground[bright_core] = image_srgb[bright_core]
+    alpha = np.where(bright_core, 1.0, alpha).astype(np.float32)
+    return alpha.astype(np.float32), foreground, residual
+
+
+def _chromatic_swap_debug(
+    image_srgb: np.ndarray,
+    foreground: np.ndarray,
+    alpha: np.ndarray,
+    keep: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> dict[str, float]:
+    bg = np.asarray(background_color, dtype=np.float32)
+    replay = foreground.astype(np.float32) * alpha[..., None] + bg.reshape(1, 1, 3) * (1.0 - alpha[..., None])
+    error = np.linalg.norm(replay - image_srgb.astype(np.float32), axis=2)
+    if keep.any():
+        kept_residual = error[keep]
+        reconstruction_error_p95 = float(np.percentile(kept_residual, 95.0))
+        reconstruction_error_p99 = float(np.percentile(kept_residual, 99.0))
+    else:
+        reconstruction_error_p95 = 0.0
+        reconstruction_error_p99 = 0.0
+    return {
+        "reconstruction_error_p95": reconstruction_error_p95,
+        "reconstruction_error_p99": reconstruction_error_p99,
+    }
+
+
 def analyze_known_bg_glow(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
@@ -364,6 +416,15 @@ def analyze_known_bg_glow(
         adaptive_reason = "missing continuous low-alpha exterior glow"
     elif adaptive["outer_roughness_p90"] > 0.06:
         long_side = max(image_srgb.shape[:2])
+        adaptive_target_probe = tuple(int(c) for c in np.median(adaptive_foreground[adaptive["main_component"]], axis=0)) if adaptive["support_pixels"] else target_u8
+        chromatic_swap_coherent = (
+            _is_chromatic_swap_target(background_color, adaptive_target_probe)
+            and adaptive["outer_roughness_p90"] <= 0.09
+            and adaptive["falloff_correlation"] >= 0.80
+            and adaptive["largest_component_fraction"] >= 0.985
+            and adaptive["outer_fraction"] >= 0.45
+            and adaptive["soft_fraction"] >= 0.55
+        )
         textured_but_coherent = (
             long_side < 128
             and adaptive["outer_roughness_p90"] <= 0.10
@@ -377,7 +438,7 @@ def analyze_known_bg_glow(
         # steps. Keep the normal texture guard for particles/noise, but accept
         # small icons when continuity, a broad low-alpha exterior, and strong
         # distance/alpha correlation still prove one glow field.
-        if not textured_but_coherent:
+        if not (textured_but_coherent or chromatic_swap_coherent):
             adaptive_accepted = False
             adaptive_reason = "outer glow falloff is too textured"
     elif adaptive["falloff_correlation"] < 0.78:
@@ -385,10 +446,11 @@ def analyze_known_bg_glow(
         adaptive_reason = "outer glow does not fade coherently to background"
 
     adaptive_target = tuple(int(c) for c in np.median(adaptive_foreground[adaptive["main_component"]], axis=0)) if adaptive["support_pixels"] else target_u8
+    adaptive_mode = "chromatic_swap_ray" if _is_chromatic_swap_target(background_color, adaptive_target) else "adaptive_ray"
     return KnownBgGlowAnalysis(
         accepted=adaptive_accepted,
         reason=adaptive_reason if adaptive_accepted else adaptive_reason,
-        mode="adaptive_ray" if adaptive_accepted else "rejected",
+        mode=adaptive_mode if adaptive_accepted else "rejected",
         background_color=tuple(int(c) for c in background_color),
         target_color=adaptive_target,
         support_pixels=int(adaptive["support_pixels"]),
@@ -421,6 +483,32 @@ def matte_known_bg_glow(
         mode = analysis.mode if analysis.accepted else "single_target_line"
         if target_color is None and analysis.accepted:
             target_color = analysis.target_color
+    if mode == "chromatic_swap_ray":
+        if target_color is None:
+            target_color = tuple(int(c) for c in _estimate_target_color(image_srgb, background_color))
+        alpha, foreground, _residual = _solve_chromatic_swap_ray(image_srgb, background_color, tuple(int(c) for c in target_color))
+        metrics = _adaptive_ray_metrics(alpha)
+        keep = metrics["main_component"].astype(bool)
+        alpha = np.where(keep, alpha, 0.0).astype(np.float32)
+        foreground = foreground.copy()
+        foreground[~keep] = 0
+        alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        rgba = np.dstack([foreground, alpha_u8]).astype(np.uint8)
+        error_debug = _chromatic_swap_debug(image_srgb, foreground, alpha, keep, background_color)
+        debug = {
+            "source": "known_bg_glow_chromatic_swap_solver",
+            "mode": "chromatic_swap_ray",
+            "background_color": [int(c) for c in background_color],
+            "target_color": [int(c) for c in target_color],
+            "support_pixels": int((alpha > 0.0).sum()),
+            "alpha_mean": float(alpha.mean()),
+            "outer_roughness_p90": float(metrics["outer_roughness_p90"]),
+            "falloff_correlation": float(metrics["falloff_correlation"]),
+            "foreground_repaired_pixels": 0,
+            **error_debug,
+        }
+        return KnownBgGlowResult(rgba=rgba, alpha=alpha, foreground_srgb=foreground, debug=debug)
+
     if mode == "adaptive_ray":
         alpha, foreground, _distance = _solve_adaptive_ray(image_srgb, background_color)
         metrics = _adaptive_ray_metrics(alpha)
