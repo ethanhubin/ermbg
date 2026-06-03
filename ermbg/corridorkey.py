@@ -63,6 +63,7 @@ class CorridorKeyAssetAnalysis:
     key_color_compact_fill: float
     key_color_compact_fraction: float
     key_transition_fraction: float
+    same_key_opaque_plateau_confidence: float
     foreground_bbox_xyxy: tuple[int, int, int, int] | None
     foreground_aspect_ratio: float | None
     foreground_long_side: int
@@ -214,6 +215,64 @@ def _key_transition_fraction(key_alpha: np.ndarray) -> float:
         return 0.0
     transition = (key_alpha >= 0.16) & (key_alpha < 0.75)
     return float(transition.sum() / max(1, int(candidate_subject.sum())))
+
+
+def _same_key_opaque_plateau_confidence(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    key_alpha: np.ndarray,
+) -> float:
+    """Score same-key-family pixels as an opaque material plateau.
+
+    A broad near-background-color area is not enough evidence for
+    translucency: a flat cyan/blue/green UI material can be opaque even when it
+    sits close to the screen hue. The distinguishing signal is whether the
+    largest near-key component has substantial hard support. True glass/screen
+    tint tends to be a low-alpha ramp with little or no plateau; opaque UI
+    material has a coherent component whose interior can be explained as
+    alpha=1, leaving only the boundary/gradient band for matting.
+    """
+    candidate_subject = key_alpha >= 0.16
+    if not bool(candidate_subject.any()):
+        return 0.0
+
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)).reshape(3)
+    delta_ab = lab[..., 1:] - bg_lab[1:]
+    ab_distance = np.sqrt(np.sum(delta_ab * delta_ab, axis=-1)).astype(np.float32) * 100.0
+    near_subject = (ab_distance <= 12.0) & candidate_subject
+    near_count = int(near_subject.sum())
+    if near_count < max(32, int(key_alpha.size * 0.01)):
+        return 0.0
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(near_subject.astype(np.uint8), connectivity=8)
+    if n_labels <= 1:
+        return 0.0
+    areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+    label = int(np.argmax(areas)) + 1
+    area = float(stats[label, cv2.CC_STAT_AREA])
+    width = float(stats[label, cv2.CC_STAT_WIDTH])
+    height = float(stats[label, cv2.CC_STAT_HEIGHT])
+    if width <= 0.0 or height <= 0.0:
+        return 0.0
+
+    component = labels == label
+    component_fraction = area / max(1.0, float(near_count))
+    compact_fill = area / max(1.0, width * height)
+    hard_fraction = float((key_alpha[component] >= 0.75).mean())
+    transition_fraction = float(((key_alpha[component] >= 0.16) & (key_alpha[component] < 0.75)).mean())
+
+    # Threshold intent:
+    # - component_fraction/compact_fill require one coherent material plateau,
+    #   not scattered spill/glow particles.
+    # - hard_fraction is the main anti-glass signal: real transparent ramps have
+    #   broad near-key support but little alpha>=0.75 plateau.
+    # - transition_fraction guard keeps almost-all-ramp components from being
+    #   rescued merely because they are flat in color.
+    coherence = min(component_fraction / 0.60, compact_fill / 0.60)
+    hard_support = hard_fraction / 0.35
+    ramp_guard = np.clip((0.95 - transition_fraction) / 0.35, 0.0, 1.0)
+    return float(np.clip(min(coherence, hard_support) * ramp_guard, 0.0, 1.0))
 
 
 def _hard_screen_residue_risk(subject_key_color_risk: float, key_transition_fraction: float) -> float:
@@ -458,6 +517,7 @@ def _decision_candidates(
     key_color_compact_fill: float,
     key_color_compact_fraction: float,
     key_transition_fraction: float,
+    same_key_opaque_plateau_confidence: float,
     hard_screen_residue_risk: float,
     small_component_risk: bool,
     purity_sigma: float,
@@ -474,6 +534,7 @@ def _decision_candidates(
         key_color_compact_fill=key_color_compact_fill,
         key_color_compact_fraction=key_color_compact_fraction,
         key_transition_fraction=key_transition_fraction,
+        same_key_opaque_plateau_confidence=same_key_opaque_plateau_confidence,
     )
     selected_index = int(np.argmax([candidate.confidence for candidate in semantic_candidates]))
     return [
@@ -515,6 +576,7 @@ def _semantic_decision_candidates(
     key_color_compact_fill: float,
     key_color_compact_fraction: float,
     key_transition_fraction: float,
+    same_key_opaque_plateau_confidence: float,
 ) -> list[CorridorKeyDecisionCandidate]:
     """Stage 1: choose semantic CorridorKey route, independent of tuning.
 
@@ -572,8 +634,27 @@ def _semantic_decision_candidates(
             )
         )
 
+    # Require dominant same-key ownership before calling this "opaque material":
+    # lower-risk hard plateaus are usually shadow/antialias residue, not the
+    # subject's main fill. The 0.85 plateau score then requires a coherent
+    # component with enough alpha>=0.75 support to reject all-ramp glass/tint.
+    if subject_key_color_risk >= 0.45 and same_key_opaque_plateau_confidence >= 0.85:
+        candidates.append(
+            CorridorKeyDecisionCandidate(
+                profile="opaque_hard_ui_same_key_plateau",
+                label="同幕色实体 UI",
+                confidence=same_key_opaque_plateau_confidence,
+                settings=CorridorKeyRecommendedSettings(),
+                reason=(
+                    "Near-screen color forms a coherent hard-supported plateau; "
+                    "treat it as opaque UI material rather than screen-tinted translucency."
+                ),
+            )
+        )
+
     translucent_button = (
-        subject_aspect >= 1.45
+        same_key_opaque_plateau_confidence < 0.85
+        and subject_aspect >= 1.45
         and subject_key_color_risk >= 0.25
         and key_transition_fraction >= 0.30
     )
@@ -660,6 +741,20 @@ def _settings_for_profile(
         # negative edge-cleanup route, but this remains parameter-only: it does
         # not add an opaque-interior alpha snap or other execution repair.
         del confidence
+        settings = CorridorKeyRecommendedSettings(
+            despill_strength=1.0,
+            refiner_strength=1.15,
+            auto_despeckle="On",
+            despeckle_size=400,
+            color_protection=True,
+            protection_bg_max=8.0,
+            protection_fg_min=18.0,
+        )
+    elif profile == "opaque_hard_ui_same_key_plateau":
+        del confidence
+        # Same-screen-family material is the opposite of translucent tint: keep
+        # color protection on and route-level logic will hand the case to
+        # Known-B when a stable background exists.
         settings = CorridorKeyRecommendedSettings(
             despill_strength=1.0,
             refiner_strength=1.15,
@@ -812,6 +907,7 @@ def _recommend_settings(
     key_color_compact_fill: float,
     key_color_compact_fraction: float,
     key_transition_fraction: float,
+    same_key_opaque_plateau_confidence: float,
     hard_screen_residue_risk: float,
     small_component_risk: bool,
     purity_sigma: float,
@@ -874,6 +970,7 @@ def _recommend_settings(
         key_color_compact_fill=key_color_compact_fill,
         key_color_compact_fraction=key_color_compact_fraction,
         key_transition_fraction=key_transition_fraction,
+        same_key_opaque_plateau_confidence=same_key_opaque_plateau_confidence,
         hard_screen_residue_risk=hard_screen_residue_risk,
         small_component_risk=small_component_risk,
         purity_sigma=purity_sigma,
@@ -888,6 +985,8 @@ def _recommend_settings(
         notes.append("stage2 hard screen-family residue tuning increased refiner strength")
     if parameter_profile == "opaque_hard_ui_no_shadow":
         notes.append("stage2 opaque-hard-UI no-shadow tuning uses assertive cleanup parameters without alpha snapping")
+    elif parameter_profile == "opaque_hard_ui_same_key_plateau":
+        notes.append("stage2 same-key opaque plateau tuning keeps the deterministic hard-UI path")
     elif parameter_profile == "opaque_hard_ui_hard_shadow":
         notes.append("stage2 opaque-hard-UI hard-shadow tuning uses conservative color protection for the shadow band")
     elif parameter_profile == "opaque_hard_ui_soft_shadow":
@@ -982,6 +1081,11 @@ def corridorkey_analyze_asset(
         key_alpha,
     )
     transition_fraction = _key_transition_fraction(key_alpha)
+    same_key_plateau_confidence = _same_key_opaque_plateau_confidence(
+        image_srgb,
+        background_color,
+        key_alpha,
+    )
     hard_residue_risk = _hard_screen_residue_risk(subject_risk, transition_fraction)
     settings, parameter_profile, decision_candidates, setting_notes = _recommend_settings(
         preset=preset,
@@ -996,6 +1100,7 @@ def corridorkey_analyze_asset(
         key_color_compact_fill=compact_fill,
         key_color_compact_fraction=compact_fraction,
         key_transition_fraction=transition_fraction,
+        same_key_opaque_plateau_confidence=same_key_plateau_confidence,
         hard_screen_residue_risk=hard_residue_risk,
         small_component_risk=small_component_risk,
         purity_sigma=purity_sigma,
@@ -1018,6 +1123,7 @@ def corridorkey_analyze_asset(
         key_color_compact_fill=compact_fill,
         key_color_compact_fraction=compact_fraction,
         key_transition_fraction=transition_fraction,
+        same_key_opaque_plateau_confidence=same_key_plateau_confidence,
         foreground_bbox_xyxy=foreground_bbox,
         foreground_aspect_ratio=foreground_aspect,
         foreground_long_side=foreground_long_side,

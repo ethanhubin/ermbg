@@ -472,6 +472,8 @@ def matte_image(
             auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
             cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
+            trimap_mode=auto_params.get("pymatting_trimap_mode", "standard"),
+            unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", 0),
             auto_route=auto_route,
         )
 
@@ -798,6 +800,8 @@ def _matte_image_pymatting_known_b(
     auto_adapt: bool,
     cg_maxiter: int,
     cg_rtol: float,
+    trimap_mode: str = "standard",
+    unknown_grow_px: int = 0,
     auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
     from .pymatting_refine import (
@@ -867,6 +871,8 @@ def _matte_image_pymatting_known_b(
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
         adaptive=effective_auto_adapt,
+        trimap_mode=str(trimap_mode or "standard"),
+        unknown_grow_px=int(unknown_grow_px),
     )
     pm = estimate_alpha_with_pymatting(
         processing_rgb,
@@ -960,6 +966,8 @@ def _matte_image_pymatting_known_b(
                     "requested_auto_adapt": bool(auto_adapt),
                     "cg_maxiter": int(cg_maxiter),
                     "cg_rtol": float(cg_rtol),
+                    "trimap_mode": str(trimap_mode or "standard"),
+                    "unknown_grow_px": int(unknown_grow_px),
                 },
             },
         },

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -270,6 +271,44 @@ def test_route_square_canvas_wide_button_uses_foreground_geometry_not_canvas_siz
     assert ck["parameter_profile"] != "composite_character_corridor_only"
     assert decision.analysis["complex_button_boundary"]["foreground_aspect_ratio"] >= 1.45
     assert decision.analysis["complex_button_boundary"]["reason"] != "not wide button"
+
+
+def test_route_round_same_key_opaque_button_uses_pymatting_without_aspect_gate():
+    img = np.full((128, 128, 3), (1, 95, 248), dtype=np.uint8)
+    cv2.circle(img, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(img, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.backend == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert decision.analysis["same_key_opaque_body_outline"]["accepted"] is True
+    assert decision.analysis["same_key_opaque_body_outline"]["outline_recipe"] == "closed_plateau_outline"
+    ck = decision.analysis["corridorkey_analysis"]
+    assert ck["foreground_aspect_ratio"] == pytest.approx(1.0)
+    assert ck["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
+    assert ck["same_key_opaque_plateau_confidence"] >= 0.85
+
+
+def test_route_same_key_opaque_button_uses_outline_trimap_only_when_outline_is_measured():
+    img = np.full((120, 240, 3), (1, 95, 248), dtype=np.uint8)
+    cv2.rectangle(img, (20, 12), (220, 98), (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.rectangle(img, (20, 12), (220, 98), (70, 118, 210), 2, cv2.LINE_AA)
+    cv2.rectangle(img, (22, 99), (218, 108), (6, 74, 188), -1)
+    cv2.line(img, (22, 98), (218, 98), (92, 126, 170), 1, cv2.LINE_AA)
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert decision.params["pymatting_unknown_grow_px"] == 2
+    assert decision.analysis["corridorkey_analysis"]["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
+    assert decision.analysis["same_key_opaque_body_outline"]["accepted"] is True
+    assert decision.analysis["same_key_opaque_body_outline"]["outline_recipe"] == "lower_perimeter_ridge"
 
 
 def test_route_unknown_unstable_background_uses_pymatting_fallback():

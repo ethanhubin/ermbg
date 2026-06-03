@@ -560,6 +560,8 @@ def _pymatting_route_params(
     background_color: tuple[int, int, int],
     *,
     execution_profile: str = "pymatting-known-b",
+    trimap_mode: str = "standard",
+    unknown_grow_px: int = 0,
 ) -> dict[str, Any]:
     return {
         "execution_profile": execution_profile,
@@ -573,6 +575,8 @@ def _pymatting_route_params(
         "pymatting_auto_adapt": True,
         "pymatting_cg_maxiter": 1000,
         "pymatting_cg_rtol": 1e-6,
+        "pymatting_trimap_mode": trimap_mode,
+        "pymatting_unknown_grow_px": int(unknown_grow_px),
     }
 
 
@@ -828,6 +832,32 @@ def classify_route(
     stable_bg, stable_info = estimate_stable_background_color(image_srgb)
     analysis["stable_background"] = stable_info
     if stable_info.get("accepted", False):
+        trimap_mode = "standard"
+        unknown_grow_px = 0
+        # Threshold intent: the semantic profile can be won by key_color_material
+        # even when a same-key opaque plateau exists. The outline trimap should
+        # depend on measured plateau+outline evidence instead of that winner.
+        # Keep the plateau gate below the semantic 0.85 cutoff so outlined
+        # icon/button shapes with white glyphs still qualify, but require the
+        # dominant same-key ownership gate and a successful outline extractor to
+        # avoid using this mode on weak spill/glow residue.
+        same_key_outline_candidate = (
+            asset_kind == "button"
+            and float(ck.subject_key_color_risk) >= 0.45
+            and float(ck.same_key_opaque_plateau_confidence) >= 0.65
+        )
+        if same_key_outline_candidate:
+            from .pymatting_refine import analyze_same_key_opaque_body_outline
+
+            body_outline = analyze_same_key_opaque_body_outline(
+                image_srgb,
+                stable_bg,
+                bg_threshold=3.5,
+            )
+            analysis["same_key_opaque_body_outline"] = body_outline
+            if body_outline.get("accepted", False):
+                trimap_mode = "same_key_opaque_body_outline"
+                unknown_grow_px = 2
         if asset_kind == "button":
             reasons.append(f"button_{profile}_uses_known_b_pymatting")
         elif not known_corridor_screen:
@@ -841,6 +871,8 @@ def classify_route(
             params=_pymatting_route_params(
                 stable_bg,
                 execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
+                trimap_mode=trimap_mode,
+                unknown_grow_px=unknown_grow_px,
             ),
             confidence=float(max(0.45, ck.background_confidence, 0.80)),
             reasons=reasons,

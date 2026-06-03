@@ -484,6 +484,8 @@ def direct_matte_from_decision(
             auto_adapt=_route_params(params, "pymatting_auto_adapt", True),
             cg_maxiter=_route_params(params, "pymatting_cg_maxiter", 1000),
             cg_rtol=_route_params(params, "pymatting_cg_rtol", 1e-6),
+            trimap_mode=_route_params(params, "pymatting_trimap_mode", "standard"),
+            unknown_grow_px=_route_params(params, "pymatting_unknown_grow_px", 0),
             auto_route=auto_route,
         )
         response.strategy_name = "direct_pymatting_known_b"

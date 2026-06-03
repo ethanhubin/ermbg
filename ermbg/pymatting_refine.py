@@ -815,6 +815,8 @@ def build_known_background_trimap(
     fg_threshold: float = 24.0,
     boundary_band_px: int = 2,
     adaptive: bool = True,
+    trimap_mode: str = "standard",
+    unknown_grow_px: int = 0,
 ) -> tuple[Trimap, dict[str, Any]]:
     """Build a conservative known-B trimap for hard-edged solid graphics.
 
@@ -843,6 +845,43 @@ def build_known_background_trimap(
         require_exact_bg=True,
     )
 
+    # Route selection owns the semantic decision. If it requests the same-key
+    # opaque body-outline trimap, execution consumes that contract directly
+    # instead of reclassifying the asset here.
+    body_outline_info: dict[str, Any] = {"enabled": trimap_mode == "same_key_opaque_body_outline"}
+    if trimap_mode == "same_key_opaque_body_outline":
+        body_trimap, body_outline_info = _build_same_key_opaque_body_outline_trimap(
+            image_srgb,
+            bg,
+            bg_threshold=float(bg_threshold),
+            unknown_grow_px=int(unknown_grow_px),
+        )
+        return body_trimap, {
+            "method": "same_key_opaque_body_outline",
+            "adaptive": bool(adaptive),
+            "background_color": [int(c) for c in bg],
+            "bg_threshold": float(bg_threshold),
+            "fg_threshold": float(fg_threshold),
+            **ownership.thresholds,
+            "boundary_band_px": int(boundary_band_px),
+            **ownership.boundary_info,
+            "foreground_seed_inset_px": int(ownership.foreground_seed_inset_px),
+            "foreground_seed_inset": ownership.foreground_seed_inset_info,
+            "subject_material_support": ownership.subject_support_info,
+            **ownership.debug,
+            "same_key_opaque_body_outline": body_outline_info,
+            "shadow_background": {
+                **ownership.shadow_info,
+                "unknown_ownership_pixels": int(ownership.shadow_unknown.sum()),
+                "hard_ownership_pixels": 0,
+                "screen_dominant_overlap_pixels": 0,
+                "protected_foreground_overlap_pixels": 0,
+            },
+            "sure_fg_pixels": int(body_trimap.sure_fg.sum()),
+            "sure_bg_pixels": int(body_trimap.sure_bg.sum()),
+            "unknown_pixels": int(body_trimap.unknown.sum()),
+        }
+
     # If a source has no clear foreground core, PyMatting has nothing stable to
     # propagate from. Keep the trimap valid but report the weak support.
     trimap = Trimap(sure_fg=ownership.sure_fg, sure_bg=ownership.sure_bg, unknown=ownership.unknown)
@@ -859,6 +898,7 @@ def build_known_background_trimap(
         "foreground_seed_inset": ownership.foreground_seed_inset_info,
         "subject_material_support": ownership.subject_support_info,
         **ownership.debug,
+        "same_key_opaque_body_outline": body_outline_info,
         "shadow_background": {
             **ownership.shadow_info,
             "unknown_ownership_pixels": int(ownership.shadow_unknown.sum()),
@@ -866,6 +906,321 @@ def build_known_background_trimap(
             "screen_dominant_overlap_pixels": 0,
             "protected_foreground_overlap_pixels": 0,
         },
+    }
+
+
+def _flood_exterior(mask: np.ndarray) -> np.ndarray:
+    h, w = mask.shape
+    work = mask.astype(np.uint8).copy()
+    flood = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    for x in range(w):
+        if work[0, x]:
+            cv2.floodFill(work, flood, (x, 0), 2)
+        if work[h - 1, x]:
+            cv2.floodFill(work, flood, (x, h - 1), 2)
+    for y in range(h):
+        if work[y, 0]:
+            cv2.floodFill(work, flood, (0, y), 2)
+        if work[y, w - 1]:
+            cv2.floodFill(work, flood, (w - 1, y), 2)
+    return work == 2
+
+
+def _median_smooth_1d(values: np.ndarray, k: int = 9) -> np.ndarray:
+    radius = k // 2
+    padded = np.pad(values.astype(np.float32), (radius, radius), mode="edge")
+    return np.asarray([np.median(padded[i : i + k]) for i in range(len(values))], dtype=np.float32)
+
+
+def _same_key_opaque_body_outline_trace(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray | tuple[int, int, int],
+    *,
+    bg_threshold: float,
+) -> dict[str, Any]:
+    lower = _same_key_opaque_lower_perimeter_ridge_trace(
+        image_srgb,
+        background_color,
+        bg_threshold=float(bg_threshold),
+    )
+    if lower.get("accepted", False):
+        return lower
+    closed = _same_key_opaque_closed_plateau_outline_trace(
+        image_srgb,
+        background_color,
+        bg_threshold=float(bg_threshold),
+    )
+    if closed.get("accepted", False):
+        closed["fallback_from"] = lower
+        return closed
+    return lower
+
+
+def _same_key_opaque_lower_perimeter_ridge_trace(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray | tuple[int, int, int],
+    *,
+    bg_threshold: float,
+) -> dict[str, Any]:
+    h, w = image_srgb.shape[:2]
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
+    dE = oklab_distance(lab, bg_lab).astype(np.float32)
+    exterior = _flood_exterior(dE <= float(bg_threshold))
+    support = (~exterior).astype(np.uint8)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(support, 8)
+    if labels_count <= 1:
+        return {"accepted": False, "reason": "missing non-background component"}
+
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = (labels == label).astype(np.uint8)
+    x = int(stats[label, cv2.CC_STAT_LEFT])
+    y = int(stats[label, cv2.CC_STAT_TOP])
+    comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+    comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+    aspect = float(comp_w / max(1, comp_h))
+
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {
+            "accepted": False,
+            "reason": "missing component contour",
+            "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+            "component_aspect_ratio": aspect,
+        }
+    broad_fill = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(broad_fill, [max(contours, key=cv2.contourArea)], -1, 1, thickness=cv2.FILLED)
+
+    gray = cv2.cvtColor(image_srgb, cv2.COLOR_RGB2GRAY)
+    gy = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    y0 = int(np.clip(round(y + comp_h * 0.90), 0, h - 1))
+    y1 = int(np.clip(round(y + comp_h * 0.985), y0 + 1, h))
+    band = gy[y0:y1, :]
+    if band.size == 0:
+        return {
+            "accepted": False,
+            "reason": "empty lower ridge band",
+            "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+            "component_aspect_ratio": aspect,
+        }
+
+    strength = band.max(axis=0)
+    ridge_y = (band.argmax(axis=0) + y0).astype(np.float32)
+    columns = np.arange(w)
+    col_support = broad_fill.any(axis=0)
+    trusted = col_support & (strength >= 18.0)
+    support_columns = int(col_support.sum())
+    trusted_columns = int(trusted.sum())
+    trusted_fraction = float(trusted_columns / max(1, support_columns))
+    if support_columns <= 0:
+        return {
+            "accepted": False,
+            "reason": "missing support columns",
+            "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+            "component_aspect_ratio": aspect,
+        }
+
+    if trusted_columns > 0:
+        interpolated = np.interp(columns, columns[trusted], ridge_y[trusted])
+    else:
+        interpolated = np.full(w, float(y1 - 1), dtype=np.float32)
+    line = np.rint(_median_smooth_1d(interpolated, 9)).astype(np.int32)
+    line = np.clip(line, y0, y1 - 1)
+    line_values = line[col_support]
+    line_range = int(line_values.max() - line_values.min()) if line_values.size else 0
+    # Same-key opaque plateau proves material opacity; this extra route signal
+    # proves that the current outline recipe has enough measured perimeter-ridge
+    # evidence to close the foreground body before PyMatting solves AA/shadow.
+    accepted = bool(trusted_fraction >= 0.55 and line_range <= max(6, int(round(comp_h * 0.08))))
+    reason = "" if accepted else "body outline ridge is not sufficiently continuous for this recipe"
+    yy, xx = np.indices((h, w))
+    body_fill = broad_fill.astype(bool) & (yy <= line[xx])
+    return {
+        "accepted": accepted,
+        "reason": reason,
+        "outline_recipe": "lower_perimeter_ridge",
+        "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+        "component_aspect_ratio": aspect,
+        "ridge_band_y": [int(y0), int(y1 - 1)],
+        "ridge_strength_min": 18.0,
+        "support_columns": support_columns,
+        "trusted_columns": trusted_columns,
+        "trusted_fraction": trusted_fraction,
+        "line_y_min": int(line_values.min()),
+        "line_y_max": int(line_values.max()),
+        "line_y_median": float(np.median(line_values)),
+        "line_y_range": line_range,
+        "line": line,
+        "broad_fill": broad_fill.astype(bool),
+        "body_fill": body_fill,
+        "unknown_domain": broad_fill.astype(bool),
+    }
+
+
+def _same_key_opaque_closed_plateau_outline_trace(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray | tuple[int, int, int],
+    *,
+    bg_threshold: float,
+) -> dict[str, Any]:
+    del bg_threshold
+    from .keyer import KeyerThresholds, chromatic_key_alpha
+
+    h, w = image_srgb.shape[:2]
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
+    key_alpha = chromatic_key_alpha(image_srgb, bg, KeyerThresholds(bg_max=8.0, fg_min=18.0))
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
+    delta_ab = lab[..., 1:] - bg_lab[1:]
+    ab_distance = np.sqrt(np.sum(delta_ab * delta_ab, axis=-1)).astype(np.float32) * 100.0
+    near_plateau = (ab_distance <= 12.0) & (key_alpha >= 0.16)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(near_plateau.astype(np.uint8), 8)
+    if labels_count <= 1:
+        return {"accepted": False, "reason": "missing same-key opaque plateau component"}
+
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = (labels == label).astype(np.uint8)
+    x = int(stats[label, cv2.CC_STAT_LEFT])
+    y = int(stats[label, cv2.CC_STAT_TOP])
+    comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+    comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+    area = int(stats[label, cv2.CC_STAT_AREA])
+    min_area = max(32, int(round(float(h * w) * 0.01)))
+    if area < min_area:
+        return {
+            "accepted": False,
+            "reason": "same-key opaque plateau component is too small",
+            "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+            "component_area": area,
+            "component_min_area": min_area,
+        }
+
+    closed = cv2.morphologyEx(component, cv2.MORPH_CLOSE, np.ones((5, 5), dtype=np.uint8), iterations=2)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {
+            "accepted": False,
+            "reason": "same-key opaque plateau has no closable contour",
+            "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+            "component_area": area,
+            "component_min_area": min_area,
+        }
+    contour = max(contours, key=cv2.contourArea)
+    body_fill_u8 = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(body_fill_u8, [contour], -1, 1, thickness=cv2.FILLED)
+    body_fill = body_fill_u8.astype(bool)
+    fill_pixels = int(body_fill.sum())
+    plateau_fill_fraction = float((near_plateau & body_fill).sum() / max(1, fill_pixels))
+
+    gray = cv2.cvtColor(image_srgb, cv2.COLOR_RGB2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    perimeter_ring = (
+        cv2.dilate(body_fill_u8, kernel, iterations=2).astype(bool)
+        & ~cv2.erode(body_fill_u8, kernel, iterations=2).astype(bool)
+    )
+    perimeter_pixels = int(perimeter_ring.sum())
+    perimeter_edge_pixels = int((perimeter_ring & (mag >= 18.0)).sum())
+    perimeter_edge_fraction = float(perimeter_edge_pixels / max(1, perimeter_pixels))
+    exterior = _flood_exterior(oklab_distance(lab, bg_lab).astype(np.float32) <= 3.5)
+    support = ~exterior
+    unknown_domain = support | cv2.dilate(body_fill_u8, kernel, iterations=1).astype(bool)
+    accepted = bool(plateau_fill_fraction >= 0.55 and perimeter_edge_fraction >= 0.18)
+    reason = "" if accepted else "same-key plateau outline is not sufficiently closed or edged"
+    return {
+        "accepted": accepted,
+        "reason": reason,
+        "outline_recipe": "closed_plateau_outline",
+        "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
+        "component_area": area,
+        "component_min_area": min_area,
+        "fill_pixels": fill_pixels,
+        "plateau_fill_fraction": plateau_fill_fraction,
+        "perimeter_edge_threshold": 18.0,
+        "perimeter_pixels": perimeter_pixels,
+        "perimeter_edge_pixels": perimeter_edge_pixels,
+        "perimeter_edge_fraction": perimeter_edge_fraction,
+        "body_fill": body_fill,
+        "unknown_domain": unknown_domain,
+    }
+
+
+def analyze_same_key_opaque_body_outline(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray | tuple[int, int, int],
+    *,
+    bg_threshold: float = 3.5,
+) -> dict[str, Any]:
+    trace = _same_key_opaque_body_outline_trace(
+        image_srgb,
+        background_color,
+        bg_threshold=float(bg_threshold),
+    )
+    return _public_same_key_outline_trace(trace)
+
+
+def _public_same_key_outline_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    hidden = {"line", "broad_fill", "body_fill", "unknown_domain"}
+    public: dict[str, Any] = {}
+    for key, value in trace.items():
+        if key in hidden:
+            continue
+        if key == "fallback_from" and isinstance(value, dict):
+            public[key] = _public_same_key_outline_trace(value)
+        else:
+            public[key] = value
+    return public
+
+
+def _build_same_key_opaque_body_outline_trimap(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    bg_threshold: float,
+    unknown_grow_px: int,
+) -> tuple[Trimap, dict[str, Any]]:
+    """Build a body-outline trimap for a same-key opaque outline recipe.
+
+    This profile has already established that the button is not transparent.
+    Route analysis has also established that this image has the measured outline
+    evidence required by the current recipe. Pixels inside the outline are
+    sure-FG, the outline plus exterior shadow/AA are unknown, and clean exterior
+    known-B remains sure-BG. This helper is an execution recipe, not an asset
+    classifier; failures are explicit so callers do not silently get a different
+    trimap mode from the route contract.
+    """
+    h, w = image_srgb.shape[:2]
+    trace = _same_key_opaque_body_outline_trace(
+        image_srgb,
+        background_color,
+        bg_threshold=float(bg_threshold),
+    )
+    if not trace.get("accepted", False):
+        raise ValueError(f"same-key body-outline trimap route contract failed: {trace.get('reason', 'unknown')}")
+    body_fill = trace["body_fill"]
+    body_labels_count, body_labels, body_stats, _ = cv2.connectedComponentsWithStats(body_fill.astype(np.uint8), 8)
+    if body_labels_count <= 1:
+        raise ValueError("same-key body-outline trimap body fill is empty after ridge clip")
+    body_label = 1 + int(np.argmax(body_stats[1:, cv2.CC_STAT_AREA]))
+    body_fill = body_labels == body_label
+
+    dist = cv2.distanceTransform(body_fill.astype(np.uint8), cv2.DIST_L2, 3)
+    sure_fg = body_fill & (dist >= 2.0)
+    unknown_domain = np.asarray(trace.get("unknown_domain", body_fill), dtype=bool)
+    unknown = unknown_domain & ~sure_fg
+    if int(unknown_grow_px) > 0:
+        grow_kernel = np.ones((3, 3), dtype=np.uint8)
+        grown = cv2.dilate((sure_fg | unknown).astype(np.uint8), grow_kernel, iterations=int(unknown_grow_px)).astype(bool)
+        unknown = grown & ~sure_fg
+    sure_bg = ~(sure_fg | unknown)
+    trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
+    return trimap, {
+        "enabled": True,
+        **_public_same_key_outline_trace(trace),
+        "unknown_grow_px": int(unknown_grow_px),
     }
 
 
@@ -1998,6 +2353,7 @@ def estimate_alpha_with_pymatting(
 
 __all__ = [
     "PyMattingAlphaResult",
+    "analyze_same_key_opaque_body_outline",
     "build_known_background_trimap",
     "estimate_stable_background_color",
     "estimate_alpha_with_pymatting",

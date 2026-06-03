@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -519,6 +520,22 @@ def test_corridorkey_analysis_protects_dominant_blue_family_subject_material():
     assert analysis.recommended_settings.refiner_strength == 0.70
     assert analysis.recommended_settings.protection_bg_max == 4.0
     assert analysis.recommended_settings.protection_fg_min == 10.0
+
+
+def test_corridorkey_analysis_prefers_opaque_plateau_over_translucent_round_button():
+    image = np.full((128, 128, 3), (1, 95, 248), dtype=np.uint8)
+    cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+
+    analysis = corridorkey_analyze_asset(image)
+
+    assert analysis.foreground_aspect_ratio == pytest.approx(1.0)
+    assert analysis.same_key_opaque_plateau_confidence >= 0.85
+    assert analysis.parameter_profile == "opaque_hard_ui_same_key_plateau"
+    selected = _selected_candidate(analysis)
+    assert selected.profile == "opaque_hard_ui_same_key_plateau"
+    assert selected.settings.color_protection is True
+    assert any("same-key opaque plateau" in note for note in analysis.notes)
 
 
 @pytest.mark.parametrize(

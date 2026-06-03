@@ -12,6 +12,7 @@ from PIL import Image
 from ermbg import io
 from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
+    analyze_same_key_opaque_body_outline,
     build_known_background_trimap,
     estimate_known_background_alpha_with_pymatting,
     estimate_stable_background_color,
@@ -631,6 +632,62 @@ def test_known_background_trimap_does_not_release_neutral_subject_edge_without_s
 
     assert info["neutral_shadow_subject_evidence_release_pixels"] == 0
     assert info["neutral_shadow_subject_evidence"]["reason"] == "missing sure foreground or shadow evidence"
+
+
+def test_same_key_opaque_body_outline_trimap_uses_measured_outline_evidence():
+    bg = (1, 95, 248)
+    image = np.full((120, 240, 3), bg, dtype=np.uint8)
+    cv2.rectangle(image, (20, 12), (220, 98), (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.rectangle(image, (20, 12), (220, 98), (70, 118, 210), 2, cv2.LINE_AA)
+    cv2.rectangle(image, (22, 99), (218, 108), (6, 74, 188), -1)
+    cv2.line(image, (22, 98), (218, 98), (92, 126, 170), 1, cv2.LINE_AA)
+
+    outline = analyze_same_key_opaque_body_outline(image, bg, bg_threshold=3.5)
+    trimap, info = build_known_background_trimap(
+        image,
+        bg,
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        trimap_mode="same_key_opaque_body_outline",
+        unknown_grow_px=2,
+    )
+
+    assert outline["accepted"] is True
+    assert outline["outline_recipe"] == "lower_perimeter_ridge"
+    assert info["method"] == "same_key_opaque_body_outline"
+    assert info["same_key_opaque_body_outline"]["accepted"] is True
+    assert trimap.sure_fg[40:90, 40:200].mean() > 0.95
+    assert trimap.unknown[99:108, 40:200].mean() > 0.80
+    assert not np.any(trimap.sure_fg & trimap.sure_bg)
+
+
+def test_same_key_opaque_body_outline_trimap_supports_closed_plateau_shapes():
+    bg = (1, 95, 248)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+
+    outline = analyze_same_key_opaque_body_outline(image, bg, bg_threshold=3.5)
+    trimap, info = build_known_background_trimap(
+        image,
+        bg,
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        trimap_mode="same_key_opaque_body_outline",
+        unknown_grow_px=2,
+    )
+
+    yy, xx = np.indices((128, 128))
+    center = (xx - 64) ** 2 + (yy - 64) ** 2 <= 30**2
+    edge = ((xx - 64) ** 2 + (yy - 64) ** 2 >= 39**2) & ((xx - 64) ** 2 + (yy - 64) ** 2 <= 45**2)
+    assert outline["accepted"] is True
+    assert outline["outline_recipe"] == "closed_plateau_outline"
+    assert info["same_key_opaque_body_outline"]["outline_recipe"] == "closed_plateau_outline"
+    assert trimap.sure_fg[center].mean() > 0.95
+    assert trimap.unknown[edge].mean() > 0.30
+    assert not np.any(trimap.sure_fg & trimap.sure_bg)
 
 
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
