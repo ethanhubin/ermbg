@@ -1,4 +1,4 @@
-"""Tests for the RMBG web service."""
+﻿"""Tests for the RMBG web service."""
 
 from __future__ import annotations
 
@@ -67,8 +67,11 @@ def test_index_serves_upload_ui():
     assert 'id="mask-toolbar"' in response.text
     assert response.text.index('id="preview-panel"') < response.text.index('id="source-preview"')
     assert 'id="source-preview"' not in response.text.split('<label class="inline-label">后端')[0]
-    assert 'href="/slice">切图</a>' in response.text
-    assert 'href="/artifacts">Artifacts</a>' in response.text
+    assert '<nav class="primary-tabs" aria-label="主导航">' in response.text
+    assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
+    assert '<a class="nav-tab is-active" href="/" aria-current="page">抠图</a>' in response.text
+    assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
+    assert 'href="/artifacts"' not in response.text
     assert '"/api/slice-preview"' not in response.text
     assert '"/api/slice-crops"' not in response.text
     assert 'id="runtime-status"' in response.text
@@ -78,7 +81,7 @@ def test_index_serves_upload_ui():
     assert 'fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5")' in response.text
     assert "confirm-slices" not in response.text
     assert "候选缩略图" in response.text
-    assert 'href="/eval/game"' in response.text
+    assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
     assert 'role="tablist"' in response.text
     assert ".source-frame img { position: absolute; z-index: 1; left: 50%; top: 50%; display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
     assert "translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})" in response.text
@@ -98,7 +101,7 @@ def test_index_serves_upload_ui():
     assert "contain: layout paint;" in response.text
     assert ".canvas.is-mask-mode { padding: 0; }" in response.text
     assert ".canvas.is-mask-mode .source-frame { border: 0; border-radius: 0; }" in response.text
-    assert ".canvas img { max-width: 100%; max-height: 100%; }" in response.text
+    assert ".canvas img { max-width: 100%; max-height: 100%; -webkit-user-drag: none; user-select: none; }" in response.text
     assert ".result-image { width: 100%; height: 100%; object-fit: contain;" in response.text
     assert "let maskScale = 1;" in response.text
     assert "applyMaskTransform()" in response.text
@@ -188,6 +191,7 @@ def test_index_serves_upload_ui():
     assert 'canvas.addEventListener("pointerdown"' in response.text
     assert "selected: candidate.selected === true" in response.text
     assert "setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0)" in response.text
+    assert '[canvas, previewStage, sourceFrame, sourcePreview].forEach((element) => { ["dragstart", "dragover", "drop"].forEach((type) => element.addEventListener(type, (event) => event.preventDefault())); });' in response.text
     assert "formatElapsed(performance.now() - startedAt)" in response.text
     assert "server_elapsed_sec" in response.text
     assert "client ${elapsed}" in response.text
@@ -290,27 +294,35 @@ def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
     assert detail_payload["manifest"]["schema"] == "ermbg.run.v1"
 
 
-def test_artifacts_page_serves_browser():
+def test_artifacts_page_is_removed():
     client = TestClient(app)
     response = client.get("/artifacts")
 
-    assert response.status_code == 200
-    assert "ERMBG Artifacts" in response.text
-    assert 'fetch("/api/artifacts?limit=200")' in response.text
-    assert 'id="rows"' in response.text
-    assert 'href="/eval/game"' in response.text
-    assert 'href="/"' in response.text
+    assert response.status_code == 404
 
 
 def test_slice_page_serves_slice_mode_entry():
     client = TestClient(app)
     response = client.get("/slice")
     assert response.status_code == 200
-    assert "RMBG 切图" in response.text
-    assert 'href="/">返回抠图</a>' in response.text
+    assert '<nav class="primary-tabs" aria-label="主导航">' in response.text
+    assert '<a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>' in response.text
+    assert '<a class="nav-tab" href="/">抠图</a>' in response.text
+    assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
+    assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
+    assert 'href="/artifacts"' not in response.text
     assert '"/api/slice-preview"' in response.text
     assert '"/api/slice-crops"' in response.text
     assert 'sessionStorage.setItem("ermbgPendingSlice"' in response.text
+    assert 'sessionStorage.setItem("ermbgBatchQueue"' in response.text
+    assert 'id="batch-all"' in response.text
+    assert 'id="batch-selected"' not in response.text
+    assert 'id="matte-selected"' not in response.text
+    assert 'href="/batch"' in response.text
+    assert 'id="preview-button"' in response.text
+    assert '<button id="preview-button" type="button" disabled>预览</button>' in response.text
+    assert '<button id="confirm" type="button" disabled>切图</button>' in response.text
+    assert '.slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }' in response.text
     assert 'const SLICE_STATE_KEY = "ermbgSliceWorkspace"' in response.text
     assert "restoreSliceState()" in response.text
     assert ".thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
@@ -318,9 +330,11 @@ def test_slice_page_serves_slice_mode_entry():
     assert ".thumb { width: 64px; height: 64px;" in response.text
     assert 'downloadCrop.href = crop.rgb' in response.text
     assert 'downloadCrop.download = crop.filename || `${crop.id || crop.label || "slice"}_rgb.png`' in response.text
-    assert 'padding.addEventListener("keydown"' in response.text
-    assert 'padding.addEventListener("blur", refreshPreviewFromPadding)' in response.text
-    assert 'padding.addEventListener("change", refreshPreviewFromPadding)' in response.text
+    assert 'padding.addEventListener("keydown"' not in response.text
+    assert "refreshPreviewFromPadding" not in response.text
+    assert 'padding.addEventListener("change", invalidatePreview)' in response.text
+    assert 'minArea.addEventListener("change", invalidatePreview)' in response.text
+    assert 'previewButton.addEventListener("click"' in response.text
     assert "minArea.disabled = isBusy" not in response.text
     assert "padding.disabled = isBusy" not in response.text
     assert "function createImagePanZoomViewport" in response.text
@@ -330,15 +344,85 @@ def test_slice_page_serves_slice_mode_entry():
     assert "image.draggable = false" in response.text
     assert 'viewport.addEventListener("dragstart"' in response.text
     assert "处边距重叠" in response.text
-    assert '.row-download { visibility: visible;' in response.text
+    assert '.row-download { visibility: visible;' not in response.text
     assert "grid-template-rows: auto auto auto minmax(0, 1fr) auto" in response.text
     assert "scrollbar-gutter: stable" in response.text
     assert ".row:hover { background: #f3f7f1; }" in response.text
     assert ".row[aria-selected=\"true\"] { background: #d7eadf; }" in response.text
-    assert ".row[aria-selected=\"true\"] .row-action { visibility: visible; }" in response.text
+    assert ".row[aria-selected=\"true\"] .row-action { visibility: visible; }" not in response.text
+    assert ".row:hover .row-action, .row:focus-within .row-action { visibility: visible; }" in response.text
     assert "overflow-x: hidden" in response.text
     assert 'action.className = "row-action"' in response.text
     assert 'file.addEventListener("change", () => {\n      if (!file.files.length) return;' in response.text
+    assert 'statusEl.textContent = "已载入图片，点击预览";' in response.text
+
+
+def test_batch_page_serves_batch_queue_entry():
+    client = TestClient(app)
+    response = client.get("/batch")
+    assert response.status_code == 200
+    assert "ERMBG Batch Matte" in response.text
+    assert '<nav class="primary-tabs" aria-label="主导航">' in response.text
+    assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
+    assert '<a class="nav-tab" href="/">抠图</a>' in response.text
+    assert '<a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>' in response.text
+    assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
+    assert 'href="/artifacts"' not in response.text
+    assert 'type="file"' in response.text
+    assert "multiple" in response.text
+    assert '"/api/matte-candidates"' in response.text
+    assert '"/api/batch-results.zip"' in response.text
+    assert 'sessionStorage.getItem("ermbgBatchQueue")' in response.text
+    assert "backend=auto" in response.text
+
+
+def test_batch_results_zip_writes_standard_manifests(tmp_path, monkeypatch):
+    import ermbg.web as web
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    rgba = np.zeros((4, 5, 4), dtype=np.uint8)
+    rgba[..., 0] = 255
+    rgba[..., 3] = 255
+    buf = BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/batch-results.zip",
+        json={
+            "items": [
+                {
+                    "source": "slicer",
+                    "filename": "icon_001_rgb.png",
+                    "rgba": data_url,
+                    "requested_backend": "auto",
+                    "algorithm": "pymatting-known-b",
+                    "execution_backend": "direct-pymatting-known-b",
+                    "execution_profile": "known-b",
+                    "server_elapsed_sec": 0.12,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["x-ermbg-batch-count"] == "1"
+    with zipfile.ZipFile(BytesIO(response.content)) as zf:
+        names = set(zf.namelist())
+        assert "manifest.json" in names
+        assert "summary.json" in names
+        case_manifest_name = next(name for name in names if name.endswith("/manifest.json"))
+        case_summary_name = next(name for name in names if name.endswith("/summary.json"))
+        manifest = json.loads(zf.read("manifest.json"))
+        case_manifest = json.loads(zf.read(case_manifest_name))
+        case_summary = json.loads(zf.read(case_summary_name))
+    assert manifest["schema"] == "ermbg.run.v1"
+    assert case_manifest["schema"] == "ermbg.run.v1"
+    assert case_manifest["outputs"]["rgba"] == "rgba.png"
+    assert case_summary["fixed_backend"] == "auto"
+    assert case_summary["actual_execution_backend"] == "direct-pymatting-known-b"
 
 
 def test_game_eval_page_serves_result_table():
@@ -1599,11 +1683,12 @@ def test_matte_candidates_endpoint_auto_direct_worker_falls_back_to_configured_b
     response = client.post(
         "/api/matte-candidates",
         files={"file": ("input.png", _png_bytes(), "image/png")},
-        data={"backend": "auto"},
+        data={"backend": "auto", "known_bg_glow_material_strength": "1.4"},
     )
 
     assert response.status_code == 200
     assert captured["backend"] == "pymatting-known-b"
+    assert "known_bg_glow_material_strength" not in captured
     payload = response.json()
     assert payload["backend"] == "auto"
     assert payload["requested_backend"] == "auto"

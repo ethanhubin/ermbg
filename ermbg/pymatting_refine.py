@@ -752,7 +752,20 @@ def _build_known_background_ownership(
         clean_bg_policy = "pre_normalization_ownership_background"
 
     dist_to_non_clean = cv2.distanceTransform(clean_bg.astype(np.uint8), cv2.DIST_L2, 3)
-    sure_bg = ((exterior_bg & clean_bg & (dist_to_non_clean >= 2.0)) | (enclosed_bg & clean_bg))
+    clean_bg_core = clean_bg & (dist_to_non_clean >= 2.0)
+    sure_bg = (exterior_bg | enclosed_bg) & clean_bg_core
+    if bool(enclosed_bg.any()):
+        enclosed_dist = cv2.distanceTransform(enclosed_bg.astype(np.uint8), cv2.DIST_L2, 3)
+        # Enclosed same-B cutouts should have a real clean interior. Thin
+        # subject-adjacent same-screen islands, usually caused by contact shadow
+        # or AA closing around a background-colored strip, are not reliable
+        # sure-BG evidence and must stay unknown for PyMatting.
+        enclosed_core_min_px = max(4.0, float(boundary_info["boundary_band_px_effective"]) + 2.0)
+        enclosed_core = enclosed_bg & (enclosed_dist >= enclosed_core_min_px)
+        sure_bg = (sure_bg & ~enclosed_bg) | (enclosed_core & clean_bg_core)
+    else:
+        enclosed_core_min_px = max(4.0, float(boundary_info["boundary_band_px_effective"]) + 2.0)
+        enclosed_core = enclosed_bg
     # Enclosed holes and exterior background use the same ownership standard:
     # enclosed_bg only says a region may be background, not that it may bypass
     # source shadow or subject-transition evidence. Clean hole centers remain
@@ -784,6 +797,8 @@ def _build_known_background_ownership(
         "clean_exterior_bg_pixels": int((exterior_bg & clean_bg).sum()),
         "exact_known_bg_pixels": int(exact_known_bg.sum()) if require_exact_bg else None,
         "sure_bg_clean_inset_px": 2.0,
+        "enclosed_bg_core_min_px": float(enclosed_core_min_px),
+        "enclosed_bg_core_pixels": int(enclosed_core.sum()),
         "enclosed_bg_pixels_raw": int(enclosed_bg_raw.sum()),
         **enclosed_info,
         "enclosed_bg_components": int(labels_count - 1),
@@ -968,7 +983,13 @@ def _same_key_opaque_lower_perimeter_ridge_trace(
     lab = srgb_to_oklab(image_srgb)
     bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
     dE = oklab_distance(lab, bg_lab).astype(np.float32)
-    exterior = _flood_exterior(dE <= float(bg_threshold))
+    # Same-key lower-ridge shape tracing uses a relaxed exterior threshold.
+    # The strict Known-B threshold is still used later for matting, but shape
+    # extraction needs to flood smooth same-screen exterior drift; otherwise
+    # darkened blue/green background strips attach to the body component and
+    # become proxy-painted subject residue.
+    shape_bg_threshold = max(float(bg_threshold), 7.0)
+    exterior = _flood_exterior(dE <= shape_bg_threshold)
     support = (~exterior).astype(np.uint8)
     labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(support, 8)
     if labels_count <= 1:
@@ -1033,7 +1054,11 @@ def _same_key_opaque_lower_perimeter_ridge_trace(
     # Same-key opaque plateau proves material opacity; this extra route signal
     # proves that the current outline recipe has enough measured perimeter-ridge
     # evidence to close the foreground body before PyMatting solves AA/shadow.
-    accepted = bool(trusted_fraction >= 0.55 and line_range <= max(6, int(round(comp_h * 0.08))))
+    # Lower-ridge buttons have a sustained horizontal perimeter signal near the
+    # bottom. Closed shapes such as circles can produce a short edge in the same
+    # band, but their trusted-column fraction stays lower; 0.58 keeps that
+    # fallback path available while accepting measured button ridges.
+    accepted = bool(trusted_fraction >= 0.58 and line_range <= max(6, int(round(comp_h * 0.08))))
     reason = "" if accepted else "body outline ridge is not sufficiently continuous for this recipe"
     yy, xx = np.indices((h, w))
     body_fill = broad_fill.astype(bool) & (yy <= line[xx])
@@ -1043,6 +1068,8 @@ def _same_key_opaque_lower_perimeter_ridge_trace(
         "outline_recipe": "lower_perimeter_ridge",
         "component_bbox_xyxy": [x, y, x + comp_w, y + comp_h],
         "component_aspect_ratio": aspect,
+        "shape_bg_threshold": float(shape_bg_threshold),
+        "matte_bg_threshold": float(bg_threshold),
         "ridge_band_y": [int(y0), int(y1 - 1)],
         "ridge_strength_min": 18.0,
         "support_columns": support_columns,
@@ -1176,6 +1203,128 @@ def _public_same_key_outline_trace(trace: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _same_key_opaque_stroke_core_from_component(
+    image_srgb: np.ndarray,
+    component: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build a proxy seed whose edge lands near the measured outline middle."""
+    component = np.asarray(component, dtype=bool)
+    if not component.any():
+        return component, {
+            "enabled": False,
+            "reason": "empty component",
+            "stroke_inset_px": 0,
+            "proxy_inset_px": 0,
+            "stroke_pixels": 0,
+        }
+
+    ys, xs = np.where(component)
+    bbox_w = int(xs.max() - xs.min() + 1)
+    bbox_h = int(ys.max() - ys.min() + 1)
+    min_dim = max(1, min(bbox_w, bbox_h))
+    dist = cv2.distanceTransform(component.astype(np.uint8), cv2.DIST_L2, 3)
+    max_dist = float(dist[component].max())
+    if max_dist < 3.0:
+        core = component & (dist > 1.0)
+        if core.any():
+            component_for_return = core
+        else:
+            component_for_return = component
+        return component_for_return, {
+            "enabled": False,
+            "reason": "component too thin to measure outline stroke",
+            "stroke_inset_px": 0,
+            "proxy_inset_px": 1 if core.any() else 0,
+            "stroke_pixels": int((component & ~component_for_return).sum()),
+        }
+
+    # Probe only the first few percent of the measured component radius. The
+    # signal is the abrupt Oklab color falloff from the hard outline into the
+    # button body; limiting the search prevents interior gradients/highlights
+    # from being mistaken for extra stroke.
+    max_probe_px = int(max(4, min(18, round(float(min_dim) * 0.08), np.floor(max_dist * 0.45))))
+    core_floor = min(float(max_probe_px + 2), max(3.0, max_dist * 0.45))
+    interior_seed = component & (dist >= core_floor)
+    if int(interior_seed.sum()) < 32:
+        interior_seed = component & (dist >= max_dist * 0.35)
+    if int(interior_seed.sum()) < 32:
+        proxy_inset_px = 1
+        core = component & (dist > float(proxy_inset_px))
+        core = np.asarray(ndimage.binary_fill_holes(core), dtype=bool)
+        if not core.any():
+            core = component
+            proxy_inset_px = 0
+        return core, {
+            "enabled": False,
+            "reason": "not enough interior pixels to measure outline stroke",
+            "stroke_inset_px": 0,
+            "proxy_inset_px": int(proxy_inset_px),
+            "stroke_pixels": int((component & ~core).sum()),
+            "max_probe_px": int(max_probe_px),
+        }
+
+    lab = srgb_to_oklab(image_srgb)
+    interior_lab = np.median(lab[interior_seed], axis=0)
+    body_delta = oklab_distance(lab, interior_lab).astype(np.float32)
+    ring_medians: list[float] = []
+    for radius in range(1, max_probe_px + 1):
+        ring = component & (dist > float(radius - 1)) & (dist <= float(radius))
+        ring_medians.append(float(np.median(body_delta[ring])) if ring.any() else 0.0)
+
+    if len(ring_medians) < 2:
+        stroke_inset_px = 0
+        strongest_drop = 0.0
+    else:
+        drops = np.asarray(ring_medians[:-1], dtype=np.float32) - np.asarray(ring_medians[1:], dtype=np.float32)
+        search_limit = max(2, min(len(drops), int(round(float(max_probe_px) * 0.65))))
+        limited_drops = drops[:search_limit]
+        best_index = int(np.argmax(limited_drops))
+        strongest_drop = float(limited_drops[best_index])
+        core_delta_floor = float(np.percentile(body_delta[interior_seed], 75) + 6.0)
+        before = ring_medians[best_index]
+        after = ring_medians[best_index + 1]
+        # A valid outline boundary has a visible perceptual drop and lands near
+        # the measured body-color spread. This protects soft body gradients from
+        # being over-eroded while still excluding thick dark strokes.
+        if strongest_drop >= 4.0 and before >= core_delta_floor and after <= before - 4.0:
+            stroke_inset_px = best_index + 1
+        else:
+            stroke_inset_px = 0
+
+    # Proxy painting only needs to stay off the outer AA boundary. Placing the
+    # proxy edge just inside the measured stroke midpoint keeps exterior AA in
+    # the solve while avoiding an over-large inset that would let same-key body
+    # pixels be solved as translucent. If the stroke signal is weak, default to
+    # a minimal 1px inset instead of trusting the outer component edge.
+    proxy_inset_px = max(1, int(stroke_inset_px // 2) + 1) if stroke_inset_px > 0 else 1
+    core = component & (dist > float(proxy_inset_px))
+    if core.any():
+        core = np.asarray(ndimage.binary_fill_holes(core), dtype=bool)
+        labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), 8)
+        if labels_count <= 1:
+            core = component
+            proxy_inset_px = 0
+        else:
+            label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            core = labels == label
+    else:
+        core = component
+        proxy_inset_px = 0
+
+    stroke_mask = component & ~core
+    return core, {
+        "enabled": bool(stroke_inset_px > 0),
+        "method": "oklab_radial_drop",
+        "stroke_inset_px": int(stroke_inset_px),
+        "proxy_inset_px": int(proxy_inset_px),
+        "stroke_pixels": int(stroke_mask.sum()),
+        "max_probe_px": int(max_probe_px),
+        "interior_seed_pixels": int(interior_seed.sum()),
+        "ring_median_body_delta": [round(float(v), 3) for v in ring_medians],
+        "strongest_drop": round(float(strongest_drop), 3),
+    }
+
+
 def _build_same_key_opaque_body_outline_trimap(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -1235,11 +1384,10 @@ def build_same_key_opaque_proxy_subject_mask(
     """Build the subject-domain mask used for same-key proxy color replacement.
 
     Same-key opaque UI can have body pixels that are almost identical to the
-    screen color. A hard body mask is not enough: antialiased corners left in
-    the original color look like background to PyMatting and get erased. The
-    one-pixel expansion is intentionally tied to the measured outline trace and
-    reused for both proxy painting and source-color restoration, so the solver
-    sees subject evidence without leaking restored blue into the shadow layer.
+    screen color. The proxy edge is measured from the component and usually
+    placed near the outline midpoint. Callers can request a small expansion for
+    legacy recipes, but the same final mask is always reused for proxy painting
+    and source-color restoration so the two phases cannot disagree.
     """
     bg = np.asarray(background_color, dtype=np.uint8)
     trace = _same_key_opaque_body_outline_trace(
@@ -1250,7 +1398,23 @@ def build_same_key_opaque_proxy_subject_mask(
     if not trace.get("accepted", False):
         raise ValueError(f"same-key proxy subject route contract failed: {trace.get('reason', 'unknown')}")
 
-    body_fill = np.asarray(trace["body_fill"], dtype=bool)
+    stroke_info: dict[str, Any] = {
+        "enabled": False,
+        "stroke_inset_px": 0,
+        "stroke_pixels": 0,
+    }
+    if trace.get("outline_recipe") == "lower_perimeter_ridge" and "broad_fill" in trace:
+        # For same-key lower-ridge assets the relaxed dE7 component is the
+        # measured subject extent. Before proxy painting, place the proxy edge
+        # near the measured stroke midpoint; the outer AA must stay in PyMatting
+        # while the proxy still covers enough same-key body to avoid translucency.
+        measured_component = np.asarray(trace["broad_fill"], dtype=bool)
+        body_fill, stroke_info = _same_key_opaque_stroke_core_from_component(image_srgb, measured_component)
+        proxy_source = "relaxed_component_stroke_core"
+    else:
+        measured_component = np.asarray(trace["body_fill"], dtype=bool)
+        body_fill, stroke_info = _same_key_opaque_stroke_core_from_component(image_srgb, measured_component)
+        proxy_source = "body_fill_stroke_core" if stroke_info.get("enabled", False) else "body_fill"
     body_labels_count, body_labels, body_stats, _ = cv2.connectedComponentsWithStats(body_fill.astype(np.uint8), 8)
     if body_labels_count <= 1:
         raise ValueError("same-key proxy subject mask body fill is empty after outline trace")
@@ -1272,6 +1436,8 @@ def build_same_key_opaque_proxy_subject_mask(
         "enabled": True,
         **_public_same_key_outline_trace(trace),
         "method": "same_key_opaque_proxy_subject_mask",
+        "proxy_source": proxy_source,
+        "stroke_outline": stroke_info,
         "expand_px": int(expand),
         "body_pixels": int(body_fill.sum()),
         "mask_pixels": int(proxy_mask.sum()),
@@ -2057,7 +2223,13 @@ def _otsu_float_threshold(values: np.ndarray) -> float | None:
     return float(centers[idx])
 
 
-def estimate_stable_background_color(image_srgb: np.ndarray) -> tuple[tuple[int, int, int], dict[str, Any]]:
+def estimate_stable_background_color(
+    image_srgb: np.ndarray,
+    *,
+    seed_bg: tuple[int, int, int] | np.ndarray | None = None,
+    seed_source: str = "external",
+    seed_info: dict[str, Any] | None = None,
+) -> tuple[tuple[int, int, int], dict[str, Any]]:
     """Estimate the single known-B/sure-background color for routing.
 
     The corners/border mode are only seed evidence: they find a plausible
@@ -2069,24 +2241,45 @@ def estimate_stable_background_color(image_srgb: np.ndarray) -> tuple[tuple[int,
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("image_srgb must be HxWx3 uint8")
 
-    seed_bg, seed_info = _estimate_known_background_seed(image_srgb)
-    if not seed_info.get("accepted", False):
-        return seed_bg, {
-            **seed_info,
+    if seed_bg is None:
+        selected_seed_bg, selected_seed_info = _estimate_known_background_seed(image_srgb)
+        support_bg_threshold_cap = None
+    else:
+        selected_seed_bg = tuple(int(np.clip(c, 0, 255)) for c in np.asarray(seed_bg).reshape(3))
+        selected_seed_info = {
+            "accepted": True,
+            "reason": "accepted_external_seed",
+            "source": str(seed_source),
+            "background_color": [int(c) for c in selected_seed_bg],
+            **(seed_info or {}),
+        }
+        # External route-layer seeds are anchors, not permission to grow the
+        # background family across the subject. The stable estimator still
+        # refines the final color from support, but support must stay inside
+        # the requested known-B foreground threshold so dominant subject colors
+        # cannot take over when UI fills most of the frame.
+        support_bg_threshold_cap = 24.0
+    if not selected_seed_info.get("accepted", False):
+        return selected_seed_bg, {
+            **selected_seed_info,
             "accepted": False,
-            "reason": seed_info.get("reason", "corner/background border is unstable"),
+            "reason": selected_seed_info.get("reason", "corner/background border is unstable"),
             "source": "sure_bg_mode",
-            "seed": seed_info,
+            "seed": selected_seed_info,
         }
 
-    support, support_info = _known_background_support_from_seed(image_srgb, seed_bg)
+    support, support_info = _known_background_support_from_seed(
+        image_srgb,
+        selected_seed_bg,
+        bg_threshold_cap=support_bg_threshold_cap,
+    )
     min_support = max(32, int(round(float(image_srgb.shape[0] * image_srgb.shape[1]) * 0.01)))
     if int(support.sum()) < min_support:
-        return seed_bg, {
+        return selected_seed_bg, {
             "accepted": False,
             "reason": "insufficient sure background support",
             "source": "sure_bg_mode",
-            "seed": seed_info,
+            "seed": selected_seed_info,
             **support_info,
         }
 
@@ -2095,7 +2288,7 @@ def estimate_stable_background_color(image_srgb: np.ndarray) -> tuple[tuple[int,
         "accepted": True,
         "reason": "accepted",
         "source": "sure_bg_mode",
-        "seed": seed_info,
+        "seed": selected_seed_info,
         **support_info,
         **color_info,
     }
@@ -2156,12 +2349,23 @@ def _estimate_known_background_seed(image_srgb: np.ndarray) -> tuple[tuple[int, 
 def _known_background_support_from_seed(
     image_srgb: np.ndarray,
     seed_bg: tuple[int, int, int],
+    *,
+    bg_threshold_cap: float | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     seed = np.asarray(seed_bg, dtype=np.uint8)
     lab = srgb_to_oklab(image_srgb)
     seed_lab = srgb_to_oklab(seed.reshape(1, 1, 3))[0, 0]
     distance = oklab_distance(lab, seed_lab)
     thresholds = _adaptive_known_background_thresholds(distance, image_srgb, seed, 3.5, 24.0)
+    if bg_threshold_cap is not None:
+        capped_bg_threshold = min(float(thresholds["bg_threshold_effective"]), float(bg_threshold_cap))
+        thresholds = {
+            **thresholds,
+            "bg_threshold_uncapped": float(thresholds["bg_threshold_effective"]),
+            "bg_threshold_effective": float(capped_bg_threshold),
+            "bg_threshold_cap": float(bg_threshold_cap),
+            "bg_threshold_source": "external_seed_cap",
+        }
     bg_close = distance <= float(thresholds["bg_threshold_effective"])
     exterior_bg = _flood_from_border(bg_close)
     enclosed_bg, enclosed_info = _filter_enclosed_background_components(bg_close & ~exterior_bg)

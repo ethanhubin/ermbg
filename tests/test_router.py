@@ -166,6 +166,24 @@ def test_route_hard_button_uses_pymatting_known_b():
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
 
 
+def test_route_hard_button_uses_known_corridor_screen_color_when_subject_dominates_frame():
+    img = np.full((148, 307, 3), (5, 132, 250), dtype=np.uint8)
+    cv2.rectangle(img, (4, 4), (302, 124), (253, 130, 4), -1, cv2.LINE_AA)
+    cv2.rectangle(img, (4, 4), (302, 124), (255, 220, 80), 3, cv2.LINE_AA)
+    cv2.rectangle(img, (8, 126), (299, 143), (140, 70, 5), -1, cv2.LINE_AA)
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.params["pymatting_bg_color"] == (5, 132, 250)
+    assert decision.params["pymatting_auto_adapt"] is False
+    assert decision.analysis["stable_background"]["source"] == "sure_bg_mode"
+    assert decision.analysis["stable_background"]["seed"]["source"] == "route_screen_analysis"
+    assert decision.analysis["stable_background"]["bg_threshold_source"] == "external_seed_cap"
+
+
 def test_route_translucent_button_uses_corridorkey():
     path = (
         Path(__file__).resolve().parents[1]

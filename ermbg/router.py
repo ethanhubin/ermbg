@@ -562,6 +562,7 @@ def _pymatting_route_params(
     execution_profile: str = "pymatting-known-b",
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
+    auto_adapt: bool = True,
 ) -> dict[str, Any]:
     return {
         "execution_profile": execution_profile,
@@ -572,7 +573,7 @@ def _pymatting_route_params(
         "pymatting_bg_threshold": 3.5,
         "pymatting_fg_threshold": 24.0,
         "pymatting_boundary_band_px": 2,
-        "pymatting_auto_adapt": True,
+        "pymatting_auto_adapt": bool(auto_adapt),
         "pymatting_cg_maxiter": 1000,
         "pymatting_cg_rtol": 1e-6,
         "pymatting_trimap_mode": trimap_mode,
@@ -830,7 +831,18 @@ def classify_route(
             analysis=analysis,
         )
 
-    stable_bg, stable_info = estimate_stable_background_color(image_srgb)
+    stable_bg, stable_info = estimate_stable_background_color(
+        image_srgb,
+        seed_bg=ck.background_color if known_corridor_screen else None,
+        seed_source="route_screen_analysis",
+        seed_info={
+            "screen_mode": ck.screen_mode,
+            "background_confidence": float(ck.background_confidence),
+            "border_coverage": dict(ck.border_coverage),
+        }
+        if known_corridor_screen
+        else None,
+    )
     analysis["stable_background"] = stable_info
     if stable_info.get("accepted", False):
         trimap_mode = "standard"
@@ -874,6 +886,7 @@ def classify_route(
                 execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
                 trimap_mode=trimap_mode,
                 unknown_grow_px=unknown_grow_px,
+                auto_adapt=not known_corridor_screen,
             ),
             confidence=float(max(0.45, ck.background_confidence, 0.80)),
             reasons=reasons,

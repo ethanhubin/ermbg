@@ -1,4 +1,4 @@
-"""Small web UI for ERMBG.
+﻿"""Small web UI for ERMBG.
 
 The service keeps the browser flow intentionally narrow: upload one image,
 run ``matte_image``, preview the returned RGBA PNG, and download it.
@@ -357,7 +357,6 @@ def artifact_detail(artifact_id: str) -> dict[str, Any]:
     }
 
 
-@app.get("/artifacts", response_class=HTMLResponse)
 def artifacts_page() -> str:
     return """<!doctype html>
 <html lang="zh-CN">
@@ -509,10 +508,12 @@ def _matte_page_html() -> str:
     :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
     * { box-sizing: border-box; }
     body { margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
-    header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
-    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
-    .header-actions { min-width: 0; display: flex; align-items: center; gap: 14px; }
-    .nav-link { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .app-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    .primary-tabs { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 4px; overflow-x: auto; }
+    .nav-tab { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 6px; color: #47524c; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .nav-tab.is-active { background: #196f5a; color: #ffffff; }
+    .header-right { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+    .eval-link { color: #196f5a; font-size: 13px; font-weight: 900; text-decoration: none; white-space: nowrap; }
     .runtime-status { min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; }
     .runtime-pill { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid #d2dad0; border-radius: 999px; background: #f7faf6; color: #5d6862; font-size: 12px; font-weight: 800; white-space: nowrap; }
     .runtime-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #9aa59e; }
@@ -574,7 +575,7 @@ def _matte_page_html() -> str:
     .mask-mode-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
     #mask-brush-size { width: 104px; min-height: 32px; }
     .mask-actions { display: flex; gap: 8px; flex: 0 0 auto; }
-    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 112px 56px; overflow: hidden; }
+    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 104px 56px; overflow: hidden; }
     .preview > .preview-bar { grid-row: 1; }
     .preview > .mask-toolbar { grid-row: 2; }
     .preview > .canvas { grid-row: 3; }
@@ -599,10 +600,10 @@ def _matte_page_html() -> str:
     .canvas.bg-green { background: #00c853; }
     .canvas.bg-blue { background: #4aa3ff; }
     img { max-width: 100%; max-height: 68vh; object-fit: contain; image-rendering: auto; }
-    .canvas img { max-width: 100%; max-height: 100%; }
+    .canvas img { max-width: 100%; max-height: 100%; -webkit-user-drag: none; user-select: none; }
     .result-image { width: 100%; height: 100%; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
-    .candidate-panel { height: 112px; min-height: 112px; max-height: 112px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
+    .candidate-panel { height: 104px; min-height: 104px; max-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
     .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }
     .preview.is-mask-mode .candidate-panel { display: none; min-height: 0; padding: 0; border: 0; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
@@ -616,17 +617,19 @@ def _matte_page_html() -> str:
   </style>
 </head>
 <body>
-  <header>
-    <h1>ERMBG</h1>
-    <div class="header-actions">
-      <a class="nav-link" href="/slice">切图</a>
-      <a class="nav-link" href="/eval/game">Game Eval</a>
-      <a class="nav-link" href="/artifacts">Artifacts</a>
+  <header class="app-header">
+    <nav class="primary-tabs" aria-label="主导航">
+      <a class="nav-tab" href="/slice">切图</a>
+      <a class="nav-tab is-active" href="/" aria-current="page">抠图</a>
+      <a class="nav-tab" href="/batch">批量抠图</a>
+    </nav>
+    <div class="header-right">
       <span class="runtime-status" id="runtime-status" aria-live="polite">
         <span class="runtime-pill" data-runtime="local">Local</span>
         <span class="runtime-pill" data-runtime="direct">Direct</span>
       </span>
       <span class="status" id="strategy">就绪</span>
+      <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
     </div>
   </header>
   <main>
@@ -872,6 +875,7 @@ def _matte_page_html() -> str:
     window.addEventListener("resize", () => layoutMaskCanvas());
     viewTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewView(tab.dataset.view)));
     backgroundTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
+    [canvas, previewStage, sourceFrame, sourcePreview].forEach((element) => { ["dragstart", "dragover", "drop"].forEach((type) => element.addEventListener(type, (event) => event.preventDefault())); });
     canvas.addEventListener("wheel", (event) => { if (activeView === "mask") { if (!sourceImage) return; event.preventDefault(); const rect = sourceFrame.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = maskScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; maskScale = Math.min(8, Math.max(1, maskScale * factor)); maskPanX = pointerX - ((pointerX - maskPanX) * maskScale) / previousScale; maskPanY = pointerY - ((pointerY - maskPanY) * maskScale) / previousScale; if (maskScale === 1) { maskPanX = 0; maskPanY = 0; } applyMaskTransform(); return; } if (!resultImage) return; event.preventDefault(); const rect = canvas.getBoundingClientRect(); const centerX = rect.left + rect.width / 2; const centerY = rect.top + rect.height / 2; const pointerX = event.clientX - centerX; const pointerY = event.clientY - centerY; const previousScale = previewScale; const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12; previewScale = Math.min(8, Math.max(0.2, previewScale * factor)); previewPanX = pointerX - ((pointerX - previewPanX) * previewScale) / previousScale; previewPanY = pointerY - ((pointerY - previewPanY) * previewScale) / previousScale; applyPreviewTransform(); }, { passive: false });
     canvas.addEventListener("pointerdown", (event) => { if (activeView === "mask" || !resultImage) return; dragStart = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: previewPanX, panY: previewPanY }; canvas.setPointerCapture(event.pointerId); canvas.classList.add("is-dragging"); });
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
@@ -958,34 +962,12 @@ def _matte_page_html() -> str:
       display: grid;
       grid-template-rows: auto 1fr;
     }
-    header {
-      height: 56px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 24px;
-      border-bottom: 1px solid #d9dfd7;
-      background: #ffffff;
-    }
-    h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: 0;
-    }
-    .header-actions {
-      min-width: 0;
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-    .nav-link {
-      color: #196f5a;
-      font-size: 13px;
-      font-weight: 800;
-      text-decoration: none;
-      white-space: nowrap;
-    }
+    .app-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    .primary-tabs { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 4px; overflow-x: auto; }
+    .nav-tab { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 6px; color: #47524c; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .nav-tab.is-active { background: #196f5a; color: #ffffff; }
+    .header-right { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+    .eval-link { color: #196f5a; font-size: 13px; font-weight: 900; text-decoration: none; white-space: nowrap; }
     main {
       width: min(1120px, 100%);
       margin: 0 auto;
@@ -1371,7 +1353,7 @@ def _matte_page_html() -> str:
       white-space: nowrap;
     }
     @media (max-width: 760px) {
-      header { padding: 0 16px; }
+      .app-header { padding: 0 16px; }
       main {
         grid-template-columns: 1fr;
         padding: 16px;
@@ -1401,11 +1383,15 @@ def _matte_page_html() -> str:
   </style>
 </head>
 <body>
-  <header>
-    <h1>ERMBG</h1>
-    <div class="header-actions">
-      <a class="nav-link" href="/eval/game">Game Eval</a>
+  <header class="app-header">
+    <nav class="primary-tabs" aria-label="主导航">
+      <a class="nav-tab" href="/slice">切图</a>
+      <a class="nav-tab is-active" href="/" aria-current="page">抠图</a>
+      <a class="nav-tab" href="/batch">批量抠图</a>
+    </nav>
+    <div class="header-right">
       <span class="status" id="strategy">就绪</span>
+      <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
     </div>
   </header>
   <main>
@@ -1991,6 +1977,347 @@ def slice_page() -> str:
     return _slice_page_html()
 
 
+@app.get("/batch", response_class=HTMLResponse)
+def batch_page() -> str:
+    return _batch_page_html()
+
+
+@app.post("/api/batch-results.zip")
+def batch_results_zip_endpoint(payload: Annotated[dict[str, Any], Body()]) -> Response:
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise HTTPException(status_code=400, detail="items must contain at least one successful result")
+    items = [item for item in raw_items if isinstance(item, dict) and item.get("rgba")]
+    if not items:
+        raise HTTPException(status_code=400, detail="items must contain at least one rgba result")
+    batch_dir, content, filename = _write_batch_result_artifacts(items)
+    rel_dir = str(batch_dir.relative_to(PROJECT_ROOT)) if _is_relative_to(batch_dir, PROJECT_ROOT) else str(batch_dir)
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-ERMBG-Batch-Dir": rel_dir,
+            "X-ERMBG-Batch-Count": str(len(items)),
+        },
+    )
+
+
+def _batch_page_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ERMBG Batch Matte</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    .app-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    .primary-tabs { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 4px; overflow-x: auto; }
+    .nav-tab { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 6px; color: #47524c; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .nav-tab.is-active { background: #196f5a; color: #ffffff; }
+    .header-right { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+    .eval-link { color: #196f5a; font-size: 13px; font-weight: 900; text-decoration: none; white-space: nowrap; }
+    main { width: min(1220px, 100%); margin: 0 auto; padding: 20px 24px 28px; display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 20px; align-items: start; }
+    .panel { min-width: 0; border: 1px solid #d9dfd7; border-radius: 8px; background: #ffffff; overflow: hidden; }
+    .controls { padding: 16px; display: grid; gap: 12px; }
+    label { display: grid; gap: 8px; color: #47524c; font-size: 13px; font-weight: 800; }
+    input, select, button { min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
+    input[type="file"] { padding: 8px; }
+    button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
+    button.secondary { border: 1px solid #b8c1b7; background: #f7faf6; color: #196f5a; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .dropzone { min-height: 112px; display: grid; place-items: center; padding: 14px; border: 1px dashed #9fb0a7; border-radius: 8px; background: #f8fbf7; color: #5d6862; text-align: center; font-size: 13px; font-weight: 700; }
+    .dropzone.is-over { border-color: #196f5a; background: #eaf4ef; }
+    .toolbar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .status { min-width: 0; color: #5d6862; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .queue { display: grid; grid-template-rows: 48px minmax(420px, calc(100vh - 152px)); }
+    .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
+    .list { min-height: 0; overflow: auto; }
+    .row { min-width: 720px; display: grid; grid-template-columns: 64px minmax(160px, 1fr) 116px 150px 104px; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #edf1eb; }
+    .row:last-child { border-bottom: 0; }
+    .thumb { width: 56px; height: 56px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
+    .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .info { min-width: 0; display: grid; gap: 3px; }
+    .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 800; }
+    .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5d6862; font-size: 12px; }
+    .pill { width: max-content; max-width: 110px; padding: 4px 8px; border-radius: 999px; background: #edf1eb; color: #47524c; font-size: 12px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pill.done { background: #dff2e7; color: #196f5a; }
+    .pill.failed { background: #ffe8e1; color: #a33a22; }
+    .actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .actions a, .actions button { min-width: 44px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 9px; border-radius: 6px; font-size: 12px; }
+    .empty { padding: 18px; color: #6a746f; font-size: 14px; }
+    @media (max-width: 860px) { .app-header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .queue { grid-template-rows: 48px 520px; } }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="primary-tabs" aria-label="主导航">
+      <a class="nav-tab" href="/slice">切图</a>
+      <a class="nav-tab" href="/">抠图</a>
+      <a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>
+    </nav>
+    <div class="header-right">
+      <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
+    </div>
+  </header>
+  <main>
+    <section class="panel controls">
+      <label>上传图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple></label>
+      <div class="dropzone" id="dropzone">拖拽多张图片到这里，或使用上方文件选择</div>
+      <label>后端<select id="backend"><option value="auto" selected>Auto Route</option></select></label>
+      <div class="toolbar">
+        <button id="start" type="button" disabled>开始全部</button>
+        <button id="retry" class="secondary" type="button" disabled>重试失败</button>
+        <button id="zip" type="button" disabled>下载 ZIP</button>
+        <button id="clear" class="secondary" type="button" disabled>清空队列</button>
+      </div>
+      <span class="status" id="status">等待添加图片</span>
+    </section>
+    <section class="panel queue">
+      <div class="bar"><strong>队列</strong><span class="status" id="count">0 项</span></div>
+      <div class="list" id="list"><div class="empty">批量队列会显示在这里</div></div>
+    </section>
+  </main>
+  <script>
+    const file = document.getElementById("file");
+    const dropzone = document.getElementById("dropzone");
+    const backend = document.getElementById("backend");
+    const startButton = document.getElementById("start");
+    const retryButton = document.getElementById("retry");
+    const zipButton = document.getElementById("zip");
+    const clearButton = document.getElementById("clear");
+    const statusEl = document.getElementById("status");
+    const countEl = document.getElementById("count");
+    const list = document.getElementById("list");
+    let queue = [];
+    let running = false;
+    let nextId = 1;
+
+    function dataUrlToFile(dataUrl, filename) {
+      const [header, base64] = dataUrl.split(",");
+      const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png";
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      return new File([bytes], filename, { type: mime });
+    }
+
+    function addFiles(files, source = "upload") {
+      Array.from(files || []).forEach((item) => {
+        const fileObj = item instanceof File ? item : dataUrlToFile(item.rgb, item.filename || "slice.png");
+        const previewUrl = item.rgb || URL.createObjectURL(fileObj);
+        queue.push({
+          id: `item-${nextId++}`,
+          source,
+          file: fileObj,
+          name: item.name || fileObj.name,
+          filename: fileObj.name,
+          previewUrl,
+          meta: item.meta || source,
+          status: "queued",
+          message: "等待",
+          result: null,
+        });
+      });
+      render();
+    }
+
+    function selectedCandidate(payload) {
+      const candidates = payload.candidates || [];
+      return candidates.find((candidate) => candidate.selected) || candidates[0] || null;
+    }
+
+    function statusLabel(item) {
+      if (item.status === "running") return "处理中";
+      if (item.status === "done") return "成功";
+      if (item.status === "failed") return "失败";
+      return "等待";
+    }
+
+    function render() {
+      const done = queue.filter((item) => item.status === "done").length;
+      const failed = queue.filter((item) => item.status === "failed").length;
+      countEl.textContent = `${queue.length} 项 · ${done} 成功 · ${failed} 失败`;
+      startButton.disabled = running || !queue.some((item) => item.status === "queued");
+      retryButton.disabled = running || !queue.some((item) => item.status === "failed");
+      zipButton.disabled = running || !done;
+      clearButton.disabled = running || !queue.length;
+      if (!queue.length) {
+        list.innerHTML = '<div class="empty">批量队列会显示在这里</div>';
+        statusEl.textContent = "等待添加图片";
+        return;
+      }
+      list.innerHTML = "";
+      queue.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const thumb = document.createElement("span");
+        thumb.className = "thumb";
+        const img = document.createElement("img");
+        img.src = item.result && item.result.rgba ? item.result.rgba : item.previewUrl;
+        img.alt = item.name;
+        thumb.appendChild(img);
+        const info = document.createElement("span");
+        info.className = "info";
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = item.name;
+        const meta = document.createElement("span");
+        meta.className = "meta";
+        meta.textContent = item.message || item.meta || "";
+        info.appendChild(name);
+        info.appendChild(meta);
+        const state = document.createElement("span");
+        state.className = `pill ${item.status}`;
+        state.textContent = statusLabel(item);
+        const backendText = document.createElement("span");
+        backendText.className = "meta";
+        backendText.textContent = item.result ? [item.result.algorithm, item.result.execution_backend, item.result.execution_profile].filter(Boolean).join(" · ") : item.source;
+        const actions = document.createElement("span");
+        actions.className = "actions";
+        if (item.status === "done" && item.result) {
+          const download = document.createElement("a");
+          download.href = item.result.rgba;
+          download.download = item.result.filename || `${item.name.replace(/\\.[^.]+$/, "")}_rgba.png`;
+          download.textContent = "下载";
+          actions.appendChild(download);
+        }
+        if (item.status === "failed") {
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "secondary";
+          retry.textContent = "重试";
+          retry.addEventListener("click", () => { item.status = "queued"; item.message = "等待重试"; render(); processQueue(); });
+          actions.appendChild(retry);
+        }
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(state);
+        row.appendChild(backendText);
+        row.appendChild(actions);
+        list.appendChild(row);
+      });
+    }
+
+    async function processItem(item) {
+      item.status = "running";
+      item.message = "正在提交 backend=auto";
+      render();
+      const formData = new FormData();
+      formData.append("file", item.file);
+      formData.append("backend", backend.value || "auto");
+      formData.append("shadow_mode", "auto");
+      formData.append("parameter_source", "auto");
+      const startedAt = performance.now();
+      const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
+      if (!response.ok) {
+        let message = "处理失败";
+        try { message = (await response.json()).detail || message; } catch (_) {}
+        throw new Error(message);
+      }
+      const payload = await response.json();
+      const candidate = selectedCandidate(payload);
+      if (!candidate || !candidate.rgba) throw new Error("没有可下载的 RGBA 结果");
+      item.status = "done";
+      item.message = `${((performance.now() - startedAt) / 1000).toFixed(2)}s`;
+      item.result = {
+        source: item.source,
+        filename: item.filename,
+        name: item.name,
+        rgba: candidate.rgba,
+        requested_backend: payload.requested_backend || backend.value || "auto",
+        algorithm: payload.algorithm,
+        route: payload.route,
+        parameter_profile: payload.parameter_profile,
+        execution_profile: payload.execution_profile,
+        execution_backend: payload.execution_backend,
+        execution_url: payload.execution_url,
+        server_elapsed_sec: payload.server_elapsed_sec,
+      };
+    }
+
+    async function processQueue() {
+      if (running) return;
+      running = true;
+      render();
+      try {
+        for (const item of queue) {
+          if (item.status !== "queued") continue;
+          try {
+            await processItem(item);
+          } catch (error) {
+            item.status = "failed";
+            item.message = error.message;
+          }
+          render();
+        }
+      } finally {
+        running = false;
+        const done = queue.filter((item) => item.status === "done").length;
+        const failed = queue.filter((item) => item.status === "failed").length;
+        statusEl.textContent = `完成 ${done} 项${failed ? ` · ${failed} 失败` : ""}`;
+        render();
+      }
+    }
+
+    async function downloadZip() {
+      const items = queue.filter((item) => item.status === "done" && item.result).map((item) => item.result);
+      if (!items.length) return;
+      zipButton.disabled = true;
+      statusEl.textContent = "正在打包 ZIP";
+      try {
+        const response = await fetch("/api/batch-results.zip", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        });
+        if (!response.ok) throw new Error((await response.json()).detail || "打包失败");
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "ermbg-batch-results.zip";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        statusEl.textContent = `已打包 ${items.length} 项`;
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        render();
+      }
+    }
+
+    file.addEventListener("change", () => addFiles(file.files, "upload"));
+    startButton.addEventListener("click", processQueue);
+    retryButton.addEventListener("click", () => { queue.forEach((item) => { if (item.status === "failed") { item.status = "queued"; item.message = "等待重试"; } }); processQueue(); });
+    zipButton.addEventListener("click", downloadZip);
+    clearButton.addEventListener("click", () => { queue = []; render(); });
+    ["dragenter", "dragover"].forEach((name) => dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.add("is-over"); }));
+    ["dragleave", "drop"].forEach((name) => dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.remove("is-over"); }));
+    dropzone.addEventListener("drop", (event) => addFiles(event.dataTransfer.files, "upload"));
+
+    try {
+      const pending = JSON.parse(sessionStorage.getItem("ermbgBatchQueue") || "null");
+      if (pending && Array.isArray(pending.items)) {
+        sessionStorage.removeItem("ermbgBatchQueue");
+        addFiles(pending.items, pending.source || "slicer");
+        statusEl.textContent = `已接收来自切图的 ${pending.items.length} 项`;
+      } else {
+        render();
+      }
+    } catch (_) {
+      render();
+    }
+  </script>
+</body>
+</html>"""
+
+
 def _slice_page_html() -> str:
     return _inject_backend_options("""<!doctype html>
 <html lang="zh-CN">
@@ -2002,9 +2329,12 @@ def _slice_page_html() -> str:
     :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1c2320; background: #f5f7f4; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
-    header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
-    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
-    a { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .app-header { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid #d9dfd7; background: #ffffff; }
+    .primary-tabs { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 4px; overflow-x: auto; }
+    .nav-tab { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 12px; border-radius: 6px; color: #47524c; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
+    .nav-tab.is-active { background: #196f5a; color: #ffffff; }
+    .header-right { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-width: 0; }
+    .eval-link { color: #196f5a; font-size: 13px; font-weight: 900; text-decoration: none; white-space: nowrap; }
     main { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; grid-template-columns: 320px 1fr; gap: 24px; align-items: start; }
     form, .workspace { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
     form { min-width: 0; min-height: 640px; max-height: 640px; padding: 16px; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: 12px; overflow: hidden; }
@@ -2014,6 +2344,7 @@ def _slice_page_html() -> str:
     button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .preview, .thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
     .workspace { min-height: 640px; display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
     .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
@@ -2034,17 +2365,23 @@ def _slice_page_html() -> str:
     .meta { min-width: 0; font-size: 11px; line-height: 1.25; font-weight: 600; color: #5d6862; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .row-actions { width: 96px; min-width: 96px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; align-items: center; }
     .row-action { width: 100%; min-width: 0; height: 30px; min-height: 30px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px; font-size: 12px; line-height: 1; visibility: hidden; }
-    .row-download { visibility: visible; background: #edf4ef; color: #196f5a; text-decoration: none; font-weight: 800; }
-    .row[aria-selected="true"] .row-action { visibility: visible; }
+    .row-download { background: #edf4ef; color: #196f5a; text-decoration: none; font-weight: 800; }
+    .row:hover .row-action, .row:focus-within .row-action { visibility: visible; }
     .selected-actions { display: none; gap: 8px; }
     .selected-actions.is-visible { display: grid; }
-    @media (max-width: 760px) { header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } form { min-height: 520px; } .workspace { min-height: 520px; } .preview { min-height: 320px; } }
+    @media (max-width: 760px) { .app-header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } form { min-height: 520px; } .workspace { min-height: 520px; } .preview { min-height: 320px; } }
   </style>
 </head>
 <body>
-  <header>
-    <h1>ERMBG 切图</h1>
-    <a href="/">返回抠图</a>
+  <header class="app-header">
+    <nav class="primary-tabs" aria-label="主导航">
+      <a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>
+      <a class="nav-tab" href="/">抠图</a>
+      <a class="nav-tab" href="/batch">批量抠图</a>
+    </nav>
+    <div class="header-right">
+      <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
+    </div>
   </header>
   <main>
     <form id="slice-form">
@@ -2053,10 +2390,13 @@ def _slice_page_html() -> str:
         <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
         <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
       </div>
-      <button id="confirm" type="button" disabled>切图</button>
+      <div class="slice-actions-main">
+        <button id="preview-button" type="button" disabled>预览</button>
+        <button id="confirm" type="button" disabled>切图</button>
+      </div>
       <div class="left-list" id="list"><span class="empty">切图列表会显示在这里</span></div>
       <div class="selected-actions" id="selected-actions">
-        <button id="matte-selected" type="button">抠图</button>
+        <button id="batch-all" type="button">批量抠图</button>
       </div>
     </form>
     <section class="workspace" aria-label="slice workspace">
@@ -2069,8 +2409,9 @@ def _slice_page_html() -> str:
     const file = document.getElementById("file");
     const minArea = document.getElementById("min-area");
     const padding = document.getElementById("padding");
+    const previewButton = document.getElementById("preview-button");
     const confirmButton = document.getElementById("confirm");
-    const matteSelected = document.getElementById("matte-selected");
+    const batchAll = document.getElementById("batch-all");
     const selectedActions = document.getElementById("selected-actions");
     const statusEl = document.getElementById("status");
     const preview = document.getElementById("preview");
@@ -2079,13 +2420,13 @@ def _slice_page_html() -> str:
     let currentCrops = [];
     let selectedCrop = null;
     let previewRequestId = 0;
-    let previewTimer = null;
     let lastPreviewSettingsKey = "";
     const SLICE_STATE_KEY = "ermbgSliceWorkspace";
 
     function setBusy(isBusy) {
+      previewButton.disabled = isBusy || !file.files.length;
       confirmButton.disabled = isBusy || !hasPreview;
-      matteSelected.disabled = isBusy || !selectedCrop;
+      batchAll.disabled = isBusy || !currentCrops.length;
       file.disabled = isBusy;
     }
 
@@ -2213,8 +2554,23 @@ def _slice_page_html() -> str:
       window.location.href = "/";
     }
 
+    function sendToBatch(crops) {
+      const items = (crops || []).filter(Boolean).map((crop) => ({
+        source: "slicer",
+        filename: crop.filename || `${crop.id || crop.label || "slice"}_rgb.png`,
+        name: crop.label || crop.id || crop.filename || "slice",
+        rgb: crop.rgb,
+        meta: crop.meta || "来自切图",
+      }));
+      if (!items.length) return;
+      saveSliceState({ selectedCropId: selectedCrop ? (selectedCrop.id || selectedCrop.filename) : null });
+      sessionStorage.setItem("ermbgBatchQueue", JSON.stringify({ source: "slicer", items }));
+      window.location.href = "/batch";
+    }
+
     function selectCrop(crop) {
       selectedCrop = crop;
+      selectedActions.classList.add("is-visible");
       Array.from(list.querySelectorAll(".row")).forEach((row) => {
         row.setAttribute("aria-selected", String(row.dataset.cropId === crop.id));
       });
@@ -2281,6 +2637,8 @@ def _slice_page_html() -> str:
       });
       statusEl.textContent = `切图完成 · ${payload.count || payload.crops.length} 张`;
       confirmButton.disabled = true;
+      selectedActions.classList.add("is-visible");
+      batchAll.disabled = !currentCrops.length;
       saveSliceState({ crops: payload });
       if (payload.crops.length === 1) {
         selectCrop(payload.crops[0]);
@@ -2294,25 +2652,28 @@ def _slice_page_html() -> str:
       selectedCrop = null;
       selectedActions.classList.remove("is-visible");
       clearSliceState();
+      previewButton.disabled = false;
       confirmButton.disabled = true;
       previewViewport.clear('<span class="empty">自动标注会显示在这里</span>');
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
-      runAnnotate();
+      statusEl.textContent = "已载入图片，点击预览";
     });
 
-    function refreshPreviewFromPadding() {
+    function invalidatePreview() {
       if (!file.files.length) return;
-      window.clearTimeout(previewTimer);
-      runAnnotate();
+      hasPreview = false;
+      currentCrops = [];
+      selectedCrop = null;
+      selectedActions.classList.remove("is-visible");
+      confirmButton.disabled = true;
+      batchAll.disabled = true;
+      lastPreviewSettingsKey = "";
+      list.innerHTML = '<span class="empty">参数已修改，点击预览后再切图</span>';
+      statusEl.textContent = "参数已修改，点击预览";
     }
 
-    padding.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      event.preventDefault();
-      refreshPreviewFromPadding();
-    });
-    padding.addEventListener("blur", refreshPreviewFromPadding);
-    padding.addEventListener("change", refreshPreviewFromPadding);
+    minArea.addEventListener("change", invalidatePreview);
+    padding.addEventListener("change", invalidatePreview);
 
     async function runAnnotate() {
       if (!file.files.length) return;
@@ -2345,6 +2706,10 @@ def _slice_page_html() -> str:
       runAnnotate();
     });
 
+    previewButton.addEventListener("click", () => {
+      runAnnotate();
+    });
+
     confirmButton.addEventListener("click", async () => {
       if (!file.files.length || !hasPreview) return;
       setBusy(true);
@@ -2360,9 +2725,8 @@ def _slice_page_html() -> str:
       }
     });
 
-    matteSelected.addEventListener("click", () => {
-      if (!selectedCrop) return;
-      sendToMatte(selectedCrop);
+    batchAll.addEventListener("click", () => {
+      sendToBatch(currentCrops);
     });
 
     function restoreSliceState() {
@@ -2453,6 +2817,122 @@ def _candidate_payload(candidate: MatteCandidate, stem: str) -> dict[str, object
         "operation_results": debug.get("operation_results", []),
         "debug": debug,
     }
+
+
+def _safe_zip_name(value: str, default: str = "item") -> str:
+    name = Path(value or default).name.strip() or default
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or default
+
+
+def _decode_png_data_url(data_url: str) -> np.ndarray:
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+        raise HTTPException(status_code=400, detail="rgba must be a PNG data URL")
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+        image = Image.open(BytesIO(raw))
+        image.load()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="rgba must contain readable PNG data") from e
+    return np.asarray(image.convert("RGBA"), dtype=np.uint8)
+
+
+def _web_batch_root() -> Path:
+    return PROJECT_ROOT / "out" / f"web_batch_matte_{datetime.now().strftime('%Y%m%d')}"
+
+
+def _write_batch_result_artifacts(items: list[dict[str, Any]]) -> tuple[Path, bytes, str]:
+    batch_id = datetime.now().strftime("batch_%H%M%S_%f")
+    batch_dir = _web_batch_root() / batch_id
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    case_summaries: list[dict[str, Any]] = []
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for index, item in enumerate(items, start=1):
+            source_name = str(item.get("filename") or item.get("name") or f"item_{index:03d}.png")
+            stem = Path(_safe_zip_name(source_name, f"item_{index:03d}.png")).stem or f"item_{index:03d}"
+            case_name = f"{index:03d}_{stem}"
+            case_dir = batch_dir / case_name
+            case_dir.mkdir(parents=True, exist_ok=True)
+            rgba = _decode_png_data_url(str(item.get("rgba") or ""))
+            rgba_path = case_dir / "rgba.png"
+            summary_path = case_dir / "summary.json"
+            ermbg_io.save_rgba(rgba_path, rgba)
+            summary = {
+                "status": "ok",
+                "source": item.get("source") or "batch",
+                "filename": source_name,
+                "fixed_backend": item.get("requested_backend") or "auto",
+                "requested_backend": item.get("requested_backend") or "auto",
+                "actual_execution_backend": item.get("execution_backend"),
+                "algorithm": item.get("algorithm"),
+                "route": item.get("route"),
+                "execution_profile": item.get("execution_profile"),
+                "execution_server_url": item.get("execution_url") or item.get("execution_server_url"),
+                "server_elapsed_sec": item.get("server_elapsed_sec"),
+                "outputs": {"rgba": "rgba.png"},
+            }
+            summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            manifest = build_run_manifest(
+                run_dir=case_dir,
+                outputs={"rgba": rgba_path},
+                request={
+                    "backend": item.get("requested_backend") or "auto",
+                    "filename": source_name,
+                    "source": item.get("source") or "batch",
+                },
+                route={
+                    "algorithm": item.get("algorithm"),
+                    "route": item.get("route"),
+                    "parameter_profile": item.get("parameter_profile"),
+                    "execution_profile": item.get("execution_profile"),
+                },
+                runtime={
+                    "requested_backend": item.get("requested_backend") or "auto",
+                    "backend": item.get("execution_backend"),
+                    "execution_server_url": item.get("execution_url") or item.get("execution_server_url"),
+                    "server_elapsed_sec": item.get("server_elapsed_sec"),
+                },
+                report_path=summary_path,
+                extra={"batch_id": batch_id, "index": index},
+            )
+            manifest_path = write_run_manifest(case_dir / "manifest.json", manifest)
+            case_summary = {
+                **summary,
+                "case_manifest": str(manifest_path.relative_to(batch_dir)),
+                "output_files": {"rgba": str(rgba_path.relative_to(batch_dir))},
+            }
+            case_summaries.append(case_summary)
+            zf.write(rgba_path, f"{case_name}/rgba.png")
+            zf.write(summary_path, f"{case_name}/summary.json")
+            zf.write(manifest_path, f"{case_name}/manifest.json")
+
+        batch_summary = {
+            "status": "ok",
+            "schema": "ermbg.batch.summary.v1",
+            "batch_id": batch_id,
+            "fixed_backend": "auto",
+            "requested_backend": "auto",
+            "count": len(case_summaries),
+            "success_count": len(case_summaries),
+            "error_count": 0,
+            "cases": case_summaries,
+        }
+        batch_summary_path = batch_dir / "summary.json"
+        batch_summary_path.write_text(json.dumps(batch_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        batch_manifest = build_run_manifest(
+            run_dir=batch_dir,
+            outputs={"summary": batch_summary_path},
+            request={"backend": "auto", "source": "web-batch"},
+            route={"algorithm": "mixed"},
+            runtime={"kind": "web-batch"},
+            report_path=batch_summary_path,
+            extra={"case_manifests": [case["case_manifest"] for case in case_summaries]},
+        )
+        batch_manifest_path = write_run_manifest(batch_dir / "manifest.json", batch_manifest)
+        zf.write(batch_summary_path, "summary.json")
+        zf.write(batch_manifest_path, "manifest.json")
+
+    return batch_dir, zip_buf.getvalue(), f"{batch_id}.zip"
 
 
 def _slice_annotated_preview(image_rgb: np.ndarray, boxes: list[SliceBox]) -> np.ndarray:
@@ -2764,6 +3244,11 @@ def _run_web_backend(
     parameter_source: str = "auto",
     **kwargs: Any,
 ) -> MatteResponse:
+    local_kwargs = dict(kwargs)
+    # Direct Worker-only controls are posted by the unified Web form. If the
+    # primary direct-worker path is unavailable and Web falls back to a local
+    # backend, do not leak those controls into the public local API.
+    local_kwargs.pop("known_bg_glow_material_strength", None)
     execution_backend = backend
     requested_auto = backend == "auto"
     if backend == "auto":
@@ -2852,7 +3337,7 @@ def _run_web_backend(
                 corridorkey_screen_mode=corridorkey_screen_mode,
                 corridorkey_preset=corridorkey_preset,
                 corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-                **kwargs,
+                **local_kwargs,
             )
             result.debug.setdefault("web_auto_primary_error", str(exc))
             result.debug.setdefault("web_auto_primary_backend", execution_base)
@@ -2867,7 +3352,7 @@ def _run_web_backend(
         corridorkey_screen_mode=corridorkey_screen_mode,
         corridorkey_preset=corridorkey_preset,
         corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-        **kwargs,
+        **local_kwargs,
     )
 
 

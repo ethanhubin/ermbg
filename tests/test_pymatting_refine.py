@@ -12,6 +12,7 @@ from PIL import Image
 from ermbg import io
 from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
+    _same_key_opaque_stroke_core_from_component,
     analyze_same_key_opaque_body_outline,
     build_known_background_trimap,
     build_same_key_opaque_proxy_subject_mask,
@@ -335,6 +336,28 @@ def test_known_background_color_prefers_boundary_support_near_unknown():
     assert info["color_support_pixels"] < info["support_pixels"]
     assert bg == tuple(info["background_color"])
     assert bg == (3, 194, 8)
+
+
+def test_stable_background_refines_route_seed_without_subject_dominant_takeover():
+    image = np.full((148, 307, 3), (5, 132, 250), dtype=np.uint8)
+    cv2.rectangle(image, (4, 4), (302, 124), (253, 130, 4), -1, cv2.LINE_AA)
+    cv2.rectangle(image, (4, 4), (302, 124), (255, 220, 80), 3, cv2.LINE_AA)
+    cv2.rectangle(image, (8, 126), (299, 143), (140, 70, 5), -1, cv2.LINE_AA)
+
+    bg, info = estimate_stable_background_color(
+        image,
+        seed_bg=(5, 132, 250),
+        seed_source="route_screen_analysis",
+        seed_info={"screen_mode": "blue", "background_confidence": 0.63},
+    )
+
+    assert info["accepted"] is True
+    assert info["source"] == "sure_bg_mode"
+    assert info["seed"]["source"] == "route_screen_analysis"
+    assert info["bg_threshold_source"] == "external_seed_cap"
+    assert info["bg_threshold_effective"] <= 24.0
+    assert bg == tuple(info["background_color"])
+    assert max(abs(int(a) - int(b)) for a, b in zip(bg, (5, 132, 250))) <= 4
 
 
 def test_stable_background_accepts_smooth_low_chroma_corner_drift():
@@ -717,6 +740,25 @@ def test_same_key_opaque_proxy_subject_mask_expands_antialias_coverage():
     assert int((expanded_mask & ~base_mask).sum()) == expanded_info["expanded_pixels"]
 
 
+def test_same_key_opaque_proxy_subject_mask_measures_variable_stroke_widths():
+    bg = (1, 95, 248)
+    measured: list[int] = []
+    core_pixels: list[int] = []
+    for stroke_px in (2, 5):
+        image = np.full((160, 160, 3), bg, dtype=np.uint8)
+        component_u8 = np.zeros((160, 160), dtype=np.uint8)
+        cv2.circle(component_u8, (80, 80), 58, 1, -1, cv2.LINE_AA)
+        cv2.circle(image, (80, 80), 58, (40, 88, 208), -1, cv2.LINE_AA)
+        cv2.circle(image, (80, 80), 58 - stroke_px, (112, 160, 248), -1, cv2.LINE_AA)
+
+        core, info = _same_key_opaque_stroke_core_from_component(image, component_u8.astype(bool))
+        measured.append(info["stroke_inset_px"])
+        core_pixels.append(int(core.sum()))
+
+    assert measured == [2, 5]
+    assert core_pixels[1] < core_pixels[0]
+
+
 def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
     bg = (1, 95, 248)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
@@ -734,7 +776,9 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
 
     proxy_info = result.debug["pymatting_known_b"]["same_key_proxy_subject"]
     assert proxy_info["enabled"] is True
-    assert proxy_info["expand_px"] == 1
+    assert proxy_info["expand_px"] == 0
+    assert proxy_info["proxy_color"] == [254, 160, 7]
+    assert proxy_info["proxy_color_source"] == "background_complement"
     assert result.report["strategy"]["extras"]["parameters"]["trimap_mode"] == "same_key_opaque_body_outline"
     assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "standard"
     assert result.debug["proxy_subject_mask"].shape == image.shape[:2]

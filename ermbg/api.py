@@ -870,19 +870,20 @@ def _matte_image_pymatting_known_b(
             rgb,
             selected_bg,
             bg_threshold=float(bg_threshold),
-            expand_px=1,
+            expand_px=0,
         )
         # Same-key opaque UI needs a non-screen subject color so the standard
-        # trimap and PyMatting solve see clear foreground evidence. Red is far
-        # from the blue/green known-B backgrounds used by this profile and stays
-        # obvious in debug artifacts.
-        proxy_color = np.asarray((238, 64, 48), dtype=np.uint8)
+        # trimap and PyMatting solve see clear foreground evidence. Use the
+        # measured known-B complement instead of a fixed color so green, blue,
+        # and other saturated screen colors all get a high-contrast proxy.
+        proxy_color = (255 - np.asarray(selected_bg, dtype=np.uint8)).astype(np.uint8)
         solver_rgb = rgb.copy()
         solver_rgb[proxy_subject_mask] = proxy_color
         proxy_input_rgb = solver_rgb
         proxy_subject_info = {
             **proxy_subject_info,
             "proxy_color": [int(c) for c in proxy_color],
+            "proxy_color_source": "background_complement",
             "restore_uses_same_mask": True,
             "solver_trimap_mode": "standard",
         }
