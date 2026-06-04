@@ -15,6 +15,7 @@ from ermbg.pymatting_refine import (
     _same_key_opaque_stroke_core_from_component,
     analyze_same_key_opaque_body_outline,
     build_known_background_trimap,
+    build_same_key_opaque_inner_opaque_mask,
     build_same_key_opaque_proxy_subject_mask,
     estimate_known_background_alpha_with_pymatting,
     estimate_stable_background_color,
@@ -759,6 +760,33 @@ def test_same_key_opaque_proxy_subject_mask_measures_variable_stroke_widths():
     assert core_pixels[1] < core_pixels[0]
 
 
+def test_same_key_opaque_inner_opaque_mask_keeps_non_proxy_stroke_material():
+    bg = (1, 95, 248)
+    image = np.full((160, 160, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (80, 80), 58, (40, 88, 208), -1, cv2.LINE_AA)
+    cv2.circle(image, (80, 80), 53, (112, 160, 248), -1, cv2.LINE_AA)
+
+    proxy_mask, proxy_info = build_same_key_opaque_proxy_subject_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        expand_px=0,
+    )
+    inner_mask, inner_info = build_same_key_opaque_inner_opaque_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        outer_guard_px=1.0,
+    )
+
+    extra_inner_material = inner_mask & ~proxy_mask
+    assert proxy_info["accepted"] is True
+    assert inner_info["enabled"] is True
+    assert inner_info["outer_guard_pixels"] > 0
+    assert int(inner_mask.sum()) > int(proxy_mask.sum())
+    assert int(extra_inner_material.sum()) > 100
+
+
 def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
     bg = (1, 95, 248)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
@@ -783,6 +811,16 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
     assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "standard"
     assert result.debug["proxy_subject_mask"].shape == image.shape[:2]
     assert np.all(result.rgba[..., :3][result.debug["proxy_subject_mask"]] == image[result.debug["proxy_subject_mask"]])
+    floor_info = result.debug["pymatting_known_b"]["same_key_inner_opaque_floor"]
+    floor_mask = result.debug["same_key_inner_opaque_floor_mask"]
+    assert floor_info["enabled"] is True
+    assert floor_info["applied_before_shadow_patch"] is True
+    assert floor_info["alpha_lift_pixels"] >= 0
+    assert floor_mask.shape == image.shape[:2]
+    assert np.all(result.alpha[floor_mask] == 1.0)
+    assert np.all(result.rgba[..., 3][floor_mask] == 255)
+    assert np.all(result.rgba[..., :3][floor_mask] == image[floor_mask])
+    assert result.debug["pymatting_subject_alpha_raw"].shape == image.shape[:2]
 
 
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():

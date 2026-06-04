@@ -335,6 +335,14 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'padding.addEventListener("change", invalidatePreview)' in response.text
     assert 'minArea.addEventListener("change", invalidatePreview)' in response.text
     assert 'previewButton.addEventListener("click"' in response.text
+    assert "function setSliceBusy(isBusy)" in response.text
+    assert "function setTransferBusy(isBusy)" in response.text
+    assert "setSliceBusy(true)" in response.text
+    assert "setTransferBusy(true)" in response.text
+    assert "function setBusy(isBusy)" not in response.text
+    assert "batchAll.disabled = isBusy || !currentCrops.length;" in response.text
+    assert "previewButton.disabled = isBusy || !file.files.length;" in response.text
+    assert "confirmButton.disabled = isBusy || !hasPreview;" in response.text
     assert "minArea.disabled = isBusy" not in response.text
     assert "padding.disabled = isBusy" not in response.text
     assert "function createImagePanZoomViewport" in response.text
@@ -374,9 +382,16 @@ def test_batch_page_serves_batch_queue_entry():
     assert '"/api/batch-results.zip"' in response.text
     assert 'sessionStorage.getItem("ermbgBatchQueue")' in response.text
     assert "backend=auto" in response.text
+    assert 'id="lightbox"' in response.text
+    assert 'id="lightbox-stage"' in response.text
+    assert 'function openLightbox(item)' in response.text
+    assert 'function itemPreviewUrl(item)' in response.text
+    assert 'thumb = document.createElement("button")' in response.text
+    assert 'thumb.addEventListener("click", () => openLightbox(item))' in response.text
+    assert 'window.addEventListener("keydown", (event) => { if (event.key === "Escape" && !lightbox.hidden) closeLightbox(); })' in response.text
 
 
-def test_batch_results_zip_writes_standard_manifests(tmp_path, monkeypatch):
+def test_batch_results_zip_download_contains_flat_pngs(tmp_path, monkeypatch):
     import ermbg.web as web
 
     monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
@@ -411,13 +426,16 @@ def test_batch_results_zip_writes_standard_manifests(tmp_path, monkeypatch):
     assert response.headers["x-ermbg-batch-count"] == "1"
     with zipfile.ZipFile(BytesIO(response.content)) as zf:
         names = set(zf.namelist())
-        assert "manifest.json" in names
-        assert "summary.json" in names
-        case_manifest_name = next(name for name in names if name.endswith("/manifest.json"))
-        case_summary_name = next(name for name in names if name.endswith("/summary.json"))
-        manifest = json.loads(zf.read("manifest.json"))
-        case_manifest = json.loads(zf.read(case_manifest_name))
-        case_summary = json.loads(zf.read(case_summary_name))
+        assert names == {"icon_001_rgb_rgba.png"}
+        assert all("/" not in name for name in names)
+        assert all(name.endswith(".png") for name in names)
+        assert Image.open(BytesIO(zf.read("icon_001_rgb_rgba.png"))).mode == "RGBA"
+
+    batch_dir = tmp_path / response.headers["x-ermbg-batch-dir"]
+    manifest = json.loads((batch_dir / "manifest.json").read_text(encoding="utf-8"))
+    case_dir = next(path for path in batch_dir.iterdir() if path.is_dir())
+    case_manifest = json.loads((case_dir / "manifest.json").read_text(encoding="utf-8"))
+    case_summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
     assert manifest["schema"] == "ermbg.run.v1"
     assert case_manifest["schema"] == "ermbg.run.v1"
     assert case_manifest["outputs"]["rgba"] == "rgba.png"

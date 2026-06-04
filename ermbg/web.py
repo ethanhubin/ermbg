@@ -2038,8 +2038,9 @@ def _batch_page_html() -> str:
     .list { min-height: 0; overflow: auto; }
     .row { min-width: 720px; display: grid; grid-template-columns: 64px minmax(160px, 1fr) 116px 150px 104px; gap: 10px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #edf1eb; }
     .row:last-child { border-bottom: 0; }
-    .thumb { width: 56px; height: 56px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
+    .thumb { width: 56px; height: 56px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; border: 0; padding: 0; cursor: zoom-in; background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; }
     .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .thumb:focus-visible { outline: 3px solid rgba(25, 111, 90, 0.28); outline-offset: 2px; }
     .info { min-width: 0; display: grid; gap: 3px; }
     .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 800; }
     .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #5d6862; font-size: 12px; }
@@ -2049,6 +2050,13 @@ def _batch_page_html() -> str:
     .actions { display: flex; gap: 6px; justify-content: flex-end; }
     .actions a, .actions button { min-width: 44px; min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 9px; border-radius: 6px; font-size: 12px; }
     .empty { padding: 18px; color: #6a746f; font-size: 14px; }
+    .lightbox { position: fixed; inset: 0; z-index: 20; display: none; grid-template-rows: 52px minmax(0, 1fr); background: rgba(17, 21, 20, 0.86); }
+    .lightbox.is-open { display: grid; }
+    .lightbox-bar { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px; color: #ffffff; }
+    .lightbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 800; }
+    .lightbox-close { width: 40px; min-width: 40px; min-height: 36px; border: 1px solid rgba(255,255,255,0.28); background: rgba(255,255,255,0.12); color: #ffffff; }
+    .lightbox-stage { min-width: 0; min-height: 0; display: grid; place-items: center; padding: 16px; background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
+    .lightbox-stage img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
     @media (max-width: 860px) { .app-header { padding: 0 16px; } main { grid-template-columns: 1fr; padding: 16px; } .queue { grid-template-rows: 48px 520px; } }
   </style>
 </head>
@@ -2081,6 +2089,13 @@ def _batch_page_html() -> str:
       <div class="list" id="list"><div class="empty">批量队列会显示在这里</div></div>
     </section>
   </main>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lightbox-title" hidden>
+    <div class="lightbox-bar">
+      <span class="lightbox-title" id="lightbox-title"></span>
+      <button class="lightbox-close" id="lightbox-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="lightbox-stage" id="lightbox-stage"></div>
+  </div>
   <script>
     const file = document.getElementById("file");
     const dropzone = document.getElementById("dropzone");
@@ -2092,6 +2107,10 @@ def _batch_page_html() -> str:
     const statusEl = document.getElementById("status");
     const countEl = document.getElementById("count");
     const list = document.getElementById("list");
+    const lightbox = document.getElementById("lightbox");
+    const lightboxTitle = document.getElementById("lightbox-title");
+    const lightboxStage = document.getElementById("lightbox-stage");
+    const lightboxClose = document.getElementById("lightbox-close");
     let queue = [];
     let running = false;
     let nextId = 1;
@@ -2137,6 +2156,28 @@ def _batch_page_html() -> str:
       return "等待";
     }
 
+    function itemPreviewUrl(item) {
+      return item.result && item.result.rgba ? item.result.rgba : item.previewUrl;
+    }
+
+    function openLightbox(item) {
+      const img = document.createElement("img");
+      img.src = itemPreviewUrl(item);
+      img.alt = item.name;
+      lightboxTitle.textContent = item.result ? `${item.name} · 结果` : `${item.name} · 原图`;
+      lightboxStage.innerHTML = "";
+      lightboxStage.appendChild(img);
+      lightbox.hidden = false;
+      lightbox.classList.add("is-open");
+      lightboxClose.focus();
+    }
+
+    function closeLightbox() {
+      lightbox.classList.remove("is-open");
+      lightbox.hidden = true;
+      lightboxStage.innerHTML = "";
+    }
+
     function render() {
       const done = queue.filter((item) => item.status === "done").length;
       const failed = queue.filter((item) => item.status === "failed").length;
@@ -2154,12 +2195,16 @@ def _batch_page_html() -> str:
       queue.forEach((item) => {
         const row = document.createElement("div");
         row.className = "row";
-        const thumb = document.createElement("span");
+        const thumb = document.createElement("button");
         thumb.className = "thumb";
+        thumb.type = "button";
+        thumb.title = "查看大图";
+        thumb.setAttribute("aria-label", `查看 ${item.name} 大图`);
         const img = document.createElement("img");
-        img.src = item.result && item.result.rgba ? item.result.rgba : item.previewUrl;
+        img.src = itemPreviewUrl(item);
         img.alt = item.name;
         thumb.appendChild(img);
+        thumb.addEventListener("click", () => openLightbox(item));
         const info = document.createElement("span");
         info.className = "info";
         const name = document.createElement("span");
@@ -2297,6 +2342,9 @@ def _batch_page_html() -> str:
     retryButton.addEventListener("click", () => { queue.forEach((item) => { if (item.status === "failed") { item.status = "queued"; item.message = "等待重试"; } }); processQueue(); });
     zipButton.addEventListener("click", downloadZip);
     clearButton.addEventListener("click", () => { queue = []; render(); });
+    lightboxClose.addEventListener("click", closeLightbox);
+    lightbox.addEventListener("click", (event) => { if (event.target === lightbox) closeLightbox(); });
+    window.addEventListener("keydown", (event) => { if (event.key === "Escape" && !lightbox.hidden) closeLightbox(); });
     ["dragenter", "dragover"].forEach((name) => dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.add("is-over"); }));
     ["dragleave", "drop"].forEach((name) => dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.remove("is-over"); }));
     dropzone.addEventListener("drop", (event) => addFiles(event.dataTransfer.files, "upload"));
@@ -2423,11 +2471,18 @@ def _slice_page_html() -> str:
     let lastPreviewSettingsKey = "";
     const SLICE_STATE_KEY = "ermbgSliceWorkspace";
 
-    function setBusy(isBusy) {
+    function setSliceBusy(isBusy) {
       previewButton.disabled = isBusy || !file.files.length;
       confirmButton.disabled = isBusy || !hasPreview;
-      batchAll.disabled = isBusy || !currentCrops.length;
       file.disabled = isBusy;
+    }
+
+    function setTransferBusy(isBusy) {
+      batchAll.disabled = isBusy || !currentCrops.length;
+      Array.from(list.querySelectorAll(".row-action")).forEach((control) => {
+        control.disabled = isBusy;
+        control.setAttribute("aria-disabled", String(isBusy));
+      });
     }
 
     function formData() {
@@ -2549,6 +2604,7 @@ def _slice_page_html() -> str:
     }
 
     function sendToMatte(crop) {
+      setTransferBusy(true);
       saveSliceState({ selectedCropId: crop.id || crop.filename });
       sessionStorage.setItem("ermbgPendingSlice", JSON.stringify(crop));
       window.location.href = "/";
@@ -2563,6 +2619,7 @@ def _slice_page_html() -> str:
         meta: crop.meta || "来自切图",
       }));
       if (!items.length) return;
+      setTransferBusy(true);
       saveSliceState({ selectedCropId: selectedCrop ? (selectedCrop.id || selectedCrop.filename) : null });
       sessionStorage.setItem("ermbgBatchQueue", JSON.stringify({ source: "slicer", items }));
       window.location.href = "/batch";
@@ -2680,7 +2737,7 @@ def _slice_page_html() -> str:
       const settingsKey = JSON.stringify(currentSettings());
       if (settingsKey === lastPreviewSettingsKey && hasPreview) return;
       const requestId = ++previewRequestId;
-      setBusy(true);
+      setSliceBusy(true);
       statusEl.textContent = "正在自动标注";
       try {
         const response = await fetch("/api/slice-preview", { method: "POST", body: formData() });
@@ -2696,7 +2753,7 @@ def _slice_page_html() -> str:
         }
       } finally {
         if (requestId === previewRequestId) {
-          setBusy(false);
+          setSliceBusy(false);
         }
       }
     }
@@ -2712,7 +2769,7 @@ def _slice_page_html() -> str:
 
     confirmButton.addEventListener("click", async () => {
       if (!file.files.length || !hasPreview) return;
-      setBusy(true);
+      setSliceBusy(true);
       statusEl.textContent = "正在生成切图";
       try {
         const response = await fetch("/api/slice-crops", { method: "POST", body: formData() });
@@ -2721,7 +2778,7 @@ def _slice_page_html() -> str:
       } catch (error) {
         statusEl.textContent = error.message;
       } finally {
-        setBusy(false);
+        setSliceBusy(false);
       }
     });
 
@@ -2845,6 +2902,7 @@ def _write_batch_result_artifacts(items: list[dict[str, Any]]) -> tuple[Path, by
     batch_dir = _web_batch_root() / batch_id
     batch_dir.mkdir(parents=True, exist_ok=True)
     case_summaries: list[dict[str, Any]] = []
+    used_zip_names: set[str] = set()
     zip_buf = BytesIO()
     with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for index, item in enumerate(items, start=1):
@@ -2902,9 +2960,11 @@ def _write_batch_result_artifacts(items: list[dict[str, Any]]) -> tuple[Path, by
                 "output_files": {"rgba": str(rgba_path.relative_to(batch_dir))},
             }
             case_summaries.append(case_summary)
-            zf.write(rgba_path, f"{case_name}/rgba.png")
-            zf.write(summary_path, f"{case_name}/summary.json")
-            zf.write(manifest_path, f"{case_name}/manifest.json")
+            zip_name = f"{stem}_rgba.png"
+            if zip_name in used_zip_names:
+                zip_name = f"{stem}_{index:03d}_rgba.png"
+            used_zip_names.add(zip_name)
+            zf.write(rgba_path, zip_name)
 
         batch_summary = {
             "status": "ok",
@@ -2929,8 +2989,6 @@ def _write_batch_result_artifacts(items: list[dict[str, Any]]) -> tuple[Path, by
             extra={"case_manifests": [case["case_manifest"] for case in case_summaries]},
         )
         batch_manifest_path = write_run_manifest(batch_dir / "manifest.json", batch_manifest)
-        zf.write(batch_summary_path, "summary.json")
-        zf.write(batch_manifest_path, "manifest.json")
 
     return batch_dir, zip_buf.getvalue(), f"{batch_id}.zip"
 

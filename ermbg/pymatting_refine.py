@@ -1172,6 +1172,7 @@ def _same_key_opaque_closed_plateau_outline_trace(
         "perimeter_edge_pixels": perimeter_edge_pixels,
         "perimeter_edge_fraction": perimeter_edge_fraction,
         "body_fill": body_fill,
+        "support": support,
         "unknown_domain": unknown_domain,
     }
 
@@ -1191,7 +1192,7 @@ def analyze_same_key_opaque_body_outline(
 
 
 def _public_same_key_outline_trace(trace: dict[str, Any]) -> dict[str, Any]:
-    hidden = {"line", "broad_fill", "body_fill", "unknown_domain"}
+    hidden = {"line", "broad_fill", "body_fill", "unknown_domain", "support"}
     public: dict[str, Any] = {}
     for key, value in trace.items():
         if key in hidden:
@@ -1442,6 +1443,64 @@ def build_same_key_opaque_proxy_subject_mask(
         "body_pixels": int(body_fill.sum()),
         "mask_pixels": int(proxy_mask.sum()),
         "expanded_pixels": int((proxy_mask & ~body_fill).sum()),
+    }
+
+
+def build_same_key_opaque_inner_opaque_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    bg_threshold: float,
+    outer_guard_px: float = 1.0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build the same-key opaque material region protected from alpha collapse.
+
+    Proxy painting changes the near-background body color, but the body/stroke
+    transition is still opaque UI material. This mask is deliberately derived
+    from the original outline support, then pulled back from only the exterior
+    edge. The outer guard leaves true silhouette AA and shadow to the existing
+    PyMatting/ShadowPatch path while allowing inner material AA to be floored to
+    alpha=1 after PyMatting has produced its raw solve.
+    """
+    bg = np.asarray(background_color, dtype=np.uint8)
+    trace = _same_key_opaque_body_outline_trace(
+        image_srgb,
+        bg,
+        bg_threshold=float(bg_threshold),
+    )
+    if not trace.get("accepted", False):
+        raise ValueError(f"same-key inner opaque mask route contract failed: {trace.get('reason', 'unknown')}")
+
+    if trace.get("outline_recipe") == "lower_perimeter_ridge" and "broad_fill" in trace:
+        support = np.asarray(trace["broad_fill"], dtype=bool)
+        support_source = "relaxed_component"
+    elif "support" in trace:
+        support = np.asarray(trace["support"], dtype=bool)
+        support_source = "closed_outline_support"
+    else:
+        support = np.asarray(trace["body_fill"], dtype=bool)
+        support_source = "body_fill"
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), 8)
+    if labels_count <= 1:
+        raise ValueError("same-key inner opaque mask support is empty after outline trace")
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    support = labels == label
+    support = np.asarray(ndimage.binary_fill_holes(support), dtype=bool)
+
+    guard = max(0.0, float(outer_guard_px))
+    dist_to_exterior = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3)
+    mask = support & (dist_to_exterior > guard)
+    guarded = support & ~mask
+    return mask, {
+        "enabled": True,
+        **_public_same_key_outline_trace(trace),
+        "method": "same_key_opaque_inner_opaque_mask",
+        "support_source": support_source,
+        "outer_guard_px": float(guard),
+        "support_pixels": int(support.sum()),
+        "mask_pixels": int(mask.sum()),
+        "outer_guard_pixels": int(guarded.sum()),
     }
 
 
@@ -2613,6 +2672,7 @@ def estimate_alpha_with_pymatting(
 __all__ = [
     "PyMattingAlphaResult",
     "analyze_same_key_opaque_body_outline",
+    "build_same_key_opaque_inner_opaque_mask",
     "build_same_key_opaque_proxy_subject_mask",
     "build_known_background_trimap",
     "estimate_stable_background_color",

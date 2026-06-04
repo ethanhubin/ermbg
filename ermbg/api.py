@@ -807,6 +807,7 @@ def _matte_image_pymatting_known_b(
     auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
     from .pymatting_refine import (
+        build_same_key_opaque_inner_opaque_mask,
         build_same_key_opaque_proxy_subject_mask,
         build_known_background_trimap,
         estimate_alpha_with_pymatting,
@@ -865,12 +866,21 @@ def _matte_image_pymatting_known_b(
     proxy_input_rgb: np.ndarray | None = None
     proxy_subject_mask: np.ndarray | None = None
     proxy_subject_info: dict[str, Any] = {"enabled": False}
+    same_key_inner_opaque_mask: np.ndarray | None = None
+    same_key_inner_floor_mask: np.ndarray | None = None
+    same_key_inner_floor_info: dict[str, Any] = {"enabled": False}
     if requested_trimap_mode == "same_key_opaque_body_outline":
         proxy_subject_mask, proxy_subject_info = build_same_key_opaque_proxy_subject_mask(
             rgb,
             selected_bg,
             bg_threshold=float(bg_threshold),
             expand_px=0,
+        )
+        same_key_inner_opaque_mask, same_key_inner_floor_info = build_same_key_opaque_inner_opaque_mask(
+            rgb,
+            selected_bg,
+            bg_threshold=float(bg_threshold),
+            outer_guard_px=1.0,
         )
         # Same-key opaque UI needs a non-screen subject color so the standard
         # trimap and PyMatting solve see clear foreground evidence. Use the
@@ -951,6 +961,33 @@ def _matte_image_pymatting_known_b(
     )
     foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
     foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
+    pymatting_alpha_before_inner_floor = alpha.copy()
+    if same_key_inner_opaque_mask is not None:
+        floor_eligible = same_key_inner_opaque_mask & ~trimap.sure_bg
+        blocked_sure_bg = same_key_inner_opaque_mask & trimap.sure_bg
+        lift = floor_eligible & (alpha < (254.0 / 255.0))
+        alpha_lift = (1.0 - alpha[lift]).astype(np.float32) if bool(lift.any()) else np.asarray([], dtype=np.float32)
+        if bool(floor_eligible.any()):
+            alpha = alpha.copy()
+            foreground_srgb = foreground_srgb.copy()
+            # Same-key opaque UI has two separate edge classes: exterior AA and
+            # internal material AA. PyMatting may solve body/stroke transitions
+            # as semi-transparent because the source body is near the background.
+            # The original outline support proves these guarded interior pixels
+            # are material, so floor them before ShadowPatch decides what remains
+            # available for exterior shadow repair.
+            alpha[floor_eligible] = 1.0
+            foreground_srgb[floor_eligible] = rgb[floor_eligible]
+            same_key_inner_floor_mask = floor_eligible
+        same_key_inner_floor_info = {
+            **same_key_inner_floor_info,
+            "eligible_pixels": int(floor_eligible.sum()),
+            "blocked_sure_bg_pixels": int(blocked_sure_bg.sum()),
+            "alpha_lift_pixels": int(lift.sum()),
+            "alpha_lift_mean": float(alpha_lift.mean()) if alpha_lift.size else 0.0,
+            "alpha_lift_max": float(alpha_lift.max()) if alpha_lift.size else 0.0,
+            "applied_before_shadow_patch": bool(floor_eligible.any()),
+        }
     subject_alpha = alpha
     subject_foreground_srgb = foreground_srgb
     alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
@@ -961,6 +998,17 @@ def _matte_image_pymatting_known_b(
         shadow_mode=shadow_mode,
         repair_domain=trimap.unknown,
     )
+    if same_key_inner_floor_mask is not None:
+        alpha = alpha.copy()
+        subject_foreground_srgb = subject_foreground_srgb.copy()
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        shadow_alpha = shadow_alpha.copy()
+        shadow_alpha_physical = shadow_alpha_physical.copy()
+        alpha[same_key_inner_floor_mask] = 1.0
+        subject_foreground_srgb[same_key_inner_floor_mask] = rgb[same_key_inner_floor_mask]
+        rgba_rgb_srgb[same_key_inner_floor_mask] = rgb[same_key_inner_floor_mask]
+        shadow_alpha[same_key_inner_floor_mask] = 0.0
+        shadow_alpha_physical[same_key_inner_floor_mask] = 0.0
     if proxy_subject_mask is not None:
         # Restore only the exact proxy-painted domain. This keeps antialiased
         # subject corners from being erased while preventing original same-key
@@ -1012,6 +1060,7 @@ def _matte_image_pymatting_known_b(
                     "unknown_grow_px": int(unknown_grow_px),
                 },
                 "same_key_proxy_subject": proxy_subject_info,
+                "same_key_inner_opaque_floor": same_key_inner_floor_info,
             },
         },
     }
@@ -1028,12 +1077,17 @@ def _matte_image_pymatting_known_b(
         ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
         ermbg_io.save_rgb(out_dir / f"{stem}_rgba_rgb.png", rgba_rgb_srgb)
         ermbg_io.save_mask(out_dir / f"{stem}_pymatting_subject_alpha.png", subject_alpha)
+        ermbg_io.save_mask(out_dir / f"{stem}_pymatting_subject_alpha_raw.png", pymatting_alpha_before_inner_floor)
         ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
         ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
         ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", trimap_to_uint8(trimap))
         if proxy_input_rgb is not None and proxy_subject_mask is not None:
             ermbg_io.save_rgb(out_dir / f"{stem}_proxy_input.png", proxy_input_rgb)
             ermbg_io.save_mask(out_dir / f"{stem}_proxy_subject_mask.png", proxy_subject_mask.astype(np.float32))
+        if same_key_inner_opaque_mask is not None:
+            ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_mask.png", same_key_inner_opaque_mask.astype(np.float32))
+        if same_key_inner_floor_mask is not None:
+            ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_floor_mask.png", same_key_inner_floor_mask.astype(np.float32))
         if background_normalization.get("applied", False):
             ermbg_io.save_rgb(out_dir / f"{stem}_normalized_input.png", processing_rgb)
         if qa:
@@ -1061,12 +1115,27 @@ def _matte_image_pymatting_known_b(
                 "rgba_rgb": out_dir / f"{stem}_rgba_rgb.png",
                 "trimap": out_dir / f"{stem}_trimap.png",
                 "shadow": out_dir / f"{stem}_shadow.png",
+                "pymatting_subject_alpha_raw": out_dir / f"{stem}_pymatting_subject_alpha_raw.png",
                 **(
                     {
                         "proxy_input": out_dir / f"{stem}_proxy_input.png",
                         "proxy_subject_mask": out_dir / f"{stem}_proxy_subject_mask.png",
                     }
                     if proxy_input_rgb is not None and proxy_subject_mask is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "same_key_inner_opaque_mask": out_dir / f"{stem}_same_key_inner_opaque_mask.png",
+                    }
+                    if same_key_inner_opaque_mask is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "same_key_inner_opaque_floor_mask": out_dir / f"{stem}_same_key_inner_opaque_floor_mask.png",
+                    }
+                    if same_key_inner_floor_mask is not None
                     else {}
                 ),
             },
@@ -1088,6 +1157,7 @@ def _matte_image_pymatting_known_b(
         "soft_mask": alpha,
         "subject_alpha": subject_alpha,
         "pymatting_subject_alpha": subject_alpha,
+        "pymatting_subject_alpha_raw": pymatting_alpha_before_inner_floor,
         "pymatting_subject_foreground": subject_foreground_srgb,
         "rgba_rgb": rgba_rgb_srgb,
         "shadow_alpha": shadow_alpha,
@@ -1101,12 +1171,17 @@ def _matte_image_pymatting_known_b(
             "alpha_pinhole_repair": alpha_pinhole_repair,
             "parameters": report["strategy"]["extras"]["parameters"],
             "same_key_proxy_subject": proxy_subject_info,
+            "same_key_inner_opaque_floor": same_key_inner_floor_info,
         },
         "shadow": shadow_info,
     }
     if proxy_subject_mask is not None:
         debug["proxy_subject_mask"] = proxy_subject_mask
         debug["proxy_input_srgb"] = proxy_input_rgb
+    if same_key_inner_opaque_mask is not None:
+        debug["same_key_inner_opaque_mask"] = same_key_inner_opaque_mask
+    if same_key_inner_floor_mask is not None:
+        debug["same_key_inner_opaque_floor_mask"] = same_key_inner_floor_mask
     if auto_route is not None:
         debug["auto_route"] = auto_route
     return MatteResponse(
