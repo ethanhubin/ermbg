@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,6 +93,103 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert "rgba_png_base64" not in payload
     assert "trimap_png_base64" not in payload
     assert payload["server_elapsed_sec"] >= 0.0
+
+
+def test_direct_worker_server_matte_endpoint_consumes_explicit_route_decision(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    def fail_classify(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("execute stage must not classify when route_decision is provided")
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        captured["decision"] = prepared.decision
+        return _result(prepared.rgb)
+
+    monkeypatch.setattr(server, "classify_route", fail_classify)
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    route_decision = {
+        "route": "pymatting_known_b",
+        "algorithm": "pymatting_known_b",
+        "backend": "pymatting_known_b",
+        "asset_kind": "button",
+        "execution_profile": "pymatting-hard-button",
+        "confidence": 0.93,
+        "reasons": ["analyze_contract"],
+        "params": {"pymatting_bg_source": "custom", "pymatting_bg_color": [0, 200, 0]},
+        "analysis": {"background": {"kind": "known_b"}},
+    }
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={"include_image": "false", "route_decision": json.dumps(route_decision)},
+    )
+
+    assert response.status_code == 200
+    decision = captured["decision"]
+    assert isinstance(decision, RouteDecision)
+    assert decision.route == "pymatting_known_b"
+    assert decision.backend == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["pymatting_bg_source"] == "custom"
+    assert decision.params["pymatting_bg_color"] == [0, 200, 0]
+    assert decision.analysis == {"background": {"kind": "known_b"}}
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["execution_backend"] == "direct-pymatting-known-b"
+
+
+def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={"execution_profile": "pymatting-hard-button"},
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured.update(prepared.decision.params)
+        return _result(prepared.rgb)
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={
+            "execution_backend": "direct-pymatting-known-b",
+            "include_image": "false",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": "1,2,3",
+            "pymatting_bg_threshold": "4.5",
+            "pymatting_fg_threshold": "28",
+            "pymatting_input_preprocessed_known_b": "true",
+            "pymatting_background_normalization": json.dumps({"applied": True, "source": "preprocess"}),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["pymatting_bg_source"] == "custom"
+    assert captured["pymatting_bg_color"] == (1, 2, 3)
+    assert captured["pymatting_bg_threshold"] == 4.5
+    assert captured["pymatting_fg_threshold"] == 28.0
+    assert captured["pymatting_input_preprocessed_known_b"] is True
+    assert captured["pymatting_background_normalization"] == {"applied": True, "source": "preprocess"}
 
 
 def test_direct_worker_server_health_reports_capabilities():
@@ -243,6 +341,86 @@ def test_direct_worker_server_matte_endpoint_can_force_known_bg_glow(monkeypatch
     assert payload["execution_backend"] == "direct-known-bg-glow"
     assert payload["route"] == "known_bg_glow"
     assert payload["algorithm_debug"]["known_bg_glow"]["mode"] == captured["params"]["known_bg_glow_mode"]
+
+
+def test_direct_worker_server_matte_endpoint_passes_semantic_decision(monkeypatch):
+    rgb = np.full((16, 16, 3), (255, 255, 255), dtype=np.uint8)
+    captured = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={"execution_profile": "pymatting-known-bg"},
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured["params"] = prepared.decision.params
+        return _result(prepared.rgb, execution_profile="pymatting-known-bg")
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={
+            "include_image": "false",
+            "semantic_decision": json.dumps({"enclosed_near_bg_policy": "subject"}),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["params"]["semantic_decision"] == {"enclosed_near_bg_policy": "subject"}
+
+
+def test_direct_worker_server_matte_endpoint_passes_user_masks(monkeypatch):
+    rgb = np.full((8, 8, 3), (255, 255, 255), dtype=np.uint8)
+    keep = np.zeros((8, 8), dtype=np.uint8)
+    remove = np.zeros((8, 8), dtype=np.uint8)
+    keep[2:4, 2:4] = 255
+    remove[5:7, 5:7] = 255
+    captured = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={"execution_profile": "pymatting-known-bg"},
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        captured["params"] = prepared.decision.params
+        return _result(prepared.rgb, execution_profile="pymatting-known-bg")
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={
+            "image": ("case.png", _png_bytes(rgb), "image/png"),
+            "user_keep_mask": ("keep.png", _png_bytes(np.dstack([keep, keep, keep])), "image/png"),
+            "user_remove_mask": ("remove.png", _png_bytes(np.dstack([remove, remove, remove])), "image/png"),
+        },
+        data={"include_image": "false"},
+    )
+
+    assert response.status_code == 200
+    assert np.asarray(captured["params"]["user_keep_mask"]).sum() == 4.0
+    assert np.asarray(captured["params"]["user_remove_mask"]).sum() == 4.0
 
 
 def test_direct_worker_manual_known_bg_glow_preserves_chromatic_swap_ray_mode():

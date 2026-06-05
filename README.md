@@ -162,7 +162,7 @@ print(result.debug)
 ### 远端 Direct Worker 部署：
 
 ```bash
-scripts/sync_comfy_ssh.sh --smoke
+# 先按当前机器的源码同步流程把本地源码同步到远端源码树
 scripts/restart_direct_worker_ssh.sh --restart
 curl -sS "http://192.168.0.8:7871/health"
 
@@ -176,7 +176,7 @@ $env:ERMBG_DIRECT_URL = "<services.direct_worker_url>"
 
 ```
 
-详见 [DEPLOY.md](DEPLOY.md)。
+详见 [docs/modules/operations.md](docs/modules/operations.md)。
 
 ---
 
@@ -192,7 +192,7 @@ $env:ERMBG_DIRECT_URL = "<services.direct_worker_url>"
   --sample-id B001,I011
 
 # Runtime capabilities
-curl -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_object_info=false"
+curl -sS "<web-url>/api/runtime-capabilities"
 
 ```
 
@@ -215,15 +215,9 @@ curl -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_object_
 
 ---
 
-## 🔌 生态扩展
-
-* **ComfyUI 节点** — `comfy_nodes/`，提供 `ERMBG Route Matte`、`ERMBG Classify` 等节点，详见 `comfy_nodes/README.md`。
-* **OpenClaw 适配器** — 可选独立 `ermbg-matte` skill，详见 `integrations/openclaw/README.md`。
-
----
-
 ## 📄 参考文档
 
-* [docs/architecture.md](https://www.google.com/search?q=docs/architecture.md) — 架构与服务边界
-* [docs/ermbg-route-strategy.md](https://www.google.com/search?q=docs/ermbg-route-strategy.md) — route / profile / backend 契约
-* [docs/install-startup.md](https://www.google.com/search?q=docs/install-startup.md) — 完整安装与启动流程
+* [docs/README.md](docs/README.md) — 文档入口和阅读顺序
+* [docs/architecture.md](docs/architecture.md) — 主线架构与服务边界
+* [docs/modules/route-profiles.md](docs/modules/route-profiles.md) — route / profile / backend 契约
+* [docs/modules/operations.md](docs/modules/operations.md) — 完整安装与启动流程

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,24 @@ def matte_image_direct_worker(
     corridorkey_hint_mask: Any | None = None,
     corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     known_bg_glow_material_strength: float | None = None,
+    pymatting_method: str | None = None,
+    pymatting_image_space: str | None = None,
+    pymatting_bg_source: str | None = None,
+    pymatting_bg_color: tuple[int, int, int] | None = None,
+    pymatting_bg_threshold: float | None = None,
+    pymatting_fg_threshold: float | None = None,
+    pymatting_boundary_band_px: int | None = None,
+    pymatting_auto_adapt: bool | None = None,
+    pymatting_cg_maxiter: int | None = None,
+    pymatting_cg_rtol: float | None = None,
+    pymatting_trimap_mode: str | None = None,
+    pymatting_unknown_grow_px: int | None = None,
+    pymatting_input_preprocessed_known_b: bool | None = None,
+    pymatting_background_normalization: dict[str, Any] | None = None,
+    route_decision: dict[str, Any] | None = None,
+    semantic_decision: dict[str, Any] | None = None,
+    user_keep_mask: Any | None = None,
+    user_remove_mask: Any | None = None,
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     timeout: float = 240.0,
 ) -> MatteResponse:
@@ -70,6 +89,10 @@ def matte_image_direct_worker(
     files = {"image": ("input.png", _to_png_bytes(image), "image/png")}
     if corridorkey_hint_mask is not None:
         files["corridorkey_hint_mask"] = ("hint_mask.png", _to_png_bytes(corridorkey_hint_mask), "image/png")
+    if user_keep_mask is not None:
+        files["user_keep_mask"] = ("user_keep_mask.png", _to_png_bytes(user_keep_mask), "image/png")
+    if user_remove_mask is not None:
+        files["user_remove_mask"] = ("user_remove_mask.png", _to_png_bytes(user_remove_mask), "image/png")
     data = {
         "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
@@ -99,6 +122,38 @@ def matte_image_direct_worker(
         data["corridorkey_protection_fg_min"] = str(float(corridorkey_protection_fg_min))
     if known_bg_glow_material_strength is not None:
         data["known_bg_glow_material_strength"] = str(float(known_bg_glow_material_strength))
+    if pymatting_method is not None:
+        data["pymatting_method"] = str(pymatting_method)
+    if pymatting_image_space is not None:
+        data["pymatting_image_space"] = str(pymatting_image_space)
+    if pymatting_bg_source is not None:
+        data["pymatting_bg_source"] = str(pymatting_bg_source)
+    if pymatting_bg_color is not None:
+        data["pymatting_bg_color"] = ",".join(str(int(c)) for c in pymatting_bg_color)
+    if pymatting_bg_threshold is not None:
+        data["pymatting_bg_threshold"] = str(float(pymatting_bg_threshold))
+    if pymatting_fg_threshold is not None:
+        data["pymatting_fg_threshold"] = str(float(pymatting_fg_threshold))
+    if pymatting_boundary_band_px is not None:
+        data["pymatting_boundary_band_px"] = str(int(pymatting_boundary_band_px))
+    if pymatting_auto_adapt is not None:
+        data["pymatting_auto_adapt"] = "true" if pymatting_auto_adapt else "false"
+    if pymatting_cg_maxiter is not None:
+        data["pymatting_cg_maxiter"] = str(int(pymatting_cg_maxiter))
+    if pymatting_cg_rtol is not None:
+        data["pymatting_cg_rtol"] = str(float(pymatting_cg_rtol))
+    if pymatting_trimap_mode is not None:
+        data["pymatting_trimap_mode"] = str(pymatting_trimap_mode)
+    if pymatting_unknown_grow_px is not None:
+        data["pymatting_unknown_grow_px"] = str(int(pymatting_unknown_grow_px))
+    if pymatting_input_preprocessed_known_b is not None:
+        data["pymatting_input_preprocessed_known_b"] = "true" if pymatting_input_preprocessed_known_b else "false"
+    if pymatting_background_normalization is not None:
+        data["pymatting_background_normalization"] = json.dumps(pymatting_background_normalization)
+    if route_decision is not None:
+        data["route_decision"] = json.dumps(route_decision)
+    if semantic_decision:
+        data["semantic_decision"] = json.dumps(semantic_decision)
     response = requests.post(
         f"{direct_worker_url.rstrip('/')}/matte",
         files=files,

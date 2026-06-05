@@ -11,19 +11,19 @@
   可通过本机和远端 IP 访问，必须显式配置 `name`、`url`、`priority`，
   由 Web/API 按优先级尝试并 fallback。
 - 允许用环境变量在单个 shell 会话内临时覆盖：
-  `ERMBG_DIRECT_URL`、`COMFY_URL`、`ERMBG_WEB_AUTO_BACKEND`、
-  `ERMBG_WEB_AUTO_FALLBACK_BACKEND`、`ERMBG_ENABLE_COMFY`。
+  `ERMBG_DIRECT_URL`、`ERMBG_WEB_AUTO_BACKEND`、
+  `ERMBG_WEB_AUTO_FALLBACK_BACKEND`。
 - 正常的 Web 启动和运行时能力检查都走 Direct Worker。
-- ComfyUI 是可选的外围插件支持，仅用于自定义 Comfy 图；主线 Web/API
-  不保留 `comfy-*` backend。
 
 ## 去哪里查
 
-- 产品概览与安装/启动：`README.md`、`docs/install-startup.md`。
-- 架构与 profile 契约：`docs/architecture.md`、
-  `docs/ermbg-route-strategy.md`。
-- 本地归属细节：`docs/local-ownership.md`。
-- 可选的 Comfy 节点工作：`comfy_nodes/README.md`、`DEPLOY.md`。
+- 文档入口：`docs/README.md`。
+- 产品概览：`README.md`。
+- 主线架构：`docs/architecture.md`。
+- 模块细节：`docs/modules/`。
+- 安装/启动：`docs/modules/operations.md`。
+- profile 契约：`docs/modules/route-profiles.md`。
+- 本地归属细节：`docs/modules/known-b.md`。
 - 历史材料：`docs/archive/`；不要把已归档的计划当作活跃内容。
 
 ## 开发基础
@@ -66,8 +66,7 @@
 在改动 `ermbg/web.py`、Web UI/API 行为或某个 Web 侧后端之后：
 
 1. 先确认目标 Direct Worker 是本机还是远端。远端算法改动必须先跑
-   `scripts/sync_comfy_ssh.sh --smoke`,再跑
-   `scripts/restart_direct_worker_ssh.sh --restart`。
+   当前机器的源码同步流程,再跑 `scripts/restart_direct_worker_ssh.sh --restart`。
 2. 用 `scripts\start_local.ps1` 或等价方式重启本地 Web；如果走远端,
    Web 必须连接 `ermbg.local.json` 或 `ERMBG_DIRECT_URL` 中的远端 URL。
 3. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
@@ -75,18 +74,14 @@
    或相关 UI 文案。
 5. 用 `/api/runtime-capabilities` 确认 Direct Worker URL、health
    `git_sha`/同步标记和 GPU/CPU 能力。
-6. 用 `backend=auto` 对 `/api/matte-candidates` 跑一次真实 HTTP smoke，
+6. 对 `/api/preprocess-analysis` 和 `/api/analyze-candidates` 跑真实 HTTP smoke，
+   确认 Preprocess/Analyze 元数据完整,且 Analyze 不执行完整 matte。
+7. 用 `backend=auto` 对兼容层 `/api/matte-candidates` 跑一次真实 HTTP smoke，
    确认 HTTP 200、`algorithm`、route/profile 元数据、`execution_backend`、
-   `execution_server_url` 以及 `server_elapsed_sec`。
-7. 如果 Web 报告 Direct Worker 连接错误，先检查
+   `execution_server_url`、`server_elapsed_sec` 以及兼容层 metadata。
+8. 如果 Web 报告 Direct Worker 连接错误，先检查
    `<services.direct_worker_url>/health`、远端 `7871` 监听和本机 `.venv`
    import `cv2`，再去改算法代码。
 
 最终的 Web 状态报告应说明 `7860` 的 PID、Web 是如何启动的、Direct Worker
 的健康状态，以及真实 HTTP smoke 的结果。
-
-## 可选的 Comfy 工作
-
-- 仅在需要自定义图支持时才使用 Comfy。
-- 如果 `comfy_nodes/` 有改动，需重新安装/同步自定义节点并重启 ComfyUI。
-- Comfy 包装层要保持轻薄，覆盖在共享的 ERMBG API 和 CorridorKey runner 之上。

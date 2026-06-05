@@ -41,7 +41,7 @@ def analyze_solid_bg_graphic(
     """Return an ownership-first matte for a solid-background graphic candidate.
 
     The initial implementation handles the deterministic class documented in
-    ``docs/solid-bg-graphic-plan.md``: stable flat background, exterior
+    ``docs/modules/known-b.md``: stable flat background, exterior
     topology, enclosed holes, simple subject-owned soft pixels, and exterior
     scalar darkening. Ambiguous photographic/gradient inputs are rejected so
     callers can fall back to the existing matting path.

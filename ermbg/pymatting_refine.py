@@ -833,6 +833,9 @@ def build_known_background_trimap(
     adaptive: bool = True,
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
+    semantic_decision: dict[str, Any] | None = None,
+    user_keep_mask: np.ndarray | None = None,
+    user_remove_mask: np.ndarray | None = None,
 ) -> tuple[Trimap, dict[str, Any]]:
     """Build a conservative known-B trimap for hard-edged solid graphics.
 
@@ -851,6 +854,30 @@ def build_known_background_trimap(
         raise ValueError("image_srgb must be HxWx3 uint8")
 
     bg = np.asarray(background_color, dtype=np.uint8)
+    semantic_policy = str((semantic_decision or {}).get("enclosed_near_bg_policy") or "auto_default")
+    mask_shape = image_srgb.shape[:2]
+    # Brush masks are semantic constraints, not alpha mattes. Thresholding at
+    # 0.5 makes antialiased PNG uploads behave like binary user intent while
+    # keeping empty masks inert; remove wins on overlap to prevent accidental
+    # opaque islands inside an explicitly erased region.
+    keep_constraint = None if user_keep_mask is None else np.asarray(user_keep_mask, dtype=np.float32) > 0.5
+    remove_constraint = None if user_remove_mask is None else np.asarray(user_remove_mask, dtype=np.float32) > 0.5
+    if keep_constraint is not None and keep_constraint.shape != mask_shape:
+        raise ValueError(f"user_keep_mask must have shape {mask_shape}, got {keep_constraint.shape}")
+    if remove_constraint is not None and remove_constraint.shape != mask_shape:
+        raise ValueError(f"user_remove_mask must have shape {mask_shape}, got {remove_constraint.shape}")
+    keep_mask = np.zeros(mask_shape, dtype=bool) if keep_constraint is None else keep_constraint
+    remove_mask = np.zeros(mask_shape, dtype=bool) if remove_constraint is None else remove_constraint
+    user_mask_info: dict[str, Any] = {
+        "source": "execute_user_mask",
+        "keep_pixels": int(keep_mask.sum()),
+        "remove_pixels": int(remove_mask.sum()),
+        "conflict_pixels": int((keep_mask & remove_mask).sum()),
+        "forced_subject_pixels": 0,
+        "forced_background_pixels": 0,
+        "applied": bool(keep_mask.any() or remove_mask.any()),
+        "conflict_policy": "remove_overrides_keep",
+    }
     ownership = _build_known_background_ownership(
         image_srgb,
         bg,
@@ -865,6 +892,12 @@ def build_known_background_trimap(
     # opaque body-outline trimap, execution consumes that contract directly
     # instead of reclassifying the asset here.
     body_outline_info: dict[str, Any] = {"enabled": trimap_mode == "same_key_opaque_body_outline"}
+    semantic_info: dict[str, Any] = {
+        "enclosed_near_bg_policy": semantic_policy,
+        "forced_subject_pixels": 0,
+        "forced_background_pixels": 0,
+        "applied": False,
+    }
     if trimap_mode == "same_key_opaque_body_outline":
         body_trimap, body_outline_info = _build_same_key_opaque_body_outline_trimap(
             image_srgb,
@@ -872,6 +905,21 @@ def build_known_background_trimap(
             bg_threshold=float(bg_threshold),
             unknown_grow_px=int(unknown_grow_px),
         )
+        body_sure_fg = body_trimap.sure_fg.copy()
+        body_sure_bg = body_trimap.sure_bg.copy()
+        body_unknown = body_trimap.unknown.copy()
+        keep_only = keep_mask & ~remove_mask
+        if keep_only.any():
+            body_sure_fg[keep_only] = True
+            body_sure_bg[keep_only] = False
+            body_unknown[keep_only] = False
+            user_mask_info["forced_subject_pixels"] = int(keep_only.sum())
+        if remove_mask.any():
+            body_sure_bg[remove_mask] = True
+            body_sure_fg[remove_mask] = False
+            body_unknown[remove_mask] = False
+            user_mask_info["forced_background_pixels"] = int(remove_mask.sum())
+        body_trimap = Trimap(sure_fg=body_sure_fg, sure_bg=body_sure_bg, unknown=body_unknown)
         return body_trimap, {
             "method": "same_key_opaque_body_outline",
             "adaptive": bool(adaptive),
@@ -886,6 +934,8 @@ def build_known_background_trimap(
             "subject_material_support": ownership.subject_support_info,
             **ownership.debug,
             "same_key_opaque_body_outline": body_outline_info,
+            "semantic_decision": semantic_info,
+            "user_mask_decision": user_mask_info,
             "shadow_background": {
                 **ownership.shadow_info,
                 "unknown_ownership_pixels": int(ownership.shadow_unknown.sum()),
@@ -900,7 +950,42 @@ def build_known_background_trimap(
 
     # If a source has no clear foreground core, PyMatting has nothing stable to
     # propagate from. Keep the trimap valid but report the weak support.
-    trimap = Trimap(sure_fg=ownership.sure_fg, sure_bg=ownership.sure_bg, unknown=ownership.unknown)
+    sure_fg = ownership.sure_fg.copy()
+    sure_bg = ownership.sure_bg.copy()
+    unknown = ownership.unknown.copy()
+    if semantic_policy in {"subject", "transparent_hole"} and bool(ownership.enclosed_bg.any()):
+        if semantic_policy == "subject":
+            forced_subject = ownership.enclosed_bg
+            sure_fg[forced_subject] = True
+            sure_bg[forced_subject] = False
+            unknown[forced_subject] = False
+            semantic_info = {
+                **semantic_info,
+                "applied": True,
+                "forced_subject_pixels": int(forced_subject.sum()),
+            }
+        else:
+            forced_background = ownership.enclosed_bg & ownership.bg_candidate
+            sure_bg[forced_background] = True
+            sure_fg[forced_background] = False
+            unknown[forced_background] = False
+            semantic_info = {
+                **semantic_info,
+                "applied": True,
+                "forced_background_pixels": int(forced_background.sum()),
+            }
+    keep_only = keep_mask & ~remove_mask
+    if keep_only.any():
+        sure_fg[keep_only] = True
+        sure_bg[keep_only] = False
+        unknown[keep_only] = False
+        user_mask_info["forced_subject_pixels"] = int(keep_only.sum())
+    if remove_mask.any():
+        sure_bg[remove_mask] = True
+        sure_fg[remove_mask] = False
+        unknown[remove_mask] = False
+        user_mask_info["forced_background_pixels"] = int(remove_mask.sum())
+    trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
     return trimap, {
         "method": "known_background_exterior_band",
         "adaptive": bool(adaptive),
@@ -914,6 +999,11 @@ def build_known_background_trimap(
         "foreground_seed_inset": ownership.foreground_seed_inset_info,
         "subject_material_support": ownership.subject_support_info,
         **ownership.debug,
+        "semantic_decision": semantic_info,
+        "user_mask_decision": user_mask_info,
+        "sure_fg_pixels": int(trimap.sure_fg.sum()),
+        "sure_bg_pixels": int(trimap.sure_bg.sum()),
+        "unknown_pixels": int(trimap.unknown.sum()),
         "same_key_opaque_body_outline": body_outline_info,
         "shadow_background": {
             **ownership.shadow_info,

@@ -17,16 +17,16 @@ import sys
 import time
 import zipfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
 from typing import Annotated, Any
-from urllib.parse import quote
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
-import numpy as np
 import cv2
+import numpy as np
 from PIL import Image, ImageDraw
 
 try:
@@ -36,21 +36,36 @@ except ImportError as e:  # pragma: no cover - exercised only without web extra
     raise ImportError('Install the web extra with `uv pip install -e ".[web]"`.') from e
 
 from . import io as ermbg_io
+from .analyze import analyze_candidates
 from .api import MatteResponse, matte_image
 from .artifacts import build_run_manifest, route_from_response, runtime_from_response, write_run_manifest
 from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 from .local_ownership import generate_local_ownership_candidate
+from .pipeline_contracts import (
+    AnalyzeResult,
+    ExecutionRequest,
+    PreprocessDecision,
+    SemanticDecision,
+    UserMaskDecision,
+    semantic_manifest_summary,
+)
+from .preprocess import (
+    NORMALIZE_KNOWN_BACKGROUND,
+    REMOVE_CHECKERBOARD,
+    analyze_input_preprocess,
+    apply_input_preprocess,
+    checkerboard_info_from_decision,
+    normalize_known_background_preprocess,
+)
 from .runtime_capabilities import collect_runtime_capabilities
 from .settings import get_bool_setting, get_direct_worker_endpoints, get_direct_worker_servers, get_setting
 from .slicer import (
     SliceBox,
     SliceResult,
-    analyze_checkerboard_background,
     classify_ui_slice,
     crop_slice,
     merge_overlapping_slice_boxes,
-    normalize_checkerboard_background_to_light_square,
     pad_slice_box,
     slice_image,
 )
@@ -109,6 +124,54 @@ CORRIDORKEY_EVAL_PREFIX = "corridorkey_"
 RMBG_EVAL_PREFIX = "rmbg_"
 DIRECT_WORKER_EVAL_PREFIX = "direct_worker_"
 WEB_MATTE_RUN_PREFIX = "web_matte_runs_"
+LEGACY_MATTE_CANDIDATES_COMPAT = {
+    "endpoint": "/api/matte-candidates",
+    "status": "compatibility_layer",
+    "replacement_flow": "Preprocess -> Analyze -> Decide -> Execute",
+}
+
+
+@dataclass(frozen=True)
+class WebExecutionRequest:
+    """Internal Web form adapter for the Execute boundary."""
+
+    file: UploadFile
+    corridorkey_hint_mask: UploadFile | None = None
+    user_keep_mask: UploadFile | None = None
+    user_remove_mask: UploadFile | None = None
+    backend: str = "auto"
+    parameter_source: str = "auto"
+    shadow_mode: str | None = None
+    shadow_enabled: bool | None = None
+    corridorkey_gamma_space: str = "sRGB"
+    corridorkey_despill_strength: float = 1.0
+    corridorkey_refiner_strength: float = 1.0
+    corridorkey_auto_despeckle: str = "On"
+    corridorkey_despeckle_size: int = 400
+    corridorkey_auto_mask: bool = False
+    corridorkey_color_protection: bool = True
+    corridorkey_protection_bg_max: float = 12.0
+    corridorkey_protection_fg_min: float = 28.0
+    corridorkey_screen_mode: str = "auto"
+    corridorkey_preset: str = "auto"
+    corridorkey_hard_ui_hint_mode: str = "bbox_2px"
+    pymatting_method: str = "cf"
+    pymatting_image_space: str = "linear"
+    pymatting_bg_source: str = "auto"
+    pymatting_bg_color: str = "0,200,0"
+    pymatting_bg_threshold: float = 3.5
+    pymatting_fg_threshold: float = 24.0
+    pymatting_boundary_band_px: int = 2
+    pymatting_auto_adapt: bool = True
+    pymatting_cg_maxiter: int = 1000
+    pymatting_cg_rtol: float = 1e-6
+    known_bg_glow_material_strength: float = 1.0
+    remove_checkerboard: bool = False
+    semantic_decision: str | None = None
+    analysis_payload: dict[str, Any] | None = None
+    execution_request_payload: dict[str, Any] | None = None
+
+
 GAME_EVAL_RUN_PREFIXES = (
     LOCAL_OWNERSHIP_EVAL_PREFIX,
     SOLID_GRAPHIC_EVAL_PREFIX,
@@ -304,6 +367,48 @@ def _load_upload_image(upload: UploadFile) -> Image.Image:
     return _image_from_upload_bytes(upload.file.read())
 
 
+def _upload_mask_array(upload: UploadFile | None) -> np.ndarray | None:
+    if upload is None:
+        return None
+    position = upload.file.tell()
+    data = upload.file.read()
+    upload.file.seek(position)
+    if not data:
+        return None
+    mask = np.asarray(Image.open(BytesIO(data)).convert("L"), dtype=np.uint8)
+    return mask > 127
+
+
+def _user_mask_upload_summary(
+    *,
+    keep_mask: UploadFile | None,
+    remove_mask: UploadFile | None,
+) -> dict[str, object]:
+    keep = _upload_mask_array(keep_mask)
+    remove = _upload_mask_array(remove_mask)
+    shape = keep.shape if keep is not None else (remove.shape if remove is not None else None)
+    total_pixels = int(shape[0] * shape[1]) if shape is not None else 0
+    keep_pixels = int(keep.sum()) if keep is not None else 0
+    remove_pixels = int(remove.sum()) if remove is not None else 0
+    conflict_pixels = int((keep & remove).sum()) if keep is not None and remove is not None and keep.shape == remove.shape else 0
+    return {
+        "keep_mask_provided": keep_mask is not None,
+        "remove_mask_provided": remove_mask is not None,
+        "keep_pixels": keep_pixels,
+        "remove_pixels": remove_pixels,
+        "conflict_pixels": conflict_pixels,
+        "total_pixels": total_pixels,
+        "keep_coverage": (keep_pixels / total_pixels) if total_pixels else 0.0,
+        "remove_coverage": (remove_pixels / total_pixels) if total_pixels else 0.0,
+        "keep_empty": keep_mask is not None and keep_pixels == 0,
+        "remove_empty": remove_mask is not None and remove_pixels == 0,
+        "keep_full": total_pixels > 0 and keep_pixels == total_pixels,
+        "remove_full": total_pixels > 0 and remove_pixels == total_pixels,
+        "high_risk_full_mask": total_pixels > 0 and (keep_pixels == total_pixels or remove_pixels == total_pixels),
+        "conflict_policy": "remove_overrides_keep",
+    }
+
+
 def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str]:
     data = upload.file.read()
     return _image_from_upload_bytes(data), hashlib.sha256(data).hexdigest()
@@ -311,12 +416,16 @@ def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str
 
 def _preprocess_checkerboard_image(image: Image.Image, enabled: bool) -> tuple[Image.Image, dict[str, object]]:
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    if not enabled:
-        return image, {"enabled": True, "requested": False, "applied": False}
-    normalized, info = normalize_checkerboard_background_to_light_square(rgb)
+    result = apply_input_preprocess(
+        rgb,
+        selected=[REMOVE_CHECKERBOARD] if enabled else [],
+    )
+    info = checkerboard_info_from_decision(result.decision)
+    info["analysis"] = result.analysis.to_dict()
+    info["decision"] = result.decision.to_dict()
     if not info.get("applied", False):
-        return image, {"requested": True, **info}
-    return Image.fromarray(normalized, mode="RGB"), {"requested": True, **info}
+        return image, info
+    return Image.fromarray(result.image_srgb, mode="RGB"), info
 
 
 def _image_digest(image: Image.Image) -> str:
@@ -361,17 +470,389 @@ def runtime_capabilities(
 def checkerboard_background_endpoint(file: Annotated[UploadFile, File()]) -> dict[str, object]:
     image = _load_upload_image(file)
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    analysis = analyze_checkerboard_background(rgb)
+    analysis = analyze_input_preprocess(rgb)
+    checkerboard = analysis.debug.get("checkerboard", {})
     return {
-        "accepted": bool(analysis.get("accepted", False)),
-        "recommended": bool(analysis.get("accepted", False)),
-        "analysis": analysis,
+        "accepted": bool(checkerboard.get("accepted", False)),
+        "recommended": bool(checkerboard.get("accepted", False)),
+        "analysis": checkerboard,
+        "preprocess": analysis.to_dict(),
     }
 
 
+@app.post("/api/preprocess-analysis")
+def preprocess_analysis_endpoint(
+    file: Annotated[UploadFile, File()],
+    remove_checkerboard: Annotated[bool, Form()] = False,
+) -> dict[str, object]:
+    image = _load_upload_image(file)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    result = apply_input_preprocess(
+        rgb,
+        selected=[REMOVE_CHECKERBOARD] if remove_checkerboard else [],
+    )
+    checkerboard = checkerboard_info_from_decision(result.decision)
+    return _json_safe_debug(
+        {
+            "schema": "ermbg.preprocess_analysis.v1",
+            "image_digest": _image_digest(image),
+            "width": int(rgb.shape[1]),
+            "height": int(rgb.shape[0]),
+            "selected": result.decision.selected,
+            "applied": result.decision.applied,
+            "preprocess": result.decision.to_dict(),
+            "analysis": result.analysis.to_dict(),
+            "checkerboard": checkerboard,
+            "next_endpoint": "/api/analyze-candidates",
+        }
+    )
+
+
+@app.post("/api/analyze-candidates")
+def analyze_candidates_endpoint(
+    file: Annotated[UploadFile, File()],
+    remove_checkerboard: Annotated[bool, Form()] = False,
+    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
+    corridorkey_preset: Annotated[str, Form()] = "auto",
+    fallback_bg_color: Annotated[str, Form()] = "0,200,0",
+) -> dict[str, object]:
+    if corridorkey_screen_mode not in {"auto", "green", "blue"}:
+        raise HTTPException(status_code=400, detail="corridorkey_screen_mode must be auto, green, or blue")
+    if corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
+        raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
+    fallback_bg = _parse_rgb_triplet(fallback_bg_color)
+    image = _load_upload_image(file)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    preprocess = apply_input_preprocess(
+        rgb,
+        selected=[REMOVE_CHECKERBOARD] if remove_checkerboard else [],
+    )
+    result = analyze_candidates(
+        preprocess.image_srgb,
+        preprocess=preprocess.decision,
+        screen_mode=corridorkey_screen_mode,
+        preset=corridorkey_preset,
+        fallback_background_color=fallback_bg,
+    )
+    payload = result.to_dict()
+    payload["preprocess_analysis"] = preprocess.analysis.to_dict()
+    payload["ambiguities"] = payload.get("ambiguity_regions", [])
+    return _json_safe_debug(payload)
+
+
+def _json_form_object(value: str | None, field_name: str) -> dict[str, Any]:
+    if value is None or not str(value).strip():
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object") from e
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object")
+    return payload
+
+
+def _semantic_candidate_payload(
+    analysis_payload: dict[str, Any],
+    selected_candidate_id: str,
+) -> tuple[dict[str, Any], float | None]:
+    for candidate in analysis_payload.get("candidates", []):
+        if isinstance(candidate, dict) and candidate.get("id") == selected_candidate_id:
+            confidence = candidate.get("confidence")
+            return (
+                dict(candidate.get("decision") or {}),
+                float(confidence) if isinstance(confidence, (int, float)) else None,
+            )
+    return ({"policy": "auto_default"}, None)
+
+
+def _selected_preprocess_ids_from_analysis(analysis_payload: dict[str, Any]) -> list[str]:
+    preprocess = analysis_payload.get("preprocess")
+    if not isinstance(preprocess, dict):
+        return []
+    selected = preprocess.get("selected")
+    return [str(item) for item in selected] if isinstance(selected, list) else []
+
+
+def _selected_preprocess_ids_from_contract(contract_payload: dict[str, Any] | None) -> list[str]:
+    if not isinstance(contract_payload, dict):
+        return []
+    preprocess = contract_payload.get("preprocess")
+    if not isinstance(preprocess, dict):
+        return []
+    selected = preprocess.get("selected")
+    return [str(item) for item in selected] if isinstance(selected, list) else []
+
+
+def _execute_remove_checkerboard_from_contract(analysis_payload: dict[str, Any], fallback: bool) -> bool:
+    selected = _selected_preprocess_ids_from_analysis(analysis_payload)
+    if selected:
+        return REMOVE_CHECKERBOARD in selected
+    if isinstance(analysis_payload.get("preprocess"), dict):
+        return False
+    return fallback
+
+
+def _route_payload_from_contract(contract_payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(contract_payload, dict):
+        return {}
+    route = contract_payload.get("route")
+    return dict(route) if isinstance(route, dict) else {}
+
+
+def _analysis_route_params(analysis_payload: dict[str, Any]) -> dict[str, Any]:
+    route = _route_payload_from_contract(analysis_payload)
+    params = route.get("params")
+    return dict(params) if isinstance(params, dict) else {}
+
+
+def _analysis_algorithm(analysis_payload: dict[str, Any]) -> str:
+    route = _route_payload_from_contract(analysis_payload)
+    return str(route.get("algorithm") or route.get("route") or "")
+
+
+def _analysis_explicit_algorithm(analysis_payload: dict[str, Any]) -> str:
+    route = _route_payload_from_contract(analysis_payload)
+    return str(route.get("algorithm") or "")
+
+
+def _analysis_route_decision_payload(analysis_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(analysis_payload, dict):
+        return None
+    route = _route_payload_from_contract(analysis_payload)
+    if not route:
+        return None
+    params = route.get("params")
+    analysis = route.get("analysis")
+    payload = {
+        "route": route.get("route") or route.get("algorithm"),
+        "algorithm": route.get("algorithm") or route.get("backend") or route.get("route"),
+        "backend": route.get("backend") or route.get("algorithm") or route.get("route"),
+        "asset_kind": route.get("asset_kind"),
+        "parameter_profile": route.get("parameter_profile"),
+        "execution_profile": route.get("execution_profile"),
+        "confidence": route.get("confidence"),
+        "reasons": route.get("reasons") if isinstance(route.get("reasons"), list) else [],
+        "params": params if isinstance(params, dict) else {},
+        "analysis": analysis if isinstance(analysis, dict) else {},
+    }
+    corridorkey_analysis = route.get("corridorkey_analysis")
+    if isinstance(corridorkey_analysis, dict):
+        payload["corridorkey_analysis"] = corridorkey_analysis
+    return payload
+
+
+def _rgb_color_from_payload(value: Any) -> tuple[int, int, int] | None:
+    if not (isinstance(value, (list, tuple)) and len(value) == 3):
+        return None
+    return tuple(int(np.clip(c, 0, 255)) for c in value)  # type: ignore[return-value]
+
+
+def _known_b_preprocess_from_contract(
+    image: Image.Image,
+    analysis_payload: dict[str, Any] | None,
+    pymatting_params: dict[str, object],
+) -> tuple[Image.Image, dict[str, Any], dict[str, Any]]:
+    """Apply Analyze-selected Known-B normalization before Execute.
+
+    The selected item is contract-driven. The executor receives the normalized
+    image plus metadata that tells it to skip its legacy private normalization.
+    """
+
+    analysis = analysis_payload or {}
+    selected = _selected_preprocess_ids_from_contract(analysis)
+    if NORMALIZE_KNOWN_BACKGROUND not in selected or _analysis_algorithm(analysis) != "pymatting_known_b":
+        return image, {}, {}
+
+    route_params = _analysis_route_params(analysis)
+    background = _rgb_color_from_payload(route_params.get("pymatting_bg_color"))
+    if background is None:
+        background = _rgb_color_from_payload(pymatting_params.get("pymatting_bg_color"))
+    if background is None:
+        return image, {"skipped": True, "reason": "missing_known_background_color"}, {}
+
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    normalized, decision = normalize_known_background_preprocess(
+        rgb,
+        background,
+        bg_threshold=float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
+        fg_threshold=float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
+        adaptive=bool(route_params.get("pymatting_auto_adapt", pymatting_params.get("pymatting_auto_adapt", True))),
+    )
+    normalization = dict(decision.metadata.get("known_background_normalization") or {})
+    execution_params = {
+        "pymatting_input_preprocessed_known_b": True,
+        "pymatting_background_normalization": normalization,
+        "pymatting_bg_source": "custom",
+        "pymatting_bg_color": background,
+        "pymatting_bg_threshold": float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
+        "pymatting_fg_threshold": float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
+        "pymatting_auto_adapt": bool(route_params.get("pymatting_auto_adapt", pymatting_params.get("pymatting_auto_adapt", True))),
+    }
+    for key in (
+        "pymatting_method",
+        "pymatting_image_space",
+        "pymatting_boundary_band_px",
+        "pymatting_cg_maxiter",
+        "pymatting_cg_rtol",
+        "pymatting_trimap_mode",
+        "pymatting_unknown_grow_px",
+    ):
+        if key in route_params:
+            execution_params[key] = route_params[key]
+        elif key in pymatting_params:
+            execution_params[key] = pymatting_params[key]
+    info = {
+        "selected": True,
+        "applied": NORMALIZE_KNOWN_BACKGROUND in decision.applied,
+        "background_color": [int(c) for c in background],
+        "metadata": normalization,
+    }
+    return Image.fromarray(normalized, mode="RGB"), info, execution_params
+
+
+def _execute_backend_from_analysis(requested_backend: str, analysis_payload: dict[str, Any] | None) -> str:
+    if requested_backend != "auto":
+        return requested_backend
+    algorithm = _analysis_explicit_algorithm(analysis_payload or {})
+    if algorithm in {"pymatting_known_b", "corridorkey", "known_bg_glow"}:
+        return algorithm
+    if algorithm == "rgba_passthrough":
+        return "passthrough"
+    return requested_backend
+
+
+def _semantic_execution_summary(
+    *,
+    analysis_payload: dict[str, Any],
+    selected_candidate_id: str,
+    semantic_decision_payload: dict[str, Any],
+    user_mask: UserMaskDecision | None = None,
+) -> dict[str, Any]:
+    analyze = AnalyzeResult.from_dict(analysis_payload) if analysis_payload else None
+    selected = selected_candidate_id.strip() or (
+        analyze.default_candidate_id if analyze is not None else "auto_default"
+    ) or "auto_default"
+    candidate_decision, candidate_confidence = _semantic_candidate_payload(analysis_payload, selected)
+    decision_payload = semantic_decision_payload or candidate_decision
+    source = "web_user" if analyze is not None and analyze.status == "needs_decision" else "auto_default"
+    semantic_decision = SemanticDecision(
+        candidate_id=selected,
+        decision=decision_payload,
+        source=source,
+        confidence=candidate_confidence,
+    )
+    preprocess = analyze.preprocess if analyze is not None and analyze.preprocess is not None else PreprocessDecision()
+    execution_request = ExecutionRequest(
+        analysis_id=analyze.analysis_id if analyze is not None else None,
+        preprocess=preprocess,
+        route=analyze.route if analyze is not None else {},
+        selected_candidate_id=selected,
+        semantic_decision=semantic_decision,
+        user_mask=user_mask,
+        metadata={
+            "schema": "ermbg.execution_request.summary.v1",
+            "source": "web_execute_candidate",
+        },
+    )
+    summary = semantic_manifest_summary(
+        analyze=analyze,
+        preprocess=preprocess,
+        selected_candidate_id=selected,
+        semantic_decision=semantic_decision,
+        user_mask=user_mask,
+    )
+    summary["execution_request"] = execution_request.to_dict()
+    return summary
+
+
+def _resolve_project_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _attach_semantic_execution_metadata(
+    payload: dict[str, object],
+    *,
+    analysis_payload: dict[str, Any],
+    selected_candidate_id: str,
+    semantic_decision_payload: dict[str, Any],
+    user_mask: UserMaskDecision | None = None,
+) -> dict[str, object]:
+    summary = _semantic_execution_summary(
+        analysis_payload=analysis_payload,
+        selected_candidate_id=selected_candidate_id,
+        semantic_decision_payload=semantic_decision_payload,
+        user_mask=user_mask,
+    )
+    semantic = summary["semantic"]
+    payload["preprocess"] = summary["preprocess"]
+    payload["semantic"] = semantic
+    payload["analysis_status"] = semantic.get("analysis_status")
+    payload["default_candidate_id"] = semantic.get("default_candidate_id")
+    payload["selected_candidate_id"] = semantic.get("selected_candidate_id")
+    payload["semantic_decision"] = semantic.get("semantic_decision")
+    payload["execution_request"] = summary["execution_request"]
+    debug = payload.get("debug")
+    if not isinstance(debug, dict):
+        debug = {}
+        payload["debug"] = debug
+    debug["semantic_execution"] = {
+        "mode": "stage6_front_loaded_decision_with_user_mask_metadata",
+        "selected_candidate_id": semantic.get("selected_candidate_id"),
+        "analysis_status": semantic.get("analysis_status"),
+        "user_mask_used": semantic.get("user_mask_used"),
+        "execution_request_schema": summary["execution_request"].get("metadata", {}).get("schema"),
+    }
+
+    artifact_value = payload.get("artifact_manifest")
+    if isinstance(artifact_value, str) and artifact_value:
+        manifest_path = _resolve_project_path(artifact_value)
+        if manifest_path.exists():
+            manifest = _load_json(manifest_path)
+            extra = manifest.setdefault("extra", {})
+            if isinstance(extra, dict):
+                extra["pipeline"] = summary
+            request_payload = manifest.setdefault("request", {})
+            if isinstance(request_payload, dict):
+                request_payload["selected_candidate_id"] = semantic.get("selected_candidate_id")
+            manifest_path.write_text(json.dumps(_json_safe_debug(manifest), indent=2, ensure_ascii=False), encoding="utf-8")
+            report_value = manifest.get("report")
+            if isinstance(report_value, str) and report_value:
+                report_path = manifest_path.parent / report_value
+                if report_path.exists():
+                    report = _load_json(report_path)
+                    report["preprocess"] = summary["preprocess"]
+                    report["semantic"] = semantic
+                    report["execution_request"] = summary["execution_request"]
+                    report_path.write_text(json.dumps(_json_safe_debug(report), indent=2, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
 @app.get("/api/artifacts")
-def artifacts_index(limit: int = Query(200, ge=1, le=1000)) -> dict[str, Any]:
-    items = _list_artifacts(limit=limit)
+def artifacts_index(
+    limit: int = Query(200, ge=1, le=1000),
+    type: str | None = Query(None),
+    route: str | None = Query(None),
+    execution_backend: str | None = Query(None),
+    analysis_status: str | None = Query(None),
+    selected_candidate_id: str | None = Query(None),
+    user_mask_used: bool | None = Query(None),
+) -> dict[str, Any]:
+    items = _list_artifacts(limit=1000)
+    filters = {
+        "type": type,
+        "route": route,
+        "execution_backend": execution_backend,
+        "analysis_status": analysis_status,
+        "selected_candidate_id": selected_candidate_id,
+    }
+    for key, value in filters.items():
+        if value:
+            items = [item for item in items if str(item.get(key) or "") == value]
+    if user_mask_used is not None:
+        items = [item for item in items if bool(item.get("user_mask_used")) is bool(user_mask_used)]
+    items = items[:limit]
     return {
         "schema": "ermbg.artifacts.index.v1",
         "count": len(items),
@@ -394,6 +875,7 @@ def artifact_detail(artifact_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/artifacts", response_class=HTMLResponse)
 def artifacts_page() -> str:
     return """<!doctype html>
 <html lang="zh-CN">
@@ -409,19 +891,24 @@ def artifacts_page() -> str:
     h1 { margin: 0; font-size: 18px; letter-spacing: 0; }
     nav { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     nav a { color: #196f5a; font-size: 13px; font-weight: 800; text-decoration: none; white-space: nowrap; }
-    main { width: min(1240px, 100%); margin: 0 auto; padding: 18px 24px 28px; }
-    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: #5a665f; font-size: 13px; }
+    main { width: min(1440px, 100%); margin: 0 auto; padding: 18px 24px 28px; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: #5a665f; font-size: 13px; flex-wrap: wrap; }
+    .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    select, input { min-height: 34px; border: 1px solid #cfd8cc; border-radius: 6px; padding: 0 8px; background: #ffffff; color: #18211d; font: inherit; }
+    input { width: 188px; }
     .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     button { min-height: 34px; padding: 0 12px; border: 0; border-radius: 6px; background: #196f5a; color: #ffffff; font: inherit; font-weight: 800; cursor: pointer; }
     .table-wrap { overflow: auto; border: 1px solid #d8e0d5; border-radius: 8px; background: #ffffff; }
-    table { width: 100%; min-width: 1040px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+    table { width: 100%; min-width: 1320px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
     th, td { border-bottom: 1px solid #e3e9e0; padding: 10px; vertical-align: top; text-align: left; }
     th { position: sticky; top: 0; z-index: 1; background: #fbfcfa; color: #53615a; font-size: 12px; white-space: nowrap; }
     tr:last-child td { border-bottom: 0; }
     .type-col { width: 132px; }
-    .backend-col { width: 174px; }
+    .pipeline-col { width: 190px; }
+    .candidate-col { width: 210px; }
+    .backend-col { width: 210px; }
     .route-col { width: 190px; }
-    .outputs-col { width: 260px; }
+    .outputs-col { width: 190px; }
     .manifest-col { width: 280px; }
     .pill { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 999px; background: #edf4ef; color: #245f53; font-size: 12px; font-weight: 900; white-space: nowrap; }
     .muted { color: #68746e; font-size: 12px; line-height: 1.35; }
@@ -437,19 +924,36 @@ def artifacts_page() -> str:
     <h1>ERMBG Artifacts</h1>
     <nav>
       <a href="/">上传页</a>
+      <a href="/artifacts">Artifacts</a>
       <a href="/eval/game">Game Eval</a>
     </nav>
   </header>
   <main>
     <div class="toolbar">
       <span class="status" id="status">读取 artifacts</span>
-      <button type="button" id="refresh">刷新</button>
+      <div class="filters" aria-label="artifact filters">
+        <select id="analysis-filter" aria-label="analysis status">
+          <option value="">全部状态</option>
+          <option value="ready">ready</option>
+          <option value="needs_decision">needs_decision</option>
+          <option value="unsupported">unsupported</option>
+        </select>
+        <select id="mask-filter" aria-label="mask usage">
+          <option value="">全部 mask</option>
+          <option value="true">mask used</option>
+          <option value="false">no mask</option>
+        </select>
+        <input id="route-filter" type="search" placeholder="route">
+        <button type="button" id="refresh">刷新</button>
+      </div>
     </div>
     <div class="table-wrap" id="table-wrap" hidden>
       <table aria-label="artifact list">
         <thead>
           <tr>
             <th class="type-col">类型</th>
+            <th class="pipeline-col">Pipeline</th>
+            <th class="candidate-col">Candidate / Mask</th>
             <th class="backend-col">后端</th>
             <th class="route-col">Route</th>
             <th class="outputs-col">输出</th>
@@ -467,14 +971,34 @@ def artifacts_page() -> str:
     const tableWrap = document.getElementById("table-wrap");
     const empty = document.getElementById("empty");
     const refreshButton = document.getElementById("refresh");
+    const analysisFilter = document.getElementById("analysis-filter");
+    const maskFilter = document.getElementById("mask-filter");
+    const routeFilter = document.getElementById("route-filter");
 
     function text(value) {
       return value === null || value === undefined || value === "" ? "—" : String(value);
     }
 
+    function esc(value) {
+      return text(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    }
+
     function shortPath(value) {
       const raw = text(value);
       return raw.length > 84 ? "…" + raw.slice(-83) : raw;
+    }
+
+    function listText(value) {
+      return Array.isArray(value) && value.length ? value.join(", ") : "—";
+    }
+
+    function maskSummary(item) {
+      if (!item.user_mask_used) return "mask: no";
+      const summary = item.user_mask_summary && typeof item.user_mask_summary === "object" ? item.user_mask_summary : {};
+      const keep = Number(summary.keep_pixels || 0);
+      const remove = Number(summary.remove_pixels || 0);
+      const risk = summary.high_risk_full_mask ? " · full-risk" : "";
+      return `mask: keep ${keep} / remove ${remove}${risk}`;
     }
 
     function renderOutputs(item) {
@@ -491,11 +1015,13 @@ def artifacts_page() -> str:
       items.forEach((item) => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td><span class="pill">${text(item.type)}</span><div class="muted">${new Date((Number(item.mtime) || 0) * 1000).toLocaleString()}</div></td>
-          <td><div>${text(item.backend)}</div><div class="muted">${text(item.requested_backend)}</div></td>
-          <td><div>${text(item.route)}</div><div class="muted">${text(item.execution_profile)}</div></td>
+          <td><span class="pill">${esc(item.type)}</span><div class="muted">${esc(new Date((Number(item.mtime) || 0) * 1000).toLocaleString())}</div></td>
+          <td><div>${esc(item.analysis_status)}</div><div class="muted">pre: ${esc(listText(item.preprocess && item.preprocess.selected))}</div></td>
+          <td><div>${esc(item.selected_candidate_id)}</div><div class="muted">${esc(maskSummary(item))}</div></td>
+          <td><div>${esc(item.execution_backend || item.backend)}</div><div class="muted">${esc(item.execution_server_url || item.requested_backend)}</div></td>
+          <td><div>${esc(item.route)}</div><div class="muted">${esc(item.execution_profile)}</div></td>
           <td>${renderOutputs(item)}</td>
-          <td><a class="manifest-link mono" href="/api/artifacts/${item.id}" target="_blank" rel="noreferrer">${shortPath(item.manifest)}</a></td>
+          <td><a class="manifest-link mono" href="/api/artifacts/${esc(item.id)}" target="_blank" rel="noreferrer">${esc(shortPath(item.manifest))}</a></td>
         `;
         rows.appendChild(tr);
       });
@@ -505,7 +1031,11 @@ def artifacts_page() -> str:
       statusEl.textContent = "读取 artifacts";
       refreshButton.disabled = true;
       try {
-        const response = await fetch("/api/artifacts?limit=200");
+        const params = new URLSearchParams({ limit: "200" });
+        if (analysisFilter.value) params.set("analysis_status", analysisFilter.value);
+        if (maskFilter.value) params.set("user_mask_used", maskFilter.value);
+        if (routeFilter.value.trim()) params.set("route", routeFilter.value.trim());
+        const response = await fetch(`/api/artifacts?${params.toString()}`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
         const items = Array.isArray(payload.items) ? payload.items : [];
@@ -523,6 +1053,8 @@ def artifacts_page() -> str:
     }
 
     refreshButton.addEventListener("click", loadArtifacts);
+    [analysisFilter, maskFilter].forEach((control) => control.addEventListener("change", loadArtifacts));
+    routeFilter.addEventListener("keydown", (event) => { if (event.key === "Enter") loadArtifacts(); });
     loadArtifacts();
   </script>
 </body>
@@ -621,6 +1153,12 @@ def _matte_page_html() -> str:
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
     .preview-actions { height: 56px; min-height: 56px; max-height: 56px; border-top: 1px solid #d9dfd7; border-bottom: 0; overflow: hidden; }
     .preview-actions a.download { flex: 0 0 auto; min-width: 128px; padding: 0 18px; white-space: nowrap; }
+    .semantic-view-tabs[hidden] { display: none; }
+    .semantic-view-tabs { min-width: 0; overflow-x: auto; }
+    .semantic-view-button { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 800; white-space: nowrap; }
+    .semantic-view-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
+    .confirm-matte { flex: 0 0 auto; min-width: 104px; padding: 0 14px; background: #1f5f9d; white-space: nowrap; }
+    .confirm-matte[hidden] { display: none; }
     .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; flex-shrink: 0; }
     .tab { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 700; }
     .tab[aria-selected="true"] { background: #196f5a; color: #ffffff; }
@@ -647,6 +1185,8 @@ def _matte_page_html() -> str:
     .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
     .candidate-tab { width: 76px; min-width: 76px; display: grid; grid-template-rows: 64px auto; gap: 4px; padding: 4px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
     .candidate-tab[aria-selected="true"] { border-color: #196f5a; box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18); color: #1c2320; }
+    .semantic-candidate-tab { width: 196px; min-width: 196px; grid-template-rows: auto; align-content: center; padding: 10px 12px; text-align: left; }
+    .semantic-candidate-tab .candidate-name { white-space: normal; line-height: 1.2; }
     .candidate-thumb { width: 68px; height: 64px; display: block; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
     .candidate-thumb img { width: 64px; height: 64px; object-fit: contain; display: block; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
@@ -659,6 +1199,7 @@ def _matte_page_html() -> str:
       <a class="nav-tab" href="/slice">切图</a>
       <a class="nav-tab is-active" href="/" aria-current="page">抠图</a>
       <a class="nav-tab" href="/batch">批量抠图</a>
+      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <span class="runtime-status" id="runtime-status" aria-live="polite">
@@ -759,6 +1300,7 @@ def _matte_page_html() -> str:
           <button id="sam-mask-button" type="button">Sam3</button>
           <span class="mask-mode-toggle" role="group" aria-label="画笔模式">
             <button class="mask-mode-button" type="button" aria-pressed="true" data-mask-mode="keep">保留</button>
+            <button class="mask-mode-button" type="button" aria-pressed="false" data-mask-mode="remove">移除</button>
             <button class="mask-mode-button" type="button" aria-pressed="false" data-mask-mode="erase">擦除</button>
           </span>
           <label>尺寸<input id="mask-brush-size" type="range" min="4" max="96" step="1" value="28"></label>
@@ -773,20 +1315,27 @@ def _matte_page_html() -> str:
           <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
         </div>
       </div>
-      <div class="candidate-panel" aria-label="候选结果">
-        <span class="candidate-title">候选</span>
-        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图"><span class="empty">候选会显示在这里</span></div>
+      <div class="candidate-panel" aria-label="执行结果与语义候选">
+        <span class="candidate-title">结果</span>
+        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="执行结果缩略图"><span class="empty">执行结果会显示在这里</span></div>
       </div>
       <div class="preview-actions">
         <span class="preview-statuses">
           <span class="status" id="status">等待上传</span>
         </span>
+        <div class="tabs semantic-view-tabs" id="semantic-view-tabs" role="group" aria-label="语义预览" hidden>
+          <button class="semantic-view-button" type="button" aria-pressed="true" data-semantic-view="overlay">Overlay</button>
+          <button class="semantic-view-button" type="button" aria-pressed="false" data-semantic-view="trimap">Trimap</button>
+          <button class="semantic-view-button" type="button" aria-pressed="false" data-semantic-view="hint">Hint</button>
+        </div>
+        <button class="confirm-matte" id="confirm-matte" type="button" disabled hidden>确定抠图</button>
         <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
       </div>
     </section>
   </main>
   <script>
     const form = document.getElementById("matte-form");
+    const compatibleMatteCandidatesEndpoint = "/api/matte-candidates";
     const file = document.getElementById("file");
     const backend = document.getElementById("backend");
     const removeCheckerboard = document.getElementById("remove-checkerboard");
@@ -798,6 +1347,9 @@ def _matte_page_html() -> str:
     const canvas = document.getElementById("canvas");
     const previewStage = document.getElementById("preview-stage");
     const download = document.getElementById("download");
+    const confirmMatte = document.getElementById("confirm-matte");
+    const semanticViewTabs = document.getElementById("semantic-view-tabs");
+    const semanticViewButtons = Array.from(document.querySelectorAll(".semantic-view-button"));
     const candidateList = document.getElementById("candidate-list");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
@@ -836,7 +1388,6 @@ def _matte_page_html() -> str:
     let previewPanX = 0;
     let previewPanY = 0;
     let dragStart = null;
-    let corridorkeyHintMaskFile = null;
     let sourceImage = null;
     let maskCanvas = null;
     let maskCtx = null;
@@ -847,6 +1398,10 @@ def _matte_page_html() -> str:
     let maskScale = 1;
     let maskPanX = 0;
     let maskPanY = 0;
+    let pendingAnalyzePayload = null;
+    let pendingExecuteFormData = null;
+    let selectedSemanticCandidate = null;
+    let semanticPreviewMode = "overlay";
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
@@ -867,7 +1422,7 @@ def _matte_page_html() -> str:
     }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; removeCheckerboard.disabled = isBusy || !file.files.length; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; removeCheckerboard.disabled = isBusy || !file.files.length; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = isBusy || !pendingAnalyzePayload || !selectedSemanticCandidate; if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
@@ -881,23 +1436,23 @@ def _matte_page_html() -> str:
     function resetMaskTransform() { maskScale = 1; maskPanX = 0; maskPanY = 0; applyMaskTransform(); }
     function maskTransformCss() { return `translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})`; }
     function applyMaskTransform() { const transform = maskTransformCss(); if (sourceImage) sourceImage.style.transform = transform; if (maskCanvas) maskCanvas.style.transform = transform; }
-    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); }
-    function clearMaskState() { corridorkeyHintMaskFile = null; maskDirty = false; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewMode = "overlay"; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">执行结果会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); semanticViewTabs.hidden = true; semanticViewButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.semanticView === semanticPreviewMode))); confirmMatte.hidden = true; confirmMatte.disabled = true; }
+    function clearMaskState() { maskDirty = false; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
     function layoutMaskCanvas() { if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) return; const frameRect = sourceFrame.getBoundingClientRect(); if (frameRect.width <= 0 || frameRect.height <= 0) { requestAnimationFrame(layoutMaskCanvas); return; } const fit = Math.min(frameRect.width / sourceImage.naturalWidth, frameRect.height / sourceImage.naturalHeight); if (!Number.isFinite(fit) || fit <= 0) return; const displayWidth = Math.max(1, sourceImage.naturalWidth * fit); const displayHeight = Math.max(1, sourceImage.naturalHeight * fit); const transform = maskTransformCss(); sourceImage.style.width = `${displayWidth}px`; sourceImage.style.height = `${displayHeight}px`; sourceImage.style.maxWidth = "none"; sourceImage.style.maxHeight = "none"; sourceImage.style.left = "50%"; sourceImage.style.top = "50%"; sourceImage.style.transform = transform; if (maskCanvas) { maskCanvas.style.left = "50%"; maskCanvas.style.top = "50%"; maskCanvas.style.width = `${displayWidth}px`; maskCanvas.style.height = `${displayHeight}px`; maskCanvas.style.transform = transform; } }
     function ensureMaskCanvas(width, height) { if (!maskCanvas) { maskCanvas = document.createElement("canvas"); maskCanvas.className = "mask-overlay"; sourceFrame.appendChild(maskCanvas); maskCanvas.addEventListener("pointerdown", beginMaskPaint); maskCanvas.addEventListener("pointermove", paintMask); maskCanvas.addEventListener("pointerup", endMaskPaint); maskCanvas.addEventListener("pointercancel", endMaskPaint); } maskCanvas.width = width; maskCanvas.height = height; maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true }); layoutMaskCanvas(); }
-    function exportHintMaskFile() { return new Promise((resolve) => { if (!maskCanvas || !maskCtx) { corridorkeyHintMaskFile = null; resolve(null); return; } const width = maskCanvas.width; const height = maskCanvas.height; const pixels = maskCtx.getImageData(0, 0, width, height); const exportCanvas = document.createElement("canvas"); exportCanvas.width = width; exportCanvas.height = height; const exportCtx = exportCanvas.getContext("2d"); const out = exportCtx.createImageData(width, height); for (let i = 0; i < pixels.data.length; i += 4) { const value = pixels.data[i + 3] > 8 ? 255 : 0; out.data[i] = value; out.data[i + 1] = value; out.data[i + 2] = value; out.data[i + 3] = 255; } exportCtx.putImageData(out, 0, 0); exportCanvas.toBlob((blob) => { if (!blob) { resolve(null); return; } corridorkeyHintMaskFile = new File([blob], "edited_hint_mask.png", { type: "image/png" }); resolve(corridorkeyHintMaskFile); }, "image/png"); }); }
-    function updateHintMaskFile() { exportHintMaskFile(); }
+    function exportMaskLayerFile(width, height, pixels, mode) { return new Promise((resolve) => { const exportCanvas = document.createElement("canvas"); exportCanvas.width = width; exportCanvas.height = height; const exportCtx = exportCanvas.getContext("2d"); const out = exportCtx.createImageData(width, height); let count = 0; for (let i = 0; i < pixels.data.length; i += 4) { const active = pixels.data[i + 3] > 8; const removePixel = pixels.data[i] > pixels.data[i + 2]; const include = active && (mode === "remove" ? removePixel : !removePixel); const value = include ? 255 : 0; if (include) count += 1; out.data[i] = value; out.data[i + 1] = value; out.data[i + 2] = value; out.data[i + 3] = 255; } if (count === 0) { resolve(null); return; } exportCtx.putImageData(out, 0, 0); exportCanvas.toBlob((blob) => { resolve(blob ? new File([blob], `user_${mode}_mask.png`, { type: "image/png" }) : null); }, "image/png"); }); }
+    async function exportUserMaskFiles() { if (!maskCanvas || !maskCtx || !maskDirty) return { keep: null, remove: null }; const width = maskCanvas.width; const height = maskCanvas.height; const pixels = maskCtx.getImageData(0, 0, width, height); const keep = await exportMaskLayerFile(width, height, pixels, "keep"); const remove = await exportMaskLayerFile(width, height, pixels, "remove"); return { keep, remove }; }
     function waitForSourceImage() { return new Promise((resolve, reject) => { if (!sourceImage) { reject(new Error("请先选择图片")); return; } if (sourceImage.complete && sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) { resolve(sourceImage); return; } const done = () => { cleanup(); if (sourceImage.naturalWidth > 0 && sourceImage.naturalHeight > 0) resolve(sourceImage); else reject(new Error("图片预览尚未载入")); }; const fail = () => { cleanup(); reject(new Error("图片预览载入失败")); }; const cleanup = () => { sourceImage.removeEventListener("load", done); sourceImage.removeEventListener("error", fail); }; sourceImage.addEventListener("load", done, { once: true }); sourceImage.addEventListener("error", fail, { once: true }); }); }
-    function loadMaskOverlay(dataUrl) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = async () => { try { setPreviewView("mask"); sourcePreview.classList.add("is-visible"); await waitForSourceImage(); const width = sourceImage && sourceImage.naturalWidth > 0 ? sourceImage.naturalWidth : img.naturalWidth; const height = sourceImage && sourceImage.naturalHeight > 0 ? sourceImage.naturalHeight : img.naturalHeight; if (width <= 0 || height <= 0) throw new Error("mask 尺寸无效"); ensureMaskCanvas(width, height); maskCtx.clearRect(0, 0, width, height); maskCtx.globalCompositeOperation = "source-over"; maskCtx.drawImage(img, 0, 0, width, height); const pixels = maskCtx.getImageData(0, 0, width, height); const data = pixels.data; for (let i = 0; i < data.length; i += 4) { const value = data[i]; data[i] = 0; data[i + 1] = 190; data[i + 2] = 255; data[i + 3] = value > 8 ? 190 : 0; } maskCtx.putImageData(pixels, 0, 0); maskDirty = false; corridorkeyHintMaskFile = null; requestAnimationFrame(() => { layoutMaskCanvas(); maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); }); maskStatus.textContent = "已生成 Sam3 mask，可编辑后作为自定义 mask"; resolve(); } catch (error) { reject(error); } }; img.onerror = () => reject(new Error("Sam3 mask 载入失败")); img.src = dataUrl; }); }
+    function loadMaskOverlay(dataUrl) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = async () => { try { setPreviewView("mask"); sourcePreview.classList.add("is-visible"); await waitForSourceImage(); const width = sourceImage && sourceImage.naturalWidth > 0 ? sourceImage.naturalWidth : img.naturalWidth; const height = sourceImage && sourceImage.naturalHeight > 0 ? sourceImage.naturalHeight : img.naturalHeight; if (width <= 0 || height <= 0) throw new Error("mask 尺寸无效"); ensureMaskCanvas(width, height); maskCtx.clearRect(0, 0, width, height); maskCtx.globalCompositeOperation = "source-over"; maskCtx.drawImage(img, 0, 0, width, height); const pixels = maskCtx.getImageData(0, 0, width, height); const data = pixels.data; for (let i = 0; i < data.length; i += 4) { const value = data[i]; data[i] = 0; data[i + 1] = 190; data[i + 2] = 255; data[i + 3] = value > 8 ? 255 : 0; } maskCtx.putImageData(pixels, 0, 0); maskDirty = true; requestAnimationFrame(() => { layoutMaskCanvas(); maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); }); maskStatus.textContent = "已生成 Sam3 mask"; resolve(); } catch (error) { reject(error); } }; img.onerror = () => reject(new Error("Sam3 mask 载入失败")); img.src = dataUrl; }); }
     function canvasPoint(event) { const rect = maskCanvas.getBoundingClientRect(); return { x: ((event.clientX - rect.left) / rect.width) * maskCanvas.width, y: ((event.clientY - rect.top) / rect.height) * maskCanvas.height }; }
-    function setMaskBrushMode(mode) { maskBrushMode = mode === "erase" ? "erase" : "keep"; maskBrushModeButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.maskMode === maskBrushMode))); }
-    function drawMaskBrush(event) { if (!maskCanvas || !maskCtx) return; const p = canvasPoint(event); const radius = Number(maskBrushSize.value || 28); maskCtx.save(); maskCtx.globalCompositeOperation = maskBrushMode === "erase" ? "destination-out" : "source-over"; maskCtx.fillStyle = "rgba(0,190,255,0.62)"; maskCtx.beginPath(); maskCtx.arc(p.x, p.y, radius, 0, Math.PI * 2); maskCtx.fill(); maskCtx.restore(); maskDirty = true; updateHintMaskFile(); maskStatus.textContent = "edited mask"; }
+    function setMaskBrushMode(mode) { maskBrushMode = ["keep", "remove", "erase"].includes(mode) ? mode : "keep"; maskBrushModeButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.maskMode === maskBrushMode))); }
+    function drawMaskBrush(event) { if (!maskCanvas || !maskCtx) return; const p = canvasPoint(event); const radius = Number(maskBrushSize.value || 28); maskCtx.save(); maskCtx.globalCompositeOperation = maskBrushMode === "erase" ? "destination-out" : "source-over"; maskCtx.fillStyle = maskBrushMode === "remove" ? "rgba(255,80,72,1)" : "rgba(0,190,255,1)"; maskCtx.beginPath(); maskCtx.arc(p.x, p.y, radius, 0, Math.PI * 2); maskCtx.fill(); maskCtx.restore(); maskDirty = true; maskStatus.textContent = "edited mask"; }
     function beginMaskPaint(event) { if (!maskCanvas) return; event.preventDefault(); event.stopPropagation(); maskPainting = true; maskCanvas.setPointerCapture(event.pointerId); drawMaskBrush(event); }
     function paintMask(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); drawMaskBrush(event); }
     function endMaskPaint(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); maskPainting = false; try { maskCanvas.releasePointerCapture(event.pointerId); } catch (_) {} }
-    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
+    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">执行结果会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
     function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); setPreviewView("preview"); }
-    function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
+    function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `结果 ${index + 1}`, selected: candidate.selected === true, meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的执行结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
     async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); maskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); maskStatus.textContent = "Sam3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "Sam3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; maskStatus.textContent = elapsed ? `已生成 Sam3 mask · ${elapsed}` : "已生成 Sam3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); maskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
     async function detectCheckerboard(fileObj) { removeCheckerboard.checked = false; removeCheckerboard.disabled = true; const data = new FormData(); data.append("file", fileObj); try { const response = await fetch("/api/checkerboard-background", { method: "POST", body: data }); if (!response.ok) throw new Error("checkerboard detection failed"); const payload = await response.json(); const analysis = payload.analysis || {}; removeCheckerboard.checked = payload.recommended === true; if (payload.recommended === true) { const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : ""; statusEl.textContent = `检测到网格${tile}，已勾选去网格`; } } catch (_) { removeCheckerboard.checked = false; } finally { removeCheckerboard.disabled = false; } }
@@ -911,7 +1466,7 @@ def _matte_page_html() -> str:
     autoMask.addEventListener("change", () => syncAutoMaskControls());
     samMaskButton.addEventListener("click", () => generateSamMask());
     maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
-    maskClearButton.addEventListener("click", () => { if (!maskCanvas || !maskCtx) return; maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); maskDirty = true; updateHintMaskFile(); maskStatus.textContent = "edited mask"; });
+    maskClearButton.addEventListener("click", () => { if (!maskCanvas || !maskCtx) return; maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); maskDirty = false; maskStatus.textContent = "mask cleared"; });
     window.addEventListener("resize", () => layoutMaskCanvas());
     viewTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewView(tab.dataset.view)));
     backgroundTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
@@ -921,9 +1476,7 @@ def _matte_page_html() -> str:
     canvas.addEventListener("pointermove", (event) => { if (!dragStart || dragStart.pointerId !== event.pointerId) return; previewPanX = dragStart.panX + event.clientX - dragStart.x; previewPanY = dragStart.panY + event.clientY - dragStart.y; applyPreviewTransform(); });
     function endDrag(event) { if (!dragStart || dragStart.pointerId !== event.pointerId) return; dragStart = null; canvas.classList.remove("is-dragging"); }
     canvas.addEventListener("pointerup", endDrag); canvas.addEventListener("pointercancel", endDrag); canvas.addEventListener("dblclick", () => { if (activeView !== "mask") resetPreviewTransform(); });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!file.files.length) return;
+    async function buildMatteFormData() {
       const formData = new FormData();
       formData.append("file", file.files[0]);
       formData.append("backend", backend.value);
@@ -941,15 +1494,99 @@ def _matte_page_html() -> str:
         if (control.type === "checkbox") formData.append(control.name, control.checked ? "true" : "false");
         else formData.append(control.name, control.value);
       });
-      const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && maskDirty;
-      const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null;
-      if (hintMaskFile) formData.append("corridorkey_hint_mask", hintMaskFile);
+      const userMasks = await exportUserMaskFiles();
+      if (userMasks.keep) formData.append("user_keep_mask", userMasks.keep);
+      if (userMasks.remove) formData.append("user_remove_mask", userMasks.remove);
+      const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && userMasks.keep;
+      if (shouldUseCustomMask) formData.append("corridorkey_hint_mask", userMasks.keep);
+      return formData;
+    }
+    function appendAnalyzeControls(formData) { formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false"); formData.append("corridorkey_screen_mode", document.getElementById("ck-screen-mode").value || "auto"); formData.append("corridorkey_preset", document.querySelector("[name='corridorkey_preset']").value || "auto"); }
+    function semanticRegionsForCandidate(candidate) { const ids = Array.isArray(candidate && candidate.regions) ? candidate.regions : []; const regions = Array.isArray(pendingAnalyzePayload && pendingAnalyzePayload.ambiguity_regions) ? pendingAnalyzePayload.ambiguity_regions : []; return ids.length ? regions.filter((region) => ids.includes(region.id)) : regions; }
+    function regionBox(region, width, height) { const raw = Array.isArray(region && region.bbox_xyxy) ? region.bbox_xyxy : [0, 0, 0, 0]; const x1 = Math.max(0, Math.min(width, Number(raw[0]) || 0)); const y1 = Math.max(0, Math.min(height, Number(raw[1]) || 0)); const x2 = Math.max(x1, Math.min(width, Number(raw[2]) || 0)); const y2 = Math.max(y1, Math.min(height, Number(raw[3]) || 0)); return { x: x1, y: y1, w: Math.max(1, x2 - x1), h: Math.max(1, y2 - y1) }; }
+    function renderSemanticPreview(candidate) {
+      if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) {
+        previewStage.innerHTML = '<span class="empty">预览载入中</span>';
+        return;
+      }
+      const width = sourceImage.naturalWidth;
+      const height = sourceImage.naturalHeight;
+      const previewCanvas = document.createElement("canvas");
+      previewCanvas.width = width;
+      previewCanvas.height = height;
+      const ctx = previewCanvas.getContext("2d");
+      const regions = semanticRegionsForCandidate(candidate);
+      if (semanticPreviewMode === "overlay") {
+        ctx.drawImage(sourceImage, 0, 0, width, height);
+        regions.forEach((region, index) => {
+          const box = regionBox(region, width, height);
+          ctx.fillStyle = "rgba(31, 95, 157, 0.22)";
+          ctx.strokeStyle = "rgba(31, 95, 157, 0.95)";
+          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 180));
+          ctx.fillRect(box.x, box.y, box.w, box.h);
+          ctx.strokeRect(box.x, box.y, box.w, box.h);
+          ctx.fillStyle = "rgba(31, 95, 157, 0.95)";
+          ctx.fillRect(box.x, Math.max(0, box.y - 22), Math.min(132, box.w), 22);
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "700 14px system-ui";
+          ctx.fillText(region.id || `region_${index + 1}`, box.x + 6, Math.max(16, box.y - 6));
+        });
+      } else if (semanticPreviewMode === "trimap") {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        regions.forEach((region) => {
+          const box = regionBox(region, width, height);
+          ctx.fillStyle = "rgba(128, 128, 128, 0.96)";
+          ctx.fillRect(box.x, box.y, box.w, box.h);
+          ctx.strokeStyle = "#202825";
+          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 160));
+          ctx.strokeRect(box.x, box.y, box.w, box.h);
+        });
+      } else {
+        const policy = candidate && candidate.decision ? candidate.decision.enclosed_near_bg_policy : "";
+        const keep = policy === "subject" || policy === "keep";
+        ctx.fillStyle = "#171c1a";
+        ctx.fillRect(0, 0, width, height);
+        regions.forEach((region) => {
+          const box = regionBox(region, width, height);
+          ctx.fillStyle = keep ? "rgba(0, 190, 255, 0.72)" : "rgba(255, 86, 72, 0.72)";
+          ctx.fillRect(box.x, box.y, box.w, box.h);
+          ctx.strokeStyle = keep ? "#7ee7ff" : "#ffd0c9";
+          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 160));
+          ctx.strokeRect(box.x, box.y, box.w, box.h);
+        });
+      }
+      const dataUrl = previewCanvas.toDataURL("image/png");
+      previewStage.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = dataUrl;
+      img.alt = candidate.label || "语义候选预览";
+      img.draggable = false;
+      img.className = "result-image";
+      resultImage = img;
+      canvas.classList.add("has-image");
+      previewStage.appendChild(img);
+      resetPreviewTransform();
+      setPreviewView("preview");
+      download.removeAttribute("href");
+      download.setAttribute("aria-disabled", "true");
+      metaEl.textContent = `${candidate.label || candidate.id || "语义候选"} · ${semanticPreviewMode}`;
+    }
+    function setSemanticPreviewMode(mode) { semanticPreviewMode = ["overlay", "trimap", "hint"].includes(mode) ? mode : "overlay"; semanticViewButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.semanticView === semanticPreviewMode))); if (selectedSemanticCandidate) renderSemanticPreview(selectedSemanticCandidate); }
+    function setSelectedSemanticCandidate(candidate) { selectedSemanticCandidate = candidate; candidateList.querySelectorAll(".semantic-candidate-tab").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.candidateId === (candidate.id || "")))); confirmMatte.hidden = false; confirmMatte.disabled = false; renderSemanticPreview(candidate); statusEl.textContent = "候选已选择，等待确认"; }
+    async function executeSemanticCandidate(candidate) {
+      if (!candidate) return;
+      if (!pendingExecuteFormData || !pendingAnalyzePayload) return;
+      const executeFormData = new FormData();
+      for (const [key, value] of pendingExecuteFormData.entries()) executeFormData.append(key, value);
+      executeFormData.append("selected_candidate_id", candidate.id || pendingAnalyzePayload.default_candidate_id || "auto_default");
+      executeFormData.append("semantic_decision", JSON.stringify(candidate.decision || {}));
+      executeFormData.append("analysis_payload", JSON.stringify(pendingAnalyzePayload));
       setBusy(true);
-      statusEl.textContent = "正在抠图";
-      strategyEl.textContent = backend.value;
+      statusEl.textContent = "正在执行决策";
       const startedAt = performance.now();
       try {
-        const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
+        const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
         if (!response.ok) {
           let message = "处理失败";
           try {
@@ -971,7 +1608,41 @@ def _matte_page_html() -> str:
       } finally {
         setBusy(false);
       }
+    }
+    function renderSemanticCandidates(payload) { pendingAnalyzePayload = payload; selectedSemanticCandidate = null; semanticViewTabs.hidden = false; previewStage.innerHTML = '<span class="empty">选择语义候选</span>'; canvas.classList.remove("has-image", "is-dragging"); download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = false; confirmMatte.disabled = true; candidateList.innerHTML = ""; const semanticCandidates = payload.candidates || []; semanticCandidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab semantic-candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", "false"); button.dataset.candidateId = candidate.id || ""; button.title = candidate.intent || candidate.label || "semantic candidate"; const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label || candidate.id || `候选 ${index + 1}`; button.appendChild(label); button.addEventListener("click", () => setSelectedSemanticCandidate(candidate)); candidateList.appendChild(button); }); if (!semanticCandidates.length) { candidateList.innerHTML = '<span class="empty">没有可执行候选</span>'; confirmMatte.disabled = true; } const defaultCandidate = semanticCandidates.find((candidate) => candidate.id === payload.default_candidate_id) || semanticCandidates.find((candidate) => candidate.default === true) || semanticCandidates[0]; if (defaultCandidate) setSelectedSemanticCandidate(defaultCandidate); setPreviewView("preview"); if (!defaultCandidate) metaEl.textContent = `语义候选 ${semanticCandidates.length}`; }
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file.files.length) return;
+      setBusy(true);
+      statusEl.textContent = "正在分析";
+      strategyEl.textContent = backend.value;
+      const analyzeFormData = new FormData();
+      analyzeFormData.append("file", file.files[0]);
+      appendAnalyzeControls(analyzeFormData);
+      try {
+        pendingExecuteFormData = await buildMatteFormData();
+        const response = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
+        if (!response.ok) {
+          let message = "分析失败";
+          try {
+            const payload = await response.json();
+            message = payload.detail || message;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        const payload = await response.json();
+        pendingAnalyzePayload = payload;
+        renderSemanticCandidates(payload);
+        statusEl.textContent = payload.status === "needs_decision" ? "需要选择语义候选" : "候选已就绪，等待确认";
+        strategyEl.textContent = payload.route && payload.route.route ? payload.route.route : (payload.status || "ready");
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
     });
+    semanticViewButtons.forEach((button) => button.addEventListener("click", () => setSemanticPreviewMode(button.dataset.semanticView)));
+    confirmMatte.addEventListener("click", () => executeSemanticCandidate(selectedSemanticCandidate));
     syncColorProtectionRange();
     syncGlowMaterialStrength();
     syncBackendSettings();
@@ -1500,10 +2171,10 @@ def _matte_page_html() -> str:
       <div class="canvas" id="canvas">
         <span class="empty">结果会显示在这里</span>
       </div>
-      <div class="candidate-panel" aria-label="候选结果">
-        <span class="candidate-title">候选</span>
-        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="候选缩略图">
-          <span class="empty">候选会显示在这里</span>
+      <div class="candidate-panel" aria-label="切图与执行结果">
+        <span class="candidate-title">切图/结果</span>
+        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="切图与执行结果缩略图">
+          <span class="empty">切图或结果会显示在这里</span>
         </div>
       </div>
       <div class="preview-actions">
@@ -1650,7 +2321,7 @@ def _matte_page_html() -> str:
       canvas.innerHTML = '<span class="empty">结果会显示在这里</span>';
       canvas.classList.remove("has-image", "is-dragging");
       candidateList.className = "candidate-list";
-      candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>';
+      candidateList.innerHTML = '<span class="empty">切图或结果会显示在这里</span>';
       metaEl.textContent = "RGBA PNG";
       confirmSlices.disabled = true;
       download.removeAttribute("href");
@@ -1677,7 +2348,7 @@ def _matte_page_html() -> str:
     function renderCandidateTabs() {
       candidateList.innerHTML = "";
       if (!candidates.length) {
-        candidateList.innerHTML = '<span class="empty">候选会显示在这里</span>';
+        candidateList.innerHTML = '<span class="empty">结果会显示在这里</span>';
         return;
       }
       candidates.forEach((candidate, index) => {
@@ -1737,7 +2408,7 @@ def _matte_page_html() -> str:
         url,
         revoke: true,
         label: "自动结果",
-        meta: "候选 1 / 1 · RGBA PNG",
+        meta: "结果 1 / 1 · RGBA PNG",
         downloadName: `${stem}_rgba.png`,
       }];
       setActiveCandidate(0);
@@ -1749,13 +2420,13 @@ def _matte_page_html() -> str:
       candidates = (payload.candidates || []).map((candidate, index) => ({
         url: candidate.rgba,
         revoke: false,
-        label: candidate.label || `候选 ${index + 1}`,
+        label: candidate.label || `结果 ${index + 1}`,
         selected: candidate.selected === true,
-        meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`,
+        meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`,
         downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png`,
       }));
       if (!candidates.length) {
-        throw new Error("没有可显示的候选结果");
+        throw new Error("没有可显示的执行结果");
       }
       const selectedIndex = candidates.findIndex((candidate) => candidate.selected);
       setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0);
@@ -1793,26 +2464,55 @@ def _matte_page_html() -> str:
       return new Blob([bytes], { type: mime });
     }
 
+    function defaultSemanticCandidate(payload) {
+      const candidates = payload.candidates || [];
+      return candidates.find((candidate) => candidate.id === payload.default_candidate_id) || candidates[0] || { id: "auto_default", decision: { policy: "auto_default" } };
+    }
+
+    async function executeDefaultDecision(fileObj, filename, fields) {
+      const analyzeFormData = new FormData();
+      analyzeFormData.append("file", fileObj, filename);
+      analyzeFormData.append("remove_checkerboard", fields.remove_checkerboard || "false");
+      const analyzeResponse = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
+      if (!analyzeResponse.ok) {
+        let message = "分析失败";
+        try {
+          const payload = await analyzeResponse.json();
+          message = payload.detail || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      const analysisPayload = await analyzeResponse.json();
+      const semanticCandidate = defaultSemanticCandidate(analysisPayload);
+      const executeFormData = new FormData();
+      executeFormData.append("file", fileObj, filename);
+      Object.entries(fields).forEach(([key, value]) => executeFormData.append(key, value));
+      executeFormData.append("selected_candidate_id", semanticCandidate.id || analysisPayload.default_candidate_id || "auto_default");
+      executeFormData.append("semantic_decision", JSON.stringify(semanticCandidate.decision || {}));
+      executeFormData.append("analysis_payload", JSON.stringify(analysisPayload));
+      const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
+      if (!response.ok) {
+        let message = "处理失败";
+        try {
+          const payload = await response.json();
+          message = payload.detail || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      return response.json();
+    }
+
     async function matteSlice(crop) {
-      const formData = new FormData();
-      formData.append("file", dataUrlToBlob(crop.rgb), crop.filename);
-      formData.append("backend", backend.value);
-      formData.append("remove_checkerboard", "false");
+      const cropBlob = dataUrlToBlob(crop.rgb);
       setBusy(true);
       statusEl.textContent = `正在抠图 · ${crop.label}`;
       strategyEl.textContent = crop.label;
       const startedAt = performance.now();
       try {
-        const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
-        if (!response.ok) {
-          let message = "处理失败";
-          try {
-            const payload = await response.json();
-            message = payload.detail || message;
-          } catch (_) {}
-          throw new Error(message);
-        }
-        const payload = await response.json();
+        const payload = await executeDefaultDecision(cropBlob, crop.filename, {
+          backend: backend.value,
+          remove_checkerboard: "false",
+        });
         const elapsed = formatElapsed(performance.now() - startedAt);
         const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
         setCandidatePayloads(payload, crop.filename);
@@ -2023,24 +2723,26 @@ def _matte_page_html() -> str:
       strategyEl.textContent = backend.value;
       const startedAt = performance.now();
       try {
-        const endpoint = task.value === "slice" ? "/api/slice-preview" : "/api/matte-candidates";
-        const response = await fetch(endpoint, { method: "POST", body: formData });
-        if (!response.ok) {
-          let message = "处理失败";
-          try {
-            const payload = await response.json();
-            message = payload.detail || message;
-          } catch (_) {}
-          throw new Error(message);
-        }
         if (task.value === "slice") {
+          const response = await fetch("/api/slice-preview", { method: "POST", body: formData });
+          if (!response.ok) {
+            let message = "处理失败";
+            try {
+              const payload = await response.json();
+              message = payload.detail || message;
+            } catch (_) {}
+            throw new Error(message);
+          }
           const payload = await response.json();
           setSlicePreviewPayload(payload);
           const bg = Array.isArray(payload.background_color) ? payload.background_color.join(",") : "";
           statusEl.textContent = "标注完成";
           strategyEl.textContent = bg ? `slice · ${bg}` : "slice";
         } else {
-          const payload = await response.json();
+          const payload = await executeDefaultDecision(file.files[0], file.files[0].name, {
+            backend: backend.value,
+            remove_checkerboard: removeCheckerboard.checked ? "true" : "false",
+          });
           const elapsed = formatElapsed(performance.now() - startedAt);
           const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
           setCandidatePayloads(payload, file.files[0].name);
@@ -2174,6 +2876,7 @@ def _batch_page_html() -> str:
       <a class="nav-tab" href="/slice">切图</a>
       <a class="nav-tab" href="/">抠图</a>
       <a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>
+      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
@@ -2255,6 +2958,11 @@ def _batch_page_html() -> str:
     function selectedCandidate(payload) {
       const candidates = payload.candidates || [];
       return candidates.find((candidate) => candidate.selected) || candidates[0] || null;
+    }
+
+    function defaultSemanticCandidate(payload) {
+      const candidates = payload.candidates || [];
+      return candidates.find((candidate) => candidate.id === payload.default_candidate_id) || candidates[0] || { id: "auto_default", decision: { policy: "auto_default" } };
     }
 
     function statusLabel(item) {
@@ -2357,15 +3065,31 @@ def _batch_page_html() -> str:
 
     async function processItem(item) {
       item.status = "running";
-      item.message = "正在提交 backend=auto";
+      item.message = "正在分析";
       render();
-      const formData = new FormData();
-      formData.append("file", item.file);
-      formData.append("backend", backend.value || "auto");
-      formData.append("shadow_mode", "auto");
-      formData.append("parameter_source", "auto");
       const startedAt = performance.now();
-      const response = await fetch("/api/matte-candidates", { method: "POST", body: formData });
+      const analyzeFormData = new FormData();
+      analyzeFormData.append("file", item.file);
+      analyzeFormData.append("remove_checkerboard", "false");
+      const analyzeResponse = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
+      if (!analyzeResponse.ok) {
+        let message = "处理失败";
+        try { message = (await analyzeResponse.json()).detail || message; } catch (_) {}
+        throw new Error(message);
+      }
+      const analysisPayload = await analyzeResponse.json();
+      const semanticCandidate = defaultSemanticCandidate(analysisPayload);
+      item.message = `正在执行 ${semanticCandidate.label || semanticCandidate.id || "默认决策"}`;
+      render();
+      const executeFormData = new FormData();
+      executeFormData.append("file", item.file);
+      executeFormData.append("backend", backend.value || "auto");
+      executeFormData.append("shadow_mode", "auto");
+      executeFormData.append("parameter_source", "auto");
+      executeFormData.append("selected_candidate_id", semanticCandidate.id || analysisPayload.default_candidate_id || "auto_default");
+      executeFormData.append("semantic_decision", JSON.stringify(semanticCandidate.decision || {}));
+      executeFormData.append("analysis_payload", JSON.stringify(analysisPayload));
+      const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
       if (!response.ok) {
         let message = "处理失败";
         try { message = (await response.json()).detail || message; } catch (_) {}
@@ -2389,6 +3113,8 @@ def _batch_page_html() -> str:
         execution_backend: payload.execution_backend,
         execution_url: payload.execution_url,
         server_elapsed_sec: payload.server_elapsed_sec,
+        analysis_status: payload.analysis_status,
+        selected_candidate_id: payload.selected_candidate_id,
       };
     }
 
@@ -2502,7 +3228,9 @@ def _slice_page_html() -> str:
     button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .checkerboard-field { grid-column: 1; }
+    .slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
+    .slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }
     .preview, .thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
     .workspace { min-height: 640px; display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
     .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
@@ -2536,6 +3264,7 @@ def _slice_page_html() -> str:
       <a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>
       <a class="nav-tab" href="/">抠图</a>
       <a class="nav-tab" href="/batch">批量抠图</a>
+      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
@@ -2544,10 +3273,10 @@ def _slice_page_html() -> str:
   <main>
     <form id="slice-form">
       <label>图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="checkbox-field"><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"><span>去网格</span></label>
       <div class="settings">
         <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
         <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
+        <label class="checkbox-field checkerboard-field"><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"><span>去网格</span></label>
       </div>
       <div class="slice-actions-main">
         <button id="preview-button" type="button" disabled>预览</button>
@@ -3129,7 +3858,7 @@ def _write_batch_result_artifacts(items: list[dict[str, Any]]) -> tuple[Path, by
             report_path=batch_summary_path,
             extra={"case_manifests": [case["case_manifest"] for case in case_summaries]},
         )
-        batch_manifest_path = write_run_manifest(batch_dir / "manifest.json", batch_manifest)
+        write_run_manifest(batch_dir / "manifest.json", batch_manifest)
 
     return batch_dir, zip_buf.getvalue(), f"{batch_id}.zip"
 
@@ -3348,6 +4077,7 @@ def _route_metadata(result: MatteResponse) -> dict[str, Any]:
     if not isinstance(reasons, list):
         reason = auto_route.get("reason")
         reasons = [reason] if isinstance(reason, str) and reason else []
+    execution_server_url = result.debug.get("execution_server_url") if isinstance(result.debug, dict) else None
     return {
         "algorithm": auto_route.get("algorithm") or auto_route.get("route"),
         "route": auto_route.get("route"),
@@ -3356,7 +4086,8 @@ def _route_metadata(result: MatteResponse) -> dict[str, Any]:
         "execution_profile": auto_route.get("execution_profile"),
         "execution_backend": auto_route.get("execution_backend"),
         "execution_server": result.debug.get("execution_server") if isinstance(result.debug, dict) else None,
-        "execution_url": result.debug.get("execution_server_url") if isinstance(result.debug, dict) else None,
+        "execution_url": execution_server_url,
+        "execution_server_url": execution_server_url,
         "parameter_source": result.debug.get("parameter_source") if isinstance(result.debug, dict) else None,
         "server_fallback_chain": result.debug.get("server_fallback_chain") if isinstance(result.debug, dict) else None,
         "route_confidence": auto_route.get("confidence"),
@@ -3471,6 +4202,14 @@ def _run_web_backend(
         }
         if kwargs.get("corridorkey_hint_mask") is not None:
             corridorkey_overrides["corridorkey_hint_mask"] = kwargs["corridorkey_hint_mask"]
+        if isinstance(kwargs.get("semantic_decision"), dict):
+            corridorkey_overrides["semantic_decision"] = kwargs["semantic_decision"]
+        if kwargs.get("user_keep_mask") is not None:
+            corridorkey_overrides["user_keep_mask"] = kwargs["user_keep_mask"]
+        if kwargs.get("user_remove_mask") is not None:
+            corridorkey_overrides["user_remove_mask"] = kwargs["user_remove_mask"]
+        if isinstance(kwargs.get("route_decision"), dict):
+            corridorkey_overrides["route_decision"] = kwargs["route_decision"]
         manual_params = (
             str(parameter_source or "auto").strip().lower() == "manual"
             or _direct_backend_base(execution_backend) == "direct-corridorkey"
@@ -3494,6 +4233,26 @@ def _run_web_backend(
             corridorkey_overrides["known_bg_glow_material_strength"] = float(
                 kwargs.get("known_bg_glow_material_strength", 1.0)
             )
+        known_b_keys = (
+            "pymatting_method",
+            "pymatting_image_space",
+            "pymatting_bg_source",
+            "pymatting_bg_color",
+            "pymatting_bg_threshold",
+            "pymatting_fg_threshold",
+            "pymatting_boundary_band_px",
+            "pymatting_auto_adapt",
+            "pymatting_cg_maxiter",
+            "pymatting_cg_rtol",
+            "pymatting_trimap_mode",
+            "pymatting_unknown_grow_px",
+            "pymatting_input_preprocessed_known_b",
+            "pymatting_background_normalization",
+        )
+        if direct_execution_backend == "direct-pymatting-known-b":
+            for key in known_b_keys:
+                if key in kwargs:
+                    corridorkey_overrides[key] = kwargs[key]
         fallback_chain: list[dict[str, Any]] = []
         last_exc: Exception | None = None
         for server in servers:
@@ -3707,52 +4466,24 @@ def matte_endpoint(
     )
 
 
-@app.post("/api/matte-candidates")
-def matte_candidates_endpoint(
-    file: Annotated[UploadFile, File()],
-    corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
-    backend: Annotated[str, Form()] = "auto",
-    parameter_source: Annotated[str, Form()] = "auto",
-    shadow_mode: Annotated[str | None, Form()] = None,
-    shadow_enabled: Annotated[bool | None, Form()] = None,
-    corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
-    corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
-    corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
-    corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
-    corridorkey_despeckle_size: Annotated[int, Form()] = 400,
-    corridorkey_auto_mask: Annotated[bool, Form()] = False,
-    corridorkey_color_protection: Annotated[bool, Form()] = True,
-    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
-    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
-    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
-    corridorkey_preset: Annotated[str, Form()] = "auto",
-    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
-    pymatting_method: Annotated[str, Form()] = "cf",
-    pymatting_image_space: Annotated[str, Form()] = "linear",
-    pymatting_bg_source: Annotated[str, Form()] = "auto",
-    pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
-    pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
-    pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
-    pymatting_boundary_band_px: Annotated[int, Form()] = 2,
-    pymatting_auto_adapt: Annotated[bool, Form()] = True,
-    pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
-    pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
-    known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+def _execute_matte_candidates_payload(
+    request: WebExecutionRequest,
+    *,
+    include_compatibility: bool = False,
 ) -> dict[str, object]:
-    if not _is_allowed_backend(backend):
+    if not _is_allowed_backend(request.backend):
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
-    if parameter_source not in {"auto", "manual"}:
+    if request.parameter_source not in {"auto", "manual"}:
         raise HTTPException(status_code=400, detail="parameter_source must be auto or manual")
-    if corridorkey_gamma_space not in {"sRGB", "Linear"}:
+    if request.corridorkey_gamma_space not in {"sRGB", "Linear"}:
         raise HTTPException(status_code=400, detail="corridorkey_gamma_space must be sRGB or Linear")
-    if corridorkey_auto_despeckle not in {"On", "Off"}:
+    if request.corridorkey_auto_despeckle not in {"On", "Off"}:
         raise HTTPException(status_code=400, detail="corridorkey_auto_despeckle must be On or Off")
-    if corridorkey_screen_mode not in {"auto", "green", "blue"}:
+    if request.corridorkey_screen_mode not in {"auto", "green", "blue"}:
         raise HTTPException(status_code=400, detail="corridorkey_screen_mode must be auto, green, or blue")
-    if corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
+    if request.corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
         raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
-    if corridorkey_hard_ui_hint_mode not in {
+    if request.corridorkey_hard_ui_hint_mode not in {
         "all_white",
         "bbox_2px",
         "boundary_2px",
@@ -3767,67 +4498,86 @@ def matte_candidates_endpoint(
                 "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
             ),
         )
-    if not 0.0 <= corridorkey_despill_strength <= 1.0:
+    if not 0.0 <= request.corridorkey_despill_strength <= 1.0:
         raise HTTPException(status_code=400, detail="corridorkey_despill_strength must be between 0 and 1")
-    if not 0.0 <= corridorkey_refiner_strength <= 4.0:
+    if not 0.0 <= request.corridorkey_refiner_strength <= 4.0:
         raise HTTPException(status_code=400, detail="corridorkey_refiner_strength must be between 0 and 4")
-    if not 0 <= corridorkey_despeckle_size <= 4096:
+    if not 0 <= request.corridorkey_despeckle_size <= 4096:
         raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
-    if not 0.0 <= known_bg_glow_material_strength <= 2.0:
+    if not 0.0 <= request.known_bg_glow_material_strength <= 2.0:
         raise HTTPException(status_code=400, detail="known_bg_glow_material_strength must be between 0 and 2")
-    if corridorkey_protection_fg_min <= corridorkey_protection_bg_max:
+    if request.corridorkey_protection_fg_min <= request.corridorkey_protection_bg_max:
         raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
-    shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
+    shadow_mode = _shadow_mode_from_form(request.shadow_mode, request.shadow_enabled)
     pymatting_params = _pymatting_kwargs(
-        pymatting_method=pymatting_method,
-        pymatting_image_space=pymatting_image_space,
-        pymatting_bg_source=pymatting_bg_source,
-        pymatting_bg_color=pymatting_bg_color,
-        pymatting_bg_threshold=pymatting_bg_threshold,
-        pymatting_fg_threshold=pymatting_fg_threshold,
-        pymatting_boundary_band_px=pymatting_boundary_band_px,
-        pymatting_auto_adapt=pymatting_auto_adapt,
-        pymatting_cg_maxiter=pymatting_cg_maxiter,
-        pymatting_cg_rtol=pymatting_cg_rtol,
+        pymatting_method=request.pymatting_method,
+        pymatting_image_space=request.pymatting_image_space,
+        pymatting_bg_source=request.pymatting_bg_source,
+        pymatting_bg_color=request.pymatting_bg_color,
+        pymatting_bg_threshold=request.pymatting_bg_threshold,
+        pymatting_fg_threshold=request.pymatting_fg_threshold,
+        pymatting_boundary_band_px=request.pymatting_boundary_band_px,
+        pymatting_auto_adapt=request.pymatting_auto_adapt,
+        pymatting_cg_maxiter=request.pymatting_cg_maxiter,
+        pymatting_cg_rtol=request.pymatting_cg_rtol,
     )
+    semantic_decision_payload = _json_form_object(request.semantic_decision, "semantic_decision")
+    execution_contract = request.execution_request_payload or request.analysis_payload
 
-    image = _load_upload_image(file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    image = _load_upload_image(request.file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, request.remove_checkerboard)
+    image, known_b_preprocess_info, known_b_execution_params = _known_b_preprocess_from_contract(
+        image,
+        execution_contract,
+        pymatting_params,
+    )
+    if known_b_execution_params:
+        pymatting_params = {**pymatting_params, **known_b_execution_params}
+    explicit_route_decision = _analysis_route_decision_payload(execution_contract)
     hint_mask = (
-        _load_upload_image(corridorkey_hint_mask)
-        if corridorkey_hint_mask is not None and not corridorkey_auto_mask
+        _load_upload_image(request.corridorkey_hint_mask)
+        if request.corridorkey_hint_mask is not None and not request.corridorkey_auto_mask
         else None
     )
+    keep_mask = _load_upload_image(request.user_keep_mask) if request.user_keep_mask is not None else None
+    remove_mask = _load_upload_image(request.user_remove_mask) if request.user_remove_mask is not None else None
     server_started_at = time.perf_counter()
     try:
         result = _run_web_backend(
             image,
-            backend=backend,
+            backend=_execute_backend_from_analysis(request.backend, execution_contract),
             shadow_mode=shadow_mode,
-            corridorkey_gamma_space=corridorkey_gamma_space,
-            corridorkey_despill_strength=corridorkey_despill_strength,
-            corridorkey_refiner_strength=corridorkey_refiner_strength,
-            corridorkey_auto_despeckle=corridorkey_auto_despeckle,
-            corridorkey_despeckle_size=corridorkey_despeckle_size,
-            corridorkey_auto_mask=corridorkey_auto_mask,
-            corridorkey_color_protection=corridorkey_color_protection,
-            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
-            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
-            corridorkey_screen_mode=corridorkey_screen_mode,
-            corridorkey_preset=corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-            known_bg_glow_material_strength=known_bg_glow_material_strength,
-            parameter_source=parameter_source,
+            corridorkey_gamma_space=request.corridorkey_gamma_space,
+            corridorkey_despill_strength=request.corridorkey_despill_strength,
+            corridorkey_refiner_strength=request.corridorkey_refiner_strength,
+            corridorkey_auto_despeckle=request.corridorkey_auto_despeckle,
+            corridorkey_despeckle_size=request.corridorkey_despeckle_size,
+            corridorkey_auto_mask=request.corridorkey_auto_mask,
+            corridorkey_color_protection=request.corridorkey_color_protection,
+            corridorkey_protection_bg_max=request.corridorkey_protection_bg_max,
+            corridorkey_protection_fg_min=request.corridorkey_protection_fg_min,
+            corridorkey_screen_mode=request.corridorkey_screen_mode,
+            corridorkey_preset=request.corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=request.corridorkey_hard_ui_hint_mode,
+            known_bg_glow_material_strength=request.known_bg_glow_material_strength,
+            parameter_source=request.parameter_source,
             corridorkey_hint_mask=hint_mask,
+            route_decision=explicit_route_decision,
+            semantic_decision=semantic_decision_payload or None,
+            user_keep_mask=keep_mask,
+            user_remove_mask=remove_mask,
             **pymatting_params,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
-    result.debug["input_preprocess"] = {"checkerboard": preprocess_info}
+    result.debug["input_preprocess"] = {
+        "checkerboard": preprocess_info,
+        "known_background_normalization": known_b_preprocess_info,
+    }
 
-    stem = (file.filename or "ermbg").rsplit(".", 1)[0]
+    stem = (request.file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    effective_backend = _effective_backend(backend, result)
+    effective_backend = _effective_backend(request.backend, result)
     if effective_backend in REMOTE_DIRECT_BACKENDS:
         if effective_backend == "corridorkey":
             direct_label = "CorridorKey"
@@ -3880,23 +4630,209 @@ def matte_candidates_endpoint(
         image_rgb=image_rgb,
         selected_rgba=next((candidate.rgba for candidate in candidates if candidate.selected), result.rgba),
         result=result,
-        filename=file.filename or "ermbg.png",
-        requested_backend=backend,
+        filename=request.file.filename or "ermbg.png",
+        requested_backend=request.backend,
         effective_backend=effective_backend,
         shadow_mode=shadow_mode,
         server_elapsed_sec=server_elapsed_sec,
     )
-    return {
+    payload: dict[str, object] = {
         "strategy": result.strategy_name,
         "background": list(result.background_color),
-        "backend": _response_backend(backend),
-        "requested_backend": backend,
+        "backend": _response_backend(request.backend),
+        "requested_backend": request.backend,
+        "pipeline_mode": "execute_candidate",
         **_route_metadata(result),
         "server_elapsed_sec": server_elapsed_sec,
         "artifact_manifest": str(artifact_manifest.relative_to(PROJECT_ROOT)) if _is_relative_to(artifact_manifest, PROJECT_ROOT) else str(artifact_manifest),
         "debug": _json_safe_debug(result.debug),
         "candidates": [_candidate_payload(candidate, stem) for candidate in candidates],
     }
+    if include_compatibility:
+        payload["compatibility"] = dict(LEGACY_MATTE_CANDIDATES_COMPAT)
+        payload["pipeline_mode"] = "legacy_matte_candidates_compat"
+    return payload
+
+
+@app.post("/api/matte-candidates")
+def matte_candidates_endpoint(
+    file: Annotated[UploadFile, File()],
+    corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
+    user_keep_mask: Annotated[UploadFile | None, File()] = None,
+    user_remove_mask: Annotated[UploadFile | None, File()] = None,
+    backend: Annotated[str, Form()] = "auto",
+    parameter_source: Annotated[str, Form()] = "auto",
+    shadow_mode: Annotated[str | None, Form()] = None,
+    shadow_enabled: Annotated[bool | None, Form()] = None,
+    corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
+    corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
+    corridorkey_despeckle_size: Annotated[int, Form()] = 400,
+    corridorkey_auto_mask: Annotated[bool, Form()] = False,
+    corridorkey_color_protection: Annotated[bool, Form()] = True,
+    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
+    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
+    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
+    corridorkey_preset: Annotated[str, Form()] = "auto",
+    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
+    pymatting_method: Annotated[str, Form()] = "cf",
+    pymatting_image_space: Annotated[str, Form()] = "linear",
+    pymatting_bg_source: Annotated[str, Form()] = "auto",
+    pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
+    pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
+    pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
+    pymatting_boundary_band_px: Annotated[int, Form()] = 2,
+    pymatting_auto_adapt: Annotated[bool, Form()] = True,
+    pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
+    pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
+    known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
+    remove_checkerboard: Annotated[bool, Form()] = False,
+    semantic_decision: Annotated[str | None, Form()] = None,
+) -> dict[str, object]:
+    return _execute_matte_candidates_payload(
+        WebExecutionRequest(
+            file=file,
+            corridorkey_hint_mask=corridorkey_hint_mask,
+            user_keep_mask=user_keep_mask,
+            user_remove_mask=user_remove_mask,
+            backend=backend,
+            parameter_source=parameter_source,
+            shadow_mode=shadow_mode,
+            shadow_enabled=shadow_enabled,
+            corridorkey_gamma_space=corridorkey_gamma_space,
+            corridorkey_despill_strength=corridorkey_despill_strength,
+            corridorkey_refiner_strength=corridorkey_refiner_strength,
+            corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+            corridorkey_despeckle_size=corridorkey_despeckle_size,
+            corridorkey_auto_mask=corridorkey_auto_mask,
+            corridorkey_color_protection=corridorkey_color_protection,
+            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            pymatting_method=pymatting_method,
+            pymatting_image_space=pymatting_image_space,
+            pymatting_bg_source=pymatting_bg_source,
+            pymatting_bg_color=pymatting_bg_color,
+            pymatting_bg_threshold=pymatting_bg_threshold,
+            pymatting_fg_threshold=pymatting_fg_threshold,
+            pymatting_boundary_band_px=pymatting_boundary_band_px,
+            pymatting_auto_adapt=pymatting_auto_adapt,
+            pymatting_cg_maxiter=pymatting_cg_maxiter,
+            pymatting_cg_rtol=pymatting_cg_rtol,
+            known_bg_glow_material_strength=known_bg_glow_material_strength,
+            remove_checkerboard=remove_checkerboard,
+            semantic_decision=semantic_decision,
+        ),
+        include_compatibility=True,
+    )
+
+
+@app.post("/api/execute-candidate")
+def execute_candidate_endpoint(
+    file: Annotated[UploadFile, File()],
+    corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,
+    user_keep_mask: Annotated[UploadFile | None, File()] = None,
+    user_remove_mask: Annotated[UploadFile | None, File()] = None,
+    selected_candidate_id: Annotated[str, Form()] = "auto_default",
+    semantic_decision: Annotated[str, Form()] = "{}",
+    analysis_payload: Annotated[str, Form()] = "{}",
+    backend: Annotated[str, Form()] = "auto",
+    parameter_source: Annotated[str, Form()] = "auto",
+    shadow_mode: Annotated[str | None, Form()] = None,
+    shadow_enabled: Annotated[bool | None, Form()] = None,
+    corridorkey_gamma_space: Annotated[str, Form()] = "sRGB",
+    corridorkey_despill_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_refiner_strength: Annotated[float, Form()] = 1.0,
+    corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
+    corridorkey_despeckle_size: Annotated[int, Form()] = 400,
+    corridorkey_auto_mask: Annotated[bool, Form()] = False,
+    corridorkey_color_protection: Annotated[bool, Form()] = True,
+    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
+    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
+    corridorkey_screen_mode: Annotated[str, Form()] = "auto",
+    corridorkey_preset: Annotated[str, Form()] = "auto",
+    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
+    pymatting_method: Annotated[str, Form()] = "cf",
+    pymatting_image_space: Annotated[str, Form()] = "linear",
+    pymatting_bg_source: Annotated[str, Form()] = "auto",
+    pymatting_bg_color: Annotated[str, Form()] = "0,200,0",
+    pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
+    pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
+    pymatting_boundary_band_px: Annotated[int, Form()] = 2,
+    pymatting_auto_adapt: Annotated[bool, Form()] = True,
+    pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
+    pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
+    known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
+    remove_checkerboard: Annotated[bool, Form()] = False,
+) -> dict[str, object]:
+    analysis = _json_form_object(analysis_payload, "analysis_payload")
+    decision = _json_form_object(semantic_decision, "semantic_decision")
+    user_mask_summary = _user_mask_upload_summary(
+        keep_mask=user_keep_mask,
+        remove_mask=user_remove_mask,
+    )
+    user_mask = UserMaskDecision(
+        keep_mask="uploaded:user_keep_mask" if user_keep_mask is not None else None,
+        remove_mask="uploaded:user_remove_mask" if user_remove_mask is not None else None,
+        source="web_user_brush" if user_keep_mask is not None or user_remove_mask is not None else "none",
+        summary=user_mask_summary,
+    )
+    execution_summary = _semantic_execution_summary(
+        analysis_payload=analysis,
+        selected_candidate_id=selected_candidate_id,
+        semantic_decision_payload=decision,
+        user_mask=user_mask,
+    )
+    payload = _execute_matte_candidates_payload(
+        WebExecutionRequest(
+            file=file,
+            corridorkey_hint_mask=corridorkey_hint_mask,
+            user_keep_mask=user_keep_mask,
+            user_remove_mask=user_remove_mask,
+            backend=backend,
+            parameter_source=parameter_source,
+            shadow_mode=shadow_mode,
+            shadow_enabled=shadow_enabled,
+            corridorkey_gamma_space=corridorkey_gamma_space,
+            corridorkey_despill_strength=corridorkey_despill_strength,
+            corridorkey_refiner_strength=corridorkey_refiner_strength,
+            corridorkey_auto_despeckle=corridorkey_auto_despeckle,
+            corridorkey_despeckle_size=corridorkey_despeckle_size,
+            corridorkey_auto_mask=corridorkey_auto_mask,
+            corridorkey_color_protection=corridorkey_color_protection,
+            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
+            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
+            corridorkey_screen_mode=corridorkey_screen_mode,
+            corridorkey_preset=corridorkey_preset,
+            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            pymatting_method=pymatting_method,
+            pymatting_image_space=pymatting_image_space,
+            pymatting_bg_source=pymatting_bg_source,
+            pymatting_bg_color=pymatting_bg_color,
+            pymatting_bg_threshold=pymatting_bg_threshold,
+            pymatting_fg_threshold=pymatting_fg_threshold,
+            pymatting_boundary_band_px=pymatting_boundary_band_px,
+            pymatting_auto_adapt=pymatting_auto_adapt,
+            pymatting_cg_maxiter=pymatting_cg_maxiter,
+            pymatting_cg_rtol=pymatting_cg_rtol,
+            known_bg_glow_material_strength=known_bg_glow_material_strength,
+            remove_checkerboard=_execute_remove_checkerboard_from_contract(analysis, remove_checkerboard),
+            semantic_decision=json.dumps(decision),
+            analysis_payload=analysis,
+            execution_request_payload=execution_summary["execution_request"],
+        ),
+        include_compatibility=False,
+    )
+    return _attach_semantic_execution_metadata(
+        payload,
+        analysis_payload=analysis,
+        selected_candidate_id=selected_candidate_id,
+        semantic_decision_payload=decision,
+        user_mask=user_mask,
+    )
 
 
 @app.post("/api/slice")
@@ -4092,6 +5028,10 @@ def _artifact_summary(manifest_path: Path) -> dict[str, Any] | None:
     runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
     route = manifest.get("route") if isinstance(manifest.get("route"), dict) else {}
     outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), dict) else {}
+    extra = manifest.get("extra") if isinstance(manifest.get("extra"), dict) else {}
+    pipeline = extra.get("pipeline") if isinstance(extra.get("pipeline"), dict) else {}
+    preprocess = pipeline.get("preprocess") if isinstance(pipeline.get("preprocess"), dict) else {}
+    semantic = pipeline.get("semantic") if isinstance(pipeline.get("semantic"), dict) else {}
     return {
         "id": _artifact_id(manifest_path),
         "type": _artifact_type(manifest_path, manifest),
@@ -4102,6 +5042,16 @@ def _artifact_summary(manifest_path: Path) -> dict[str, Any] | None:
         "strategy": runtime.get("strategy"),
         "route": route.get("route"),
         "execution_profile": route.get("execution_profile"),
+        "execution_backend": runtime.get("execution_backend") or runtime.get("backend"),
+        "execution_server_url": runtime.get("execution_server_url") or runtime.get("execution_url"),
+        "pipeline": pipeline,
+        "preprocess": preprocess,
+        "semantic": semantic,
+        "analysis_status": semantic.get("analysis_status"),
+        "selected_candidate_id": semantic.get("selected_candidate_id") or request.get("selected_candidate_id"),
+        "default_candidate_id": semantic.get("default_candidate_id"),
+        "user_mask_used": bool(semantic.get("user_mask_used", False)),
+        "user_mask_summary": semantic.get("user_mask_summary") if isinstance(semantic.get("user_mask_summary"), dict) else {},
         "input": manifest.get("input"),
         "report": manifest.get("report"),
         "outputs": outputs,
@@ -5547,7 +6497,7 @@ def _empty_game_eval_data() -> dict[str, object]:
 
 
 @app.post("/eval/game/run")
-def start_game_eval_run(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, object]:
+def start_game_eval_run(payload: Annotated[dict[str, Any] | None, Body()] = None) -> dict[str, object]:
     return _start_game_eval_batch(
         sample_ids=_selected_game_eval_sample_ids(payload),
         test_path=_selected_game_eval_test_path(payload),

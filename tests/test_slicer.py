@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -70,6 +71,28 @@ def test_checkerboard_background_detects_two_value_periodic_border_and_uses_ligh
     assert np.all(normalized[border] == light.reshape(1, 3))
 
 
+def test_checkerboard_background_detects_shaded_cells_with_weak_mean_split():
+    h, w = 180, 240
+    tile = 18
+    yy, xx = np.indices((h, w))
+    parity = ((xx // tile + yy // tile) & 1).astype(bool)
+    local_x = xx % tile
+    # Keep the actual checker centers two-valued while making each parity group
+    # internally uneven. This mirrors generated fake-transparent sheets where
+    # compression and soft shading nearly cancel the parity means.
+    light_cell = np.where(local_x < int(tile * 0.55), 252, 228)
+    dark_cell = np.where(local_x < int(tile * 0.55), 238, 257)
+    gray = np.where(parity, light_cell, dark_cell).clip(0, 255).astype(np.uint8)
+    image = np.repeat(gray[..., None], 3, axis=2)
+    image[58:122, 70:170] = [120, 220, 40]
+
+    info = analyze_checkerboard_background(image)
+
+    assert info["accepted"] is True
+    assert info["tile_px"] == pytest.approx(tile, abs=2.0)
+    assert info["checker_contrast"] >= 10.0
+
+
 def test_checkerboard_background_rejects_smooth_low_chroma_drift():
     h, w = 128, 192
     yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
@@ -80,6 +103,18 @@ def test_checkerboard_background_rejects_smooth_low_chroma_drift():
     info = analyze_checkerboard_background(image)
 
     assert info["accepted"] is False
+
+
+def test_checkerboard_background_rejects_sparse_neutral_card_grid():
+    sample = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "sheets" / "full_samples_v1_sheet.jpg"
+    image_bgr = cv2.imread(str(sample), cv2.IMREAD_COLOR)
+    assert image_bgr is not None
+    image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    info = analyze_checkerboard_background(image)
+
+    assert info["accepted"] is False
+    assert info["reason"] == "insufficient bright neutral border samples"
 
 
 def test_slice_image_merges_overlapping_subject_rectangles():

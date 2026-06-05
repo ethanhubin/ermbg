@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pytest
 from PIL import Image
@@ -106,6 +105,96 @@ def test_matte_image_pymatting_known_b_accepts_parameters():
     assert params["auto_adapt"] is False
     assert params["cg_maxiter"] == 1500
     assert params["cg_rtol"] == 1e-5
+
+
+def test_matte_image_pymatting_known_b_skips_private_normalization_when_preprocessed(monkeypatch):
+    import ermbg.pymatting_refine as refine
+
+    img = _solid_green_with_red_subject()
+    normalization = {"applied": True, "source": "test_preprocess"}
+
+    def fail_normalize(*args, **kwargs):
+        raise AssertionError("executor should not rerun Known-B background normalization")
+
+    monkeypatch.setattr(refine, "normalize_known_background_field", fail_normalize)
+
+    r = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(0, 200, 0),
+        pymatting_input_preprocessed_known_b=True,
+        pymatting_background_normalization=normalization,
+    )
+
+    background_normalization = r.debug["pymatting_known_b"]["background_normalization"]
+    assert background_normalization["source"] == "test_preprocess"
+    assert background_normalization["executor_skipped"] is True
+    assert background_normalization["skip_reason"] == "already_normalized_by_preprocess"
+
+
+def test_matte_image_pymatting_known_b_consumes_semantic_decision():
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    img = np.full((96, 96, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    r = np.sqrt((yy - 48) ** 2 + (xx - 48) ** 2)
+    img[(r <= 34) & (r >= 17)] = (230, 30, 30)
+
+    subject = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(255, 255, 255),
+        shadow_mode="off",
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+    )
+    hole = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(255, 255, 255),
+        shadow_mode="off",
+        semantic_decision={"enclosed_near_bg_policy": "transparent_hole"},
+    )
+
+    inner = r <= 14
+    assert subject.alpha[inner].mean() > 0.98
+    assert hole.alpha[inner].mean() < 0.02
+    assert subject.debug["pymatting_known_b"]["trimap"]["semantic_decision"]["enclosed_near_bg_policy"] == "subject"
+    assert hole.debug["pymatting_known_b"]["trimap"]["semantic_decision"]["enclosed_near_bg_policy"] == "transparent_hole"
+
+
+def test_matte_image_pymatting_known_b_consumes_user_keep_remove_masks():
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    img = np.full((96, 96, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    r = np.sqrt((yy - 48) ** 2 + (xx - 48) ** 2)
+    img[(r <= 34) & (r >= 17)] = (230, 30, 30)
+    inner = r <= 14
+
+    kept = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(255, 255, 255),
+        shadow_mode="off",
+        semantic_decision={"enclosed_near_bg_policy": "transparent_hole"},
+        user_keep_mask=inner.astype(np.float32),
+    )
+    removed = matte_image(
+        img,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(255, 255, 255),
+        shadow_mode="off",
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+        user_remove_mask=inner.astype(np.float32),
+    )
+
+    assert kept.alpha[inner].mean() > 0.98
+    assert removed.alpha[inner].mean() < 0.02
+    assert kept.debug["pymatting_known_b"]["trimap"]["user_mask_decision"]["forced_subject_pixels"] == int(inner.sum())
+    assert removed.debug["pymatting_known_b"]["trimap"]["user_mask_decision"]["forced_background_pixels"] == int(inner.sum())
 
 
 def test_matte_image_pymatting_known_b_auto_background_falls_back_when_unstable():

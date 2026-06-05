@@ -30,8 +30,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .artifacts import build_run_manifest, write_run_manifest
 from . import io as ermbg_io
+from .artifacts import build_run_manifest, write_run_manifest
 from .comfy import DEFAULT_COMFY_URL
 from .qa import run_qa
 from .router import RouteDecision, Strategy, classify_route, classify_strategy
@@ -286,6 +286,11 @@ def matte_image(
     pymatting_cg_rtol: float = 1e-6,
     pymatting_trimap_mode: str = "standard",
     pymatting_unknown_grow_px: int = 0,
+    pymatting_input_preprocessed_known_b: bool = False,
+    pymatting_background_normalization: dict[str, Any] | None = None,
+    semantic_decision: dict[str, Any] | None = None,
+    user_keep_mask: MaskLike | None = None,
+    user_remove_mask: MaskLike | None = None,
 ) -> MatteResponse:
     """Matte one image end-to-end.
 
@@ -346,6 +351,8 @@ def matte_image(
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
     corridorkey_hint_alpha = _to_mask(corridorkey_hint_mask, rgb.shape[:2], "corridorkey_hint_mask")
+    user_keep_alpha = _to_mask(user_keep_mask, rgb.shape[:2], "user_keep_mask")
+    user_remove_alpha = _to_mask(user_remove_mask, rgb.shape[:2], "user_remove_mask")
     if subject_mask is not None:
         raise ValueError("subject_mask belonged to the removed legacy ERMBG matting path")
     if vlm_prior:
@@ -476,6 +483,17 @@ def matte_image(
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
             trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
             unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", pymatting_unknown_grow_px),
+            input_preprocessed_known_b=auto_params.get(
+                "pymatting_input_preprocessed_known_b",
+                pymatting_input_preprocessed_known_b,
+            ),
+            input_background_normalization=auto_params.get(
+                "pymatting_background_normalization",
+                pymatting_background_normalization,
+            ),
+            semantic_decision=semantic_decision,
+            user_keep_mask=user_keep_alpha,
+            user_remove_mask=user_remove_alpha,
             auto_route=auto_route,
         )
 
@@ -804,12 +822,17 @@ def _matte_image_pymatting_known_b(
     cg_rtol: float,
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
+    input_preprocessed_known_b: bool = False,
+    input_background_normalization: dict[str, Any] | None = None,
+    semantic_decision: dict[str, Any] | None = None,
+    user_keep_mask: np.ndarray | None = None,
+    user_remove_mask: np.ndarray | None = None,
     auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
     from .pymatting_refine import (
+        build_known_background_trimap,
         build_same_key_opaque_inner_opaque_mask,
         build_same_key_opaque_proxy_subject_mask,
-        build_known_background_trimap,
         estimate_alpha_with_pymatting,
         estimate_stable_background_color,
         normalize_known_background_field,
@@ -861,6 +884,7 @@ def _matte_image_pymatting_known_b(
         bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
 
     requested_trimap_mode = str(trimap_mode or "standard")
+    semantic_decision_payload = dict(semantic_decision or {})
     effective_trimap_mode = requested_trimap_mode
     solver_rgb = rgb
     proxy_input_rgb: np.ndarray | None = None
@@ -899,13 +923,22 @@ def _matte_image_pymatting_known_b(
         }
         effective_trimap_mode = "standard"
 
-    processing_rgb, background_normalization = normalize_known_background_field(
-        solver_rgb,
-        selected_bg,
-        bg_threshold=float(bg_threshold),
-        fg_threshold=float(fg_threshold),
-        adaptive=effective_auto_adapt,
-    )
+    if input_preprocessed_known_b:
+        processing_rgb = solver_rgb
+        background_normalization = dict(input_background_normalization or {})
+        background_normalization.setdefault("applied", False)
+        background_normalization.setdefault("source", "input_preprocess")
+        background_normalization["executor_skipped"] = True
+        background_normalization["skip_reason"] = "already_normalized_by_preprocess"
+        background_normalization["background_color"] = [int(c) for c in selected_bg]
+    else:
+        processing_rgb, background_normalization = normalize_known_background_field(
+            solver_rgb,
+            selected_bg,
+            bg_threshold=float(bg_threshold),
+            fg_threshold=float(fg_threshold),
+            adaptive=effective_auto_adapt,
+        )
 
     trimap, trimap_info = build_known_background_trimap(
         processing_rgb,
@@ -916,6 +949,9 @@ def _matte_image_pymatting_known_b(
         adaptive=effective_auto_adapt,
         trimap_mode=effective_trimap_mode,
         unknown_grow_px=int(unknown_grow_px),
+        semantic_decision=semantic_decision_payload,
+        user_keep_mask=user_keep_mask,
+        user_remove_mask=user_remove_mask,
     )
     pm = estimate_alpha_with_pymatting(
         processing_rgb,
@@ -1058,6 +1094,8 @@ def _matte_image_pymatting_known_b(
                     "trimap_mode": requested_trimap_mode,
                     "effective_trimap_mode": effective_trimap_mode,
                     "unknown_grow_px": int(unknown_grow_px),
+                    "semantic_decision": semantic_decision_payload,
+                    "user_mask_decision": trimap_info.get("user_mask_decision", {}),
                 },
                 "same_key_proxy_subject": proxy_subject_info,
                 "same_key_inner_opaque_floor": same_key_inner_floor_info,
@@ -1170,6 +1208,8 @@ def _matte_image_pymatting_known_b(
             "pymatting": pm.debug,
             "alpha_pinhole_repair": alpha_pinhole_repair,
             "parameters": report["strategy"]["extras"]["parameters"],
+            "semantic_decision": semantic_decision_payload,
+            "user_mask_decision": trimap_info.get("user_mask_decision", {}),
             "same_key_proxy_subject": proxy_subject_info,
             "same_key_inner_opaque_floor": same_key_inner_floor_info,
         },

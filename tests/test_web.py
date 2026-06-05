@@ -34,6 +34,14 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _box_mask_png_bytes(box: tuple[slice, slice]) -> bytes:
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[box] = 255
+    buf = BytesIO()
+    Image.fromarray(mask, mode="L").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _checker_png_bytes(size: int = 96, tile: int = 12) -> bytes:
     yy, xx = np.indices((size, size))
     parity = ((xx // tile + yy // tile) & 1).astype(bool)
@@ -81,7 +89,7 @@ def test_index_serves_upload_ui():
     assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
     assert '<a class="nav-tab is-active" href="/" aria-current="page">抠图</a>' in response.text
     assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
-    assert 'href="/artifacts"' not in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
     assert '"/api/slice-preview"' not in response.text
     assert '"/api/slice-crops"' not in response.text
     assert 'id="runtime-status"' in response.text
@@ -90,7 +98,9 @@ def test_index_serves_upload_ui():
     assert 'data-runtime="direct"' in response.text
     assert 'fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5")' in response.text
     assert "confirm-slices" not in response.text
-    assert "候选缩略图" in response.text
+    assert "执行结果缩略图" in response.text
+    assert "候选结果" not in response.text
+    assert "候选会显示在这里" not in response.text
     assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
     assert 'role="tablist"' in response.text
     assert ".source-frame img { position: absolute; z-index: 1; left: 50%; top: 50%; display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
@@ -135,6 +145,21 @@ def test_index_serves_upload_ui():
     assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
     assert 'id="remove-checkerboard" name="remove_checkerboard" type="checkbox"' in response.text
     assert 'fetch("/api/checkerboard-background"' in response.text
+    assert 'const compatibleMatteCandidatesEndpoint = "/api/matte-candidates";' in response.text
+    assert 'fetch("/api/analyze-candidates"' in response.text
+    assert 'fetch("/api/execute-candidate"' in response.text
+    assert 'id="semantic-view-tabs"' in response.text
+    assert 'data-semantic-view="overlay"' in response.text
+    assert 'data-semantic-view="trimap"' in response.text
+    assert 'data-semantic-view="hint"' in response.text
+    assert 'id="confirm-matte" type="button" disabled hidden>确定抠图</button>' in response.text
+    assert "function renderSemanticCandidates(payload)" in response.text
+    assert "button.addEventListener(\"click\", () => setSelectedSemanticCandidate(candidate))" in response.text
+    assert "confirmMatte.addEventListener(\"click\", () => executeSemanticCandidate(selectedSemanticCandidate))" in response.text
+    assert "await executeSemanticCandidate(selected)" not in response.text
+    assert 'statusEl.textContent = payload.status === "needs_decision" ? "需要选择语义候选" : "候选已就绪，等待确认"' in response.text
+    assert 'executeFormData.append("selected_candidate_id"' in response.text
+    assert 'executeFormData.append("analysis_payload", JSON.stringify(pendingAnalyzePayload))' in response.text
     assert 'formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false")' in response.text
     assert 'id="pymatting-advanced"' in response.text
     assert 'name="pymatting_method"' in response.text
@@ -175,6 +200,7 @@ def test_index_serves_upload_ui():
     assert '"/api/sam-mask"' in response.text
     assert 'id="mask-brush-mode"' not in response.text
     assert 'data-mask-mode="keep">保留</button>' in response.text
+    assert 'data-mask-mode="remove">移除</button>' in response.text
     assert 'data-mask-mode="erase">擦除</button>' in response.text
     assert 'setMaskBrushMode(button.dataset.maskMode)' in response.text
     assert 'id="mask-brush-size"' in response.text
@@ -192,12 +218,13 @@ def test_index_serves_upload_ui():
     assert 'setPreviewView("mask")' in response.text
     assert 'let activeView = "mask";' in response.text
     assert "maskToolbarControls" in response.text
-    assert "edited_hint_mask.png" in response.text
-    assert "function exportHintMaskFile()" in response.text
-    assert "const value = pixels.data[i + 3] > 8 ? 255 : 0;" in response.text
-    assert 'const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && maskDirty;' in response.text
-    assert 'const hintMaskFile = shouldUseCustomMask ? await exportHintMaskFile() : null;' in response.text
-    assert 'formData.append("corridorkey_hint_mask", hintMaskFile)' in response.text
+    assert "user_${mode}_mask.png" in response.text
+    assert "function exportUserMaskFiles()" in response.text
+    assert 'formData.append("user_keep_mask", userMasks.keep)' in response.text
+    assert 'formData.append("user_remove_mask", userMasks.remove)' in response.text
+    assert "const removePixel = pixels.data[i] > pixels.data[i + 2];" in response.text
+    assert 'const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && userMasks.keep;' in response.text
+    assert 'formData.append("corridorkey_hint_mask", userMasks.keep)' in response.text
     assert 'name="corridorkey_protection_bg_max"' in response.text
     assert "syncBackendSettings()" in response.text
     assert 'canvas.addEventListener("wheel"' in response.text
@@ -276,10 +303,35 @@ def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
                 "schema": "ermbg.run.v1",
                 "input": "input.png",
                 "outputs": {"rgba": "output.png"},
-                "request": {"backend": "auto", "effective_backend": "comfy-pymatting-known-b"},
+                "request": {
+                    "backend": "auto",
+                    "effective_backend": "direct-pymatting-known-b",
+                    "selected_candidate_id": "protect_near_bg_subject",
+                },
                 "route": {"route": "pymatting_known_b", "execution_profile": "pymatting-hard-button"},
-                "runtime": {"kind": "comfy", "backend": "comfy-pymatting-known-b", "strategy": "comfy_pymatting_known_b"},
+                "runtime": {
+                    "kind": "direct-worker",
+                    "backend": "direct-pymatting-known-b",
+                    "strategy": "direct_pymatting_known_b",
+                    "execution_server_url": "http://127.0.0.1:7871",
+                },
                 "report": "summary.json",
+                "extra": {
+                    "pipeline": {
+                        "preprocess": {
+                            "selected": ["remove_checkerboard"],
+                            "applied": ["remove_checkerboard"],
+                            "metadata": {},
+                        },
+                        "semantic": {
+                            "analysis_status": "needs_decision",
+                            "default_candidate_id": "auto_default",
+                            "selected_candidate_id": "protect_near_bg_subject",
+                            "user_mask_used": True,
+                            "user_mask_summary": {"keep_pixels": 9},
+                        },
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -295,10 +347,26 @@ def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
     item = payload["items"][0]
     assert item["type"] == "web-matte"
     assert item["manifest"] == "out/web_matte_runs_20260601/run_a/manifest.json"
-    assert item["backend"] == "comfy-pymatting-known-b"
+    assert item["backend"] == "direct-pymatting-known-b"
     assert item["route"] == "pymatting_known_b"
     assert item["execution_profile"] == "pymatting-hard-button"
+    assert item["execution_backend"] == "direct-pymatting-known-b"
+    assert item["execution_server_url"] == "http://127.0.0.1:7871"
+    assert item["preprocess"]["selected"] == ["remove_checkerboard"]
+    assert item["analysis_status"] == "needs_decision"
+    assert item["selected_candidate_id"] == "protect_near_bg_subject"
+    assert item["user_mask_used"] is True
+    assert item["user_mask_summary"]["keep_pixels"] == 9
     assert item["urls"]["rgba"] == "/eval/game/file/out/web_matte_runs_20260601/run_a/output.png"
+
+    filtered = client.get("/api/artifacts", params={"analysis_status": "needs_decision", "user_mask_used": "true"})
+    assert filtered.status_code == 200
+    assert filtered.json()["count"] == 1
+    assert filtered.json()["items"][0]["selected_candidate_id"] == "protect_near_bg_subject"
+
+    filtered = client.get("/api/artifacts", params={"route": "corridorkey"})
+    assert filtered.status_code == 200
+    assert filtered.json()["count"] == 0
 
     detail = client.get(f"/api/artifacts/{item['id']}")
     assert detail.status_code == 200
@@ -307,11 +375,19 @@ def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
     assert detail_payload["manifest"]["schema"] == "ermbg.run.v1"
 
 
-def test_artifacts_page_is_removed():
+def test_artifacts_page_serves_stage7_backend_list():
     client = TestClient(app)
     response = client.get("/artifacts")
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert "ERMBG Artifacts" in response.text
+    assert "Candidate / Mask" in response.text
+    assert "Pipeline" in response.text
+    assert 'id="analysis-filter"' in response.text
+    assert 'id="mask-filter"' in response.text
+    assert 'id="route-filter"' in response.text
+    assert 'fetch(`/api/artifacts?${params.toString()}`)' in response.text
+    assert "maskSummary(item)" in response.text
 
 
 def test_slice_page_serves_slice_mode_entry():
@@ -322,10 +398,11 @@ def test_slice_page_serves_slice_mode_entry():
     assert '<a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>' in response.text
     assert '<a class="nav-tab" href="/">抠图</a>' in response.text
     assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
     assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
-    assert 'href="/artifacts"' not in response.text
     assert '"/api/slice-preview"' in response.text
     assert '"/api/slice-crops"' in response.text
+    assert "候选结果" not in response.text
     assert 'sessionStorage.setItem("ermbgPendingSlice"' in response.text
     assert 'sessionStorage.setItem("ermbgBatchQueue"' in response.text
     assert 'id="batch-all"' in response.text
@@ -335,7 +412,9 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'id="preview-button"' in response.text
     assert '<button id="preview-button" type="button" disabled>预览</button>' in response.text
     assert '<button id="confirm" type="button" disabled>切图</button>' in response.text
-    assert '.slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }' in response.text
+    assert ".checkerboard-field { grid-column: 1; }" in response.text
+    assert ".slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }" in response.text
+    assert ".slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }" in response.text
     assert 'const SLICE_STATE_KEY = "ermbgSliceWorkspace"' in response.text
     assert "restoreSliceState()" in response.text
     assert ".thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
@@ -381,6 +460,7 @@ def test_slice_page_serves_slice_mode_entry():
     assert "previewViewport.clear('<span class=\"empty\">自动标注会显示在这里</span>');" not in response.text
     assert 'statusEl.textContent = "已载入图片，点击预览";' in response.text
     assert 'id="remove-checkerboard" name="remove_checkerboard" type="checkbox"' in response.text
+    assert '<label class="checkbox-field checkerboard-field"><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"><span>去网格</span></label>' in response.text
     assert 'data.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false")' in response.text
 
 
@@ -393,14 +473,19 @@ def test_batch_page_serves_batch_queue_entry():
     assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
     assert '<a class="nav-tab" href="/">抠图</a>' in response.text
     assert '<a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>' in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
     assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
-    assert 'href="/artifacts"' not in response.text
     assert 'type="file"' in response.text
     assert "multiple" in response.text
-    assert '"/api/matte-candidates"' in response.text
+    assert '"/api/matte-candidates"' not in response.text
+    assert 'fetch("/api/analyze-candidates"' in response.text
+    assert 'fetch("/api/execute-candidate"' in response.text
+    assert 'executeFormData.append("selected_candidate_id"' in response.text
+    assert 'executeFormData.append("analysis_payload", JSON.stringify(analysisPayload))' in response.text
     assert '"/api/batch-results.zip"' in response.text
     assert 'sessionStorage.getItem("ermbgBatchQueue")' in response.text
-    assert "backend=auto" in response.text
+    assert '<option value="auto" selected>Auto Route</option>' in response.text
+    assert 'executeFormData.append("backend", backend.value || "auto")' in response.text
     assert 'id="lightbox"' in response.text
     assert 'id="lightbox-stage"' in response.text
     assert 'function openLightbox(item)' in response.text
@@ -625,7 +710,7 @@ def test_game_eval_expected_count_tracks_manifest():
 
     manifest = json.loads((web.PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json").read_text())
 
-    assert web._game_eval_expected_case_count() == manifest["case_count"] == 85
+    assert web._game_eval_expected_case_count() == manifest["case_count"] == len(manifest["cases"])
 
 
 def test_game_eval_start_run_accepts_selected_samples(monkeypatch, tmp_path):
@@ -1294,6 +1379,9 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     payload = response.json()
     assert payload["strategy"] == "white_bg"
     assert payload["background"] == [255, 255, 255]
+    assert payload["compatibility"]["status"] == "compatibility_layer"
+    assert payload["compatibility"]["replacement_flow"] == "Preprocess -> Analyze -> Decide -> Execute"
+    assert payload["pipeline_mode"] == "legacy_matte_candidates_compat"
     assert payload["candidates"][0]["id"] == "auto"
     assert payload["candidates"][0]["label"] == "自动结果"
     assert payload["candidates"][0]["regions"] == []
@@ -1312,6 +1400,31 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert Image.open(BytesIO(png)).mode == "RGBA"
 
 
+def test_preprocess_analysis_endpoint_does_not_execute(monkeypatch):
+    def fail_execute(*args, **kwargs):
+        raise AssertionError("Preprocess analysis must not execute matte")
+
+    monkeypatch.setattr(web, "_run_web_backend", fail_execute)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fail_execute)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/preprocess-analysis",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+        data={"remove_checkerboard": "true"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema"] == "ermbg.preprocess_analysis.v1"
+    assert payload["selected"] == ["remove_checkerboard"]
+    assert payload["applied"] == ["remove_checkerboard"]
+    assert payload["preprocess"]["selected"] == ["remove_checkerboard"]
+    assert payload["analysis"]["items"][0]["id"] == "remove_checkerboard"
+    assert payload["checkerboard"]["applied"] is True
+    assert payload["next_endpoint"] == "/api/analyze-candidates"
+
+
 def test_checkerboard_background_endpoint_recommends_grid_removal():
     client = TestClient(app)
     response = client.post(
@@ -1324,6 +1437,562 @@ def test_checkerboard_background_endpoint_recommends_grid_removal():
     assert payload["accepted"] is True
     assert payload["recommended"] is True
     assert payload["analysis"]["background_color"] == [254, 254, 254]
+    assert payload["preprocess"]["items"][0]["id"] == "remove_checkerboard"
+    assert payload["preprocess"]["background_model"]["color"] == [254, 254, 254]
+
+
+def test_analyze_candidates_endpoint_returns_enclosed_near_bg_candidates(monkeypatch):
+    def fail_execute(*args, **kwargs):
+        raise AssertionError("Analyze must not execute matte")
+
+    monkeypatch.setattr(web, "_run_web_backend", fail_execute)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fail_execute)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/analyze-candidates",
+        files={"file": ("ring.png", _ring_png_bytes(), "image/png")},
+        data={"remove_checkerboard": "false"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "needs_decision"
+    assert payload["route"]["algorithm"] == "pymatting_known_b"
+    assert payload["ambiguities"][0]["type"] == "enclosed_near_background"
+    assert [candidate["id"] for candidate in payload["candidates"]] == [
+        "auto_default",
+        "protect_near_bg_subject",
+        "cut_enclosed_holes",
+    ]
+    assert payload["candidates"][1]["decision"] == {"enclosed_near_bg_policy": "subject"}
+    assert payload["candidates"][2]["decision"] == {"enclosed_near_bg_policy": "transparent_hole"}
+
+
+def test_analyze_candidates_endpoint_ready_without_ambiguity(monkeypatch):
+    def fail_execute(*args, **kwargs):
+        raise AssertionError("Analyze must not execute matte")
+
+    monkeypatch.setattr(web, "_run_web_backend", fail_execute)
+    monkeypatch.setattr(web, "matte_image_direct_worker", fail_execute)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/analyze-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"remove_checkerboard": "false"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["default_candidate_id"] == "auto_default"
+    assert payload["ambiguities"] == []
+    assert [candidate["id"] for candidate in payload["candidates"]] == ["auto_default"]
+
+
+def test_execute_candidate_endpoint_records_semantic_decision(monkeypatch):
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        assert kwargs["shadow_mode"] == "auto"
+        assert kwargs["semantic_decision"] == {"enclosed_near_bg_policy": "subject"}
+        del backend, qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="white_bg",
+            background_color=(255, 255, 255),
+            debug={
+                "auto_route": {
+                    "route": "pymatting_known_b",
+                    "execution_profile": "pymatting-known-bg",
+                }
+            },
+        )
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    analysis = {
+        "status": "needs_decision",
+        "analysis_id": "analysis_test",
+        "preprocess": {"selected": ["remove_checkerboard"], "applied": ["remove_checkerboard"], "metadata": {}},
+        "default_candidate_id": "auto_default",
+        "route": {"route": "pymatting_known_b", "execution_profile": "pymatting-known-bg"},
+        "ambiguity_regions": [
+            {
+                "id": "ambiguous_enclosed_bg_0",
+                "type": "enclosed_near_background",
+                "bbox_xyxy": [1, 2, 3, 4],
+                "area_px": 8,
+            }
+        ],
+        "candidates": [
+            {"id": "auto_default", "decision": {"policy": "auto_default"}, "confidence": 0.5},
+            {
+                "id": "protect_near_bg_subject",
+                "decision": {"enclosed_near_bg_policy": "subject"},
+                "confidence": 0.7,
+            },
+        ],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "protect_near_bg_subject",
+            "semantic_decision": json.dumps({"enclosed_near_bg_policy": "subject"}),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["analysis_status"] == "needs_decision"
+    assert payload["pipeline_mode"] == "execute_candidate"
+    assert "compatibility" not in payload
+    assert payload["selected_candidate_id"] == "protect_near_bg_subject"
+    assert payload["semantic_decision"]["decision"] == {"enclosed_near_bg_policy": "subject"}
+    assert payload["semantic"]["ambiguity_types"] == ["enclosed_near_background"]
+    assert payload["preprocess"]["selected"] == ["remove_checkerboard"]
+    assert payload["execution_request"]["analysis_id"] == "analysis_test"
+    assert payload["execution_request"]["route"]["route"] == "pymatting_known_b"
+    assert payload["execution_request"]["selected_candidate_id"] == "protect_near_bg_subject"
+    assert payload["execution_request"]["semantic_decision"]["decision"] == {"enclosed_near_bg_policy": "subject"}
+    assert payload["execution_request"]["metadata"]["schema"] == "ermbg.execution_request.summary.v1"
+    assert payload["debug"]["semantic_execution"]["mode"] == "stage6_front_loaded_decision_with_user_mask_metadata"
+
+    manifest_path = Path(payload["artifact_manifest"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["request"]["selected_candidate_id"] == "protect_near_bg_subject"
+    assert manifest["extra"]["pipeline"]["semantic"]["selected_candidate_id"] == "protect_near_bg_subject"
+    assert manifest["extra"]["pipeline"]["execution_request"]["analysis_id"] == "analysis_test"
+    summary = json.loads((manifest_path.parent / manifest["report"]).read_text(encoding="utf-8"))
+    assert summary["semantic"]["semantic_decision"]["source"] == "web_user"
+    assert summary["execution_request"]["selected_candidate_id"] == "protect_near_bg_subject"
+
+
+def test_execute_candidate_endpoint_rejects_invalid_analysis_payload():
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"analysis_payload": "[]"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "analysis_payload must be a JSON object"
+
+
+def test_execute_candidate_endpoint_consumes_analysis_preprocess_decision(monkeypatch):
+    captured: list[bool] = []
+
+    def fake_preprocess(image, enabled):
+        captured.append(enabled)
+        return image, {"enabled": True, "requested": enabled, "applied": enabled}
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del image, backend, qa, kwargs
+        rgba = np.zeros((16, 16, 4), dtype=np.uint8)
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((16, 16), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="white_bg",
+            background_color=(255, 255, 255),
+        )
+
+    monkeypatch.setattr(web, "_preprocess_checkerboard_image", fake_preprocess)
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    selected_response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "remove_checkerboard": "false",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(
+                {
+                    "status": "ready",
+                    "preprocess": {"selected": ["remove_checkerboard"], "applied": ["remove_checkerboard"]},
+                    "route": {"route": "pymatting_known_b"},
+                    "candidates": [{"id": "auto_default", "decision": {"policy": "auto_default"}}],
+                }
+            ),
+        },
+    )
+    unselected_response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "remove_checkerboard": "true",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(
+                {
+                    "status": "ready",
+                    "preprocess": {"selected": [], "applied": []},
+                    "route": {"route": "pymatting_known_b"},
+                    "candidates": [{"id": "auto_default", "decision": {"policy": "auto_default"}}],
+                }
+            ),
+        },
+    )
+
+    assert selected_response.status_code == 200
+    assert unselected_response.status_code == 200
+    assert captured == [True, False]
+
+
+def test_execute_candidate_endpoint_passes_semantic_decision_to_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(255, 255, 255),
+                debug={
+                    "backend": "direct-worker",
+                    "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                    "auto_route": {
+                        "requested_backend": "direct-worker",
+                        "route": "pymatting_known_b",
+                        "execution_backend": "direct-pymatting-known-b",
+                    },
+                },
+            )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "protect_near_bg_subject",
+            "semantic_decision": json.dumps({"enclosed_near_bg_policy": "subject"}),
+            "analysis_payload": json.dumps(
+                {
+                    "status": "needs_decision",
+                    "route": {"route": "pymatting_known_b"},
+                    "candidates": [
+                        {
+                            "id": "protect_near_bg_subject",
+                            "decision": {"enclosed_near_bg_policy": "subject"},
+                        }
+                    ],
+                }
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["semantic_decision"] == {"enclosed_near_bg_policy": "subject"}
+    assert response.json()["execution_backend"] == "direct-pymatting-known-b"
+    assert response.json()["execution_server_url"] == web.DEFAULT_DIRECT_WORKER_URL
+
+
+def test_execute_candidate_endpoint_passes_analysis_route_decision_to_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_corridorkey",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-corridorkey"},
+                "auto_route": {
+                    "requested_backend": "direct-corridorkey",
+                    "route": "corridorkey",
+                    "execution_backend": "direct-corridorkey",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    analysis = {
+        "status": "ready",
+        "analysis_id": "analysis_corridorkey",
+        "route": {
+            "route": "corridorkey",
+            "algorithm": "corridorkey",
+            "backend": "corridorkey",
+            "asset_kind": "game_ui",
+            "parameter_profile": "corridorkey-detail-safe",
+            "execution_profile": "corridorkey-hard-ui",
+            "confidence": 0.91,
+            "reasons": ["green_screen_evidence"],
+            "params": {"corridorkey_gamma_space": "Linear", "corridorkey_auto_mask": True},
+            "analysis": {"screen": {"kind": "green"}},
+            "corridorkey_analysis": {"screen_mode": "green"},
+        },
+        "candidates": [{"id": "auto_default", "decision": {"policy": "auto_default"}}],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-corridorkey"
+    route_decision = captured["route_decision"]
+    assert isinstance(route_decision, dict)
+    assert route_decision["route"] == "corridorkey"
+    assert route_decision["backend"] == "corridorkey"
+    assert route_decision["execution_profile"] == "corridorkey-hard-ui"
+    assert route_decision["params"]["corridorkey_gamma_space"] == "Linear"
+    assert route_decision["analysis"] == {"screen": {"kind": "green"}}
+    assert route_decision["corridorkey_analysis"] == {"screen_mode": "green"}
+    payload = response.json()
+    assert payload["execution_request"]["route"]["execution_profile"] == "corridorkey-hard-ui"
+    assert payload["execution_backend"] == "direct-corridorkey"
+
+
+def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(255, 255, 255),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-pymatting-known-b",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    analysis = {
+        "status": "ready",
+        "preprocess": {
+            "selected": ["normalize_known_background"],
+            "applied": ["normalize_known_background"],
+            "metadata": {},
+        },
+        "route": {
+            "route": "pymatting_known_b",
+            "algorithm": "pymatting_known_b",
+            "params": {
+                "pymatting_bg_source": "custom",
+                "pymatting_bg_color": [255, 255, 255],
+                "pymatting_bg_threshold": 4.5,
+                "pymatting_fg_threshold": 28.0,
+                "pymatting_auto_adapt": False,
+                "pymatting_boundary_band_px": 3,
+            },
+        },
+        "candidates": [{"id": "auto_default", "decision": {"policy": "auto_default"}}],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-pymatting-known-b"
+    assert captured["pymatting_input_preprocessed_known_b"] is True
+    assert captured["pymatting_bg_source"] == "custom"
+    assert captured["pymatting_bg_color"] == (255, 255, 255)
+    assert captured["pymatting_bg_threshold"] == 4.5
+    assert captured["pymatting_fg_threshold"] == 28.0
+    assert captured["pymatting_auto_adapt"] is False
+    assert captured["pymatting_boundary_band_px"] == 3
+    route_decision = captured["route_decision"]
+    assert isinstance(route_decision, dict)
+    assert route_decision["route"] == "pymatting_known_b"
+    assert route_decision["params"]["pymatting_bg_color"] == [255, 255, 255]
+    assert isinstance(captured["pymatting_background_normalization"], dict)
+    payload = response.json()
+    preprocess_debug = payload["debug"]["input_preprocess"]["known_background_normalization"]
+    assert preprocess_debug["selected"] is True
+    assert preprocess_debug["background_color"] == [255, 255, 255]
+
+
+def test_execute_candidate_endpoint_passes_user_masks_to_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(255, 255, 255),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={
+            "file": ("input.png", _png_bytes(), "image/png"),
+            "user_keep_mask": ("keep.png", _box_mask_png_bytes((slice(2, 5), slice(2, 5))), "image/png"),
+            "user_remove_mask": ("remove.png", _box_mask_png_bytes((slice(7, 10), slice(7, 10))), "image/png"),
+        },
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "protect_near_bg_subject",
+            "semantic_decision": json.dumps({"enclosed_near_bg_policy": "subject"}),
+            "analysis_payload": json.dumps(
+                {
+                    "status": "needs_decision",
+                    "route": {"route": "pymatting_known_b"},
+                    "candidates": [
+                        {
+                            "id": "protect_near_bg_subject",
+                            "decision": {"enclosed_near_bg_policy": "subject"},
+                        }
+                    ],
+                }
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert np.asarray(captured["user_keep_mask"].convert("L"), dtype=np.uint8).sum() == 9 * 255
+    assert np.asarray(captured["user_remove_mask"].convert("L"), dtype=np.uint8).sum() == 9 * 255
+    payload = response.json()
+    assert payload["semantic"]["user_mask_used"] is True
+    assert payload["semantic"]["user_mask_summary"]["keep_mask_provided"] is True
+    assert payload["semantic"]["user_mask_summary"]["remove_mask_provided"] is True
+    assert payload["semantic"]["user_mask_summary"]["keep_pixels"] == 9
+    assert payload["semantic"]["user_mask_summary"]["remove_pixels"] == 9
+    assert payload["semantic"]["user_mask_summary"]["conflict_pixels"] == 0
+    assert payload["semantic"]["user_mask_summary"]["high_risk_full_mask"] is False
+    manifest = json.loads(Path(payload["artifact_manifest"]).read_text(encoding="utf-8"))
+    assert manifest["extra"]["pipeline"]["semantic"]["user_mask_used"] is True
+    assert manifest["extra"]["pipeline"]["semantic"]["user_mask_summary"]["keep_pixels"] == 9
+
+
+def test_execute_candidate_endpoint_marks_full_user_mask_high_risk(monkeypatch):
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(255, 255, 255),
+            debug={
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                }
+            },
+        )
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={
+            "file": ("input.png", _png_bytes(), "image/png"),
+            "user_keep_mask": ("keep.png", _box_mask_png_bytes((slice(None), slice(None))), "image/png"),
+        },
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps({"status": "ready", "route": {"route": "pymatting_known_b"}}),
+        },
+    )
+
+    assert response.status_code == 200
+    summary = response.json()["semantic"]["user_mask_summary"]
+    assert summary["keep_pixels"] == 16 * 16
+    assert summary["keep_full"] is True
+    assert summary["high_risk_full_mask"] is True
 
 
 def test_matte_candidates_checkerboard_preprocess_is_explicit_opt_in(monkeypatch):
@@ -1357,6 +2026,7 @@ def test_matte_candidates_checkerboard_preprocess_is_explicit_opt_in(monkeypatch
     assert response.status_code == 200
     assert captured[-1][0, 0].tolist() != captured[-1][0, 12].tolist()
     assert response.json()["debug"]["input_preprocess"]["checkerboard"]["applied"] is False
+    assert response.json()["debug"]["input_preprocess"]["checkerboard"]["decision"]["selected"] == []
 
     response = client.post(
         "/api/matte-candidates",
@@ -1367,6 +2037,8 @@ def test_matte_candidates_checkerboard_preprocess_is_explicit_opt_in(monkeypatch
     assert captured[-1][0, 0].tolist() == [254, 254, 254]
     assert captured[-1][0, 12].tolist() == [254, 254, 254]
     assert response.json()["debug"]["input_preprocess"]["checkerboard"]["applied"] is True
+    assert response.json()["debug"]["input_preprocess"]["checkerboard"]["decision"]["selected"] == ["remove_checkerboard"]
+    assert response.json()["debug"]["input_preprocess"]["checkerboard"]["decision"]["applied"] == ["remove_checkerboard"]
 
 
 def test_slice_preview_checkerboard_preprocess_is_explicit_opt_in():

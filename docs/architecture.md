@@ -1,169 +1,131 @@
-# ERMBG 架构
+# ERMBG 主架构
 
-ERMBG 是一个共享的抠图 core,搭配多个适配器和运行时后端。生产环境的默认形态
-是本地 Web/API 编排,调用 ERMBG Direct Worker 服务。ComfyUI 为 Comfy 图提供
-可选的自定义节点。
+本文是 ERMBG 当前主线的唯一架构入口。模块细节在 `docs/modules/` 下维护,历史计划在
+`docs/archive/` 下保留。
 
-## 整体形态
+## 目标
 
-```text
-入口
-  Web UI / Web API
-  CLI / Python API
-  ComfyUI 自定义节点
-        |
-        v
-ERMBG core 契约
-  输入归一化
-  route strategy
-  algorithm
-  parameter_profile
-  execution_profile
-  共享的 matting / shadow / metadata 代码
-        |
-        v
-运行时后端
-  Direct Worker HTTP 服务
-  本地轻量 Python/CV 路径
-  可选的 ComfyUI 自定义节点
-```
+ERMBG 的主目标是在已知或可测背景上生成高质量透明抠图,尤其覆盖游戏 UI、纯色背景图形、
+绿幕/蓝幕素材、硬边按钮、软边图标、glow、孔洞和轻量阴影。
 
-入口负责表达用户意图并传入图片数据。素材分类归属于共享的 route/profile 契约。
-
-## 分层
-
-### Core
-
-Core 是 `ermbg/` 下定义生产行为的代码:
-
-- `router.py`: route 决策、asset kind、`parameter_profile` 和
-  `execution_profile`。
-- `api.py`: 高层 `matte_image()` 契约和维护中的本地执行辅助函数,
-  包括 PyMatting Known-B。
-- `corridorkey_runner.py`: 共享的进程内 CorridorKey 适配器,被 Comfy 节点
-  包装层和 Direct Worker 共同使用。
-- `shadow.py`、`ownership.py`、`known_bg_hard_ui.py`、`pymatting_refine.py`
-  及相关模块: 可复用的 matting 机制。
-
-Core 拥有输出语义: 前景 RGB、alpha、RGBA RGB 层、route 元数据、debug 元数据
-和耗时元数据。
-
-### 适配器
-
-适配器把外部调用方翻译成 core 契约:
-
-- `ermbg.web`: 本地 FastAPI Web UI、Web API 和 Game Eval 启动器。
-- CLI/Python API: 供脚本和测试使用的本地直连集成。
-- `comfy_nodes/ermbg_nodes.py`: 可选的 ComfyUI 自定义节点包装层。
-- `integrations/openclaw`: 可选的独立 OpenClaw `ermbg-matte` skill 集成。
-
-适配器保持轻薄。它们暴露 UI 控件、表达用户选择的 algorithm 或 `auto`,
-并把请求传入共享的 route 逻辑。服务位置由配置的 Direct Worker server URL
-列表决定,不是 route 决策的一部分。
-
-### 运行时
-
-运行时后端决定执行发生在哪里:
-
-- **Direct Worker 运行时**: `backend=auto` 时 Web/API 的默认运行时。它是
-  围绕共享 router/profile 和执行代码的一个 HTTP worker。Web 根据配置的
-  server URL 优先级列表选择 IP 并 fallback。
-- **本地运行时**: 轻量的确定性工作,例如 PyMatting、OpenCV/numpy 工具、
-  route 调试、诊断和测试。
-- **Comfy 运行时**: 覆盖在共享 route/profile 和执行代码之上的可选图/节点
-  适配器。
-
-## 生产契约
-
-Web `backend=auto` 意味着:
+当前生产主线是:
 
 ```text
-local Web/API/CLI
-  -> ermbg.direct_worker_server
-  -> classify_route()
-  -> algorithm + execution_profile + params
-  -> passthrough / PyMatting Known-B / CorridorKey / PyMatting fallback
-  -> foreground + alpha + rgba_rgb + metadata
+input
+  -> Preprocess
+  -> Analyze
+  -> Decide
+  -> Execute
+  -> Output
 ```
 
-`backend=direct-worker` 意味着显式请求同一个服务:
+## 运行边界
+
+Web/API 的 `backend=auto` 默认使用 Direct Worker。Web 负责上传、前端交互、
+候选选择和请求编排;Direct Worker 是 Web/API 主执行边界。
+
+服务地址不属于 route 决策。Web 根据 `ermbg.config.json`、`ermbg.local.json` 或环境变量
+中的 Direct Worker URL 列表选择 server 并 fallback。route 决策只描述
+algorithm/profile/params。
+
+## 阶段
+
+### Preprocess
+
+Preprocess 发生在语义判断之前,处理输入素材本身的观测问题。
+
+当前实现:
+
+- `ermbg.preprocess.analyze_input_preprocess()`;
+- `ermbg.preprocess.apply_input_preprocess()`;
+- `remove_checkerboard`;
+- `normalize_known_background` helper;
+- `/api/preprocess-analysis`。
+
+Preprocess 可以推荐或应用去网格、Known-B 背景场归一化等输入清理。它不能裁决主体、
+孔洞、阴影或半透明材质归属。
+
+### Analyze
+
+Analyze 在 matting 执行前完成 route/profile 和语义争议分析。
+
+当前实现:
+
+- `ermbg.analyze.analyze_candidates()`;
+- 共享 `router.classify_route()`;
+- `AnalyzeResult.route`;
+- `ambiguity_regions`;
+- `SemanticCandidate[]`;
+- `/api/analyze-candidates`。
+
+Analyze 可以输出默认候选和争议候选。候选是语义决策候选,不是已经执行完成的 RGBA
+结果。候选预览只能是 overlay、trimap/hint 参考或其他轻量图。
+
+### Decide
+
+Decide 由调用方或用户选择最终语义决策。
+
+当前 Web 行为:
+
+- Analyze 返回候选后先显示候选预览;
+- 候选按钮只切换预览;
+- `Overlay / Trimap / Hint` 可切换;
+- 只有点击“确定抠图”后才进入 Execute;
+- 粗 keep/remove mask 可作为语义约束进入 Execute。
+
+无争议样本可以选中默认候选,但主线仍保留“确认后执行”的 Execute request 边界。
+
+### Execute
+
+Execute 只消费最终决策并执行一次。
+
+当前实现:
+
+- `/api/execute-candidate`;
+- `ExecutionRequest`;
+- Web 将 Analyze 的 `route/profile/params` 显式转换为 Direct Worker `route_decision`;
+- Direct Worker `/matte` 收到 `route_decision` 后跳过 `classify_route()`;
+- PyMatting Known-B、CorridorKey、Known-B Glow、passthrough 或 fallback 只消费 request。
+
+执行阶段不得重新推断 asset kind,不得私有运行另一套背景归一化,不得绕过用户候选或粗
+mask 裁决。
+
+### Output
+
+输出应包含:
+
+- RGBA PNG;
+- alpha/trimap 等后端实际产出的诊断图;
+- `execution_backend`;
+- `execution_server_url`;
+- route/profile metadata;
+- preprocess/semantic/execution request summary;
+- `ermbg.run.v1` manifest。
+
+## API 形态
+
+活跃主线:
 
 ```text
-local Web/API/eval client
-  -> ermbg.direct_worker_server
-  -> 共享 route/profile 契约
-  -> direct-corridorkey 或 direct-pymatting-known-b 执行
+POST /api/preprocess-analysis
+POST /api/analyze-candidates
+POST /api/execute-candidate
 ```
 
-Direct Worker 消费共享的 route 元数据和 execution profile。
-Direct Worker 响应中 `algorithm` 表示 route 决策,`execution_backend` 表示
-具体执行路径,`execution_server_url` 表示 Web 选中的服务地址。
+兼容层:
 
-### PyMatting Known-B 生产链路
-
-`pymatting-hard-button` 和 `pymatting-known-bg` 共享同一条 Known-B 链路:
-
-1. 估计或消费已知背景色。
-2. 必要时对背景场做归一化,把不均匀背景尾部拉回同一个背景色。
-3. 构造 trimap: 局部材质 core 是 sure foreground,稳定背景是 sure
-   background,边缘、描边、孔洞和阴影可能区域保持 unknown。
-4. 在 trimap 阶段检查 unknown 证据是否平衡。对高强度硬阴影贴主体且
-   主体侧颜色证据不足的局部区域,先释放邻近 sure foreground 到 unknown,
-   再交给 PyMatting。
-5. PyMatting 只解 trimap unknown 的 alpha/foreground。
-6. ShadowPatch 只在 trimap unknown 域内重建可同背景回放的阴影;高 alpha
-   主体保持 PyMatting 输出不动。
-
-这条链路不再保留旧的 PyMatting edge-ownership fallback。需要新的失败类别时,
-应先扩展 trimap 构造或 profile 识别,再进入执行阶段。
-
-## ComfyUI 节点契约
-
-维护中的 Comfy 节点表面是:
-
-- `ERMBG Route Matte`: 可选的 Comfy 图 auto route 和抠图节点。
-- `ERMBG Route Strategy`: 仅做 route 的调试/分支节点。
-- `ERMBG PyMatting Known-B`: 用于硬边 UI 和稳定已知背景图形的确定性
-  已知背景节点。
-- `ERMBG Classify (preview)`: 轻量诊断节点。
-- `Convert Masks to Images`: 工具节点。
-
-自定义 Comfy 图可以用 `ERMBG Route Strategy` 做分支。Web/API 生产环境对
-`backend=auto` 使用 Direct Worker;Comfy 已从主线 backend 剥离,只属于插件/
-自定义图扩展路径。
-
-## 可选的 OpenClaw 适配器
-
-OpenClaw 集成是一个可选的独立 `ermbg-matte` skill:
-
-```bash
-python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
-  --image /path/to/input.png
+```text
+POST /api/matte-candidates
 ```
 
-该路径应调用维护中的 ERMBG 服务/API,并归档 `output.png`、`manifest.json`
-和运行时元数据。要把 ERMBG 的 route 逻辑保留在共享 core 中。
-
-OpenClaw 专属功能应保持为覆盖在同一 route/matte 契约之上的轻薄适配器。
-
-## 运行规则
-
-1. `router.py` 是 asset family、`parameter_profile` 和
-   `execution_profile` 的唯一真相来源。
-2. 适配器保持轻薄。Web、CLI、Direct Worker、Comfy 节点和可选集成都把数据
-   传入共享契约;不要在 UI/适配器里重新实现 route 决策。
-3. Direct Worker 是 Web/API 的服务边界。
-4. ComfyUI 是用于自定义 Comfy workflow 的可选图宿主,不是 Web/API 主线。
-5. 每个适配器都应写出可浏览的产物,包含输出 PNG、route 元数据、耗时元数据,
-   以及适用情况下的 `ermbg.run.v1` manifest。
+兼容层可以继续服务旧脚本,但必须在 payload 中标记兼容语义,不要重新成为 Web 主入口。
 
 ## 反模式
 
-- 在 Web JavaScript、可选适配器代码、Comfy 包装代码或 Direct Worker 胶水
-  代码里重复实现 route 启发式。
-- 新增一个会引入新 profile 契约的后端。
-- 通过对样本 ID、文件名、一次性尺寸或固定坐标分支来修一个样本。
-- 在本地 Web 进程内运行重型生成模型或 VLM 模型。
-- 因为 ComfyUI 不可用就让正常的 Web 启动失败。
-- 在相关 Direct Worker 或可选 Comfy 适配器尚未重启并 smoke 验证前,就把本地
-  源码改动当作已部署。
+- 在候选阶段预跑多个完整 matte。
+- 在 Web JS、Direct Worker 或可选集成里重新实现一套 route 规则。
+- Execute 阶段重新 classify asset kind。
+- Execute 阶段私有运行和 Preprocess 不一致的背景归一化。
+- 把粗 mask 当作最终 alpha。
+- 用样本 ID、文件名、固定坐标或一次性阈值特例修复算法问题。
+- 把归档计划当作当前主线。

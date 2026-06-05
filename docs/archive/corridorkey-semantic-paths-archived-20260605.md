@@ -1,4 +1,7 @@
-# CorridorKey 语义路径
+# CorridorKey 样本与回归记录
+
+本文记录 B/I/C 样本集、route 分布和阶段性回归结果。当前主线流程以
+`docs/architecture.md` 为准;本文只作为样本和验证专题。
 
 ## 当前状态
 
@@ -42,17 +45,16 @@ samples/corridorkey_semantic/sheets/full_samples_v1_sheet.jpg
 B016-B030 仅启用绿色主体蓝幕块。除非代表一个新的当前失败类别,否则不要往
 manifest 里添加其他蓝幕配色研究。
 
-最新的完整 RouteMatte 基线:
+最新的完整 auto-route 基线:
 
 ```text
 out/auto_routematte_routefix_20260531/summary.json
 out/auto_routematte_routefix_20260531/timing_report.md
 ```
 
-结果: 85/85 全部成功完成,使用 Web/API `backend=auto`,该基线运行提交远端
-`ErmbgRouteMatte` 节点（先于当前 Direct Worker 默认契约,作为历史记录保留）。
+结果: 85/85 全部成功完成,使用 Web/API `backend=auto`。
 Auto 不再调用 RMBG fallback;未知或不稳定背景作为 `pymatting_fallback` 路由到
-PyMatting Known-B。当前主线使用 Direct Worker,该段属于历史 RouteMatte 基线记录。
+PyMatting Known-B。当前主线使用 Direct Worker。
 
 最新完整 B/I/C run 的 route 分布:
 

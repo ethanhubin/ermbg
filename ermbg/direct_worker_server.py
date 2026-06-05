@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import json
 import os
 import subprocess
 import threading
@@ -24,11 +25,10 @@ from PIL import Image
 from .direct_worker import (
     DirectCorridorKeyClientFactory,
     DirectWorkerResult,
-    direct_matte_auto,
     direct_matte_from_decision,
 )
-from .runtime_capabilities import get_ermbg_version
 from .router import RouteDecision, classify_route
+from .runtime_capabilities import get_ermbg_version
 
 try:
     from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -198,6 +198,53 @@ def _prepare_request(
     )
 
 
+def _route_decision_from_payload(payload: dict[str, Any]) -> RouteDecision:
+    route = str(payload.get("route") or "")
+    backend = str(payload.get("backend") or payload.get("algorithm") or route)
+    params = payload.get("params")
+    analysis = payload.get("analysis")
+    if not isinstance(params, dict):
+        params = {}
+    if not isinstance(analysis, dict):
+        analysis = {}
+    corridorkey_analysis = payload.get("corridorkey_analysis")
+    if isinstance(corridorkey_analysis, dict) and "corridorkey_analysis" not in analysis:
+        analysis = {**analysis, "corridorkey_analysis": corridorkey_analysis}
+    reasons = payload.get("reasons")
+    if not isinstance(reasons, list):
+        reason = payload.get("reason")
+        reasons = [str(reason)] if reason else ["explicit_route_decision"]
+    confidence = payload.get("confidence")
+    return RouteDecision(
+        route=route or backend,
+        asset_kind=str(payload.get("asset_kind") or "unknown"),
+        backend=backend,
+        params=dict(params),
+        confidence=float(confidence) if isinstance(confidence, (int, float)) else 1.0,
+        reasons=[str(item) for item in reasons],
+        analysis=dict(analysis),
+    )
+
+
+def _prepare_request_from_route_decision(
+    index: int,
+    filename: str,
+    data: bytes,
+    route_decision_payload: dict[str, Any],
+) -> PreparedRequest:
+    t = time.perf_counter()
+    rgb = _decode_image_bytes(data)
+    decode_sec = time.perf_counter() - t
+    return PreparedRequest(
+        index=index,
+        filename=filename,
+        rgb=rgb,
+        decision=_route_decision_from_payload(route_decision_payload),
+        route_sec=0.0,
+        decode_sec=decode_sec,
+    )
+
+
 def _decision_background_color(decision: RouteDecision, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
     ck_analysis = decision.analysis.get("corridorkey_analysis")
     if isinstance(ck_analysis, dict):
@@ -305,6 +352,127 @@ def _with_known_bg_glow_params(
         return decision
     strength = float(np.clip(float(known_bg_glow_material_strength), 0.0, 2.0))
     return replace(decision, params={**decision.params, "known_bg_glow_material_strength": strength})
+
+
+def _parse_optional_rgb_triplet(text: str | None) -> tuple[int, int, int] | None:
+    if text is None or not str(text).strip():
+        return None
+    return _parse_bg_color(str(text))
+
+
+def _parse_json_object(text: str | None, field: str) -> dict[str, Any] | None:
+    if text is None or not str(text).strip():
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"{field} must be a JSON object")
+    return payload
+
+
+def _known_b_form_params(
+    *,
+    pymatting_method: str | None,
+    pymatting_image_space: str | None,
+    pymatting_bg_source: str | None,
+    pymatting_bg_color: str | None,
+    pymatting_bg_threshold: float | None,
+    pymatting_fg_threshold: float | None,
+    pymatting_boundary_band_px: int | None,
+    pymatting_auto_adapt: bool | None,
+    pymatting_cg_maxiter: int | None,
+    pymatting_cg_rtol: float | None,
+    pymatting_trimap_mode: str | None,
+    pymatting_unknown_grow_px: int | None,
+    pymatting_input_preprocessed_known_b: bool | None,
+    pymatting_background_normalization: str | None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if pymatting_method is not None:
+        params["pymatting_method"] = str(pymatting_method).strip().lower()
+    if pymatting_image_space is not None:
+        params["pymatting_image_space"] = str(pymatting_image_space)
+    if pymatting_bg_source is not None:
+        params["pymatting_bg_source"] = str(pymatting_bg_source).strip().lower()
+    color = _parse_optional_rgb_triplet(pymatting_bg_color)
+    if color is not None:
+        params["pymatting_bg_color"] = color
+    if pymatting_bg_threshold is not None:
+        params["pymatting_bg_threshold"] = float(pymatting_bg_threshold)
+    if pymatting_fg_threshold is not None:
+        params["pymatting_fg_threshold"] = float(pymatting_fg_threshold)
+    if pymatting_boundary_band_px is not None:
+        params["pymatting_boundary_band_px"] = int(pymatting_boundary_band_px)
+    if pymatting_auto_adapt is not None:
+        params["pymatting_auto_adapt"] = bool(pymatting_auto_adapt)
+    if pymatting_cg_maxiter is not None:
+        params["pymatting_cg_maxiter"] = int(pymatting_cg_maxiter)
+    if pymatting_cg_rtol is not None:
+        params["pymatting_cg_rtol"] = float(pymatting_cg_rtol)
+    if pymatting_trimap_mode is not None:
+        params["pymatting_trimap_mode"] = str(pymatting_trimap_mode)
+    if pymatting_unknown_grow_px is not None:
+        params["pymatting_unknown_grow_px"] = int(pymatting_unknown_grow_px)
+    if pymatting_input_preprocessed_known_b is not None:
+        params["pymatting_input_preprocessed_known_b"] = bool(pymatting_input_preprocessed_known_b)
+    normalization = _parse_json_object(
+        pymatting_background_normalization,
+        "pymatting_background_normalization",
+    )
+    if normalization is not None:
+        params["pymatting_background_normalization"] = normalization
+    return params
+
+
+def _with_known_b_params(decision: RouteDecision, params: dict[str, Any]) -> RouteDecision:
+    if not params or decision.backend not in {"pymatting_known_b", "pymatting_fallback"}:
+        return decision
+    return replace(decision, params={**decision.params, **params})
+
+
+def _parse_semantic_decision(text: str | None) -> dict[str, Any]:
+    if text is None or not str(text).strip():
+        return {}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="semantic_decision must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="semantic_decision must be a JSON object")
+    return payload
+
+
+def _with_semantic_decision_params(decision: RouteDecision, semantic_decision: dict[str, Any]) -> RouteDecision:
+    if not semantic_decision:
+        return decision
+    return replace(decision, params={**decision.params, "semantic_decision": semantic_decision})
+
+
+def _with_user_mask_params(
+    decision: RouteDecision,
+    *,
+    user_keep_mask: np.ndarray | None,
+    user_remove_mask: np.ndarray | None,
+) -> RouteDecision:
+    params = dict(decision.params)
+    changed = False
+    if user_keep_mask is not None:
+        params["user_keep_mask"] = user_keep_mask
+        changed = True
+    if user_remove_mask is not None:
+        params["user_remove_mask"] = user_remove_mask
+        changed = True
+    return replace(decision, params=params) if changed else decision
+
+
+async def _read_mask_upload(upload: UploadFile | None) -> np.ndarray | None:
+    if upload is None:
+        return None
+    data = await upload.read()
+    mask = np.asarray(Image.open(io.BytesIO(data)).convert("L"), dtype=np.float32) / 255.0
+    return np.clip(mask, 0.0, 1.0).astype(np.float32)
 
 
 def _corridorkey_form_params(
@@ -459,6 +627,8 @@ def health() -> dict[str, Any]:
 async def matte_endpoint(
     image: UploadFile = File(...),
     corridorkey_hint_mask: UploadFile | None = File(None),
+    user_keep_mask: UploadFile | None = File(None),
+    user_remove_mask: UploadFile | None = File(None),
     execution_backend: str = Form("auto"),
     shadow_mode: str = Form("auto"),
     corridorkey_gamma_space: str | None = Form(None),
@@ -474,11 +644,29 @@ async def matte_endpoint(
     corridorkey_preset: str = Form("auto"),
     corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
     known_bg_glow_material_strength: float | None = Form(None),
+    pymatting_method: str | None = Form(None),
+    pymatting_image_space: str | None = Form(None),
+    pymatting_bg_source: str | None = Form(None),
+    pymatting_bg_color: str | None = Form(None),
+    pymatting_bg_threshold: float | None = Form(None),
+    pymatting_fg_threshold: float | None = Form(None),
+    pymatting_boundary_band_px: int | None = Form(None),
+    pymatting_auto_adapt: bool | None = Form(None),
+    pymatting_cg_maxiter: int | None = Form(None),
+    pymatting_cg_rtol: float | None = Form(None),
+    pymatting_trimap_mode: str | None = Form(None),
+    pymatting_unknown_grow_px: int | None = Form(None),
+    pymatting_input_preprocessed_known_b: bool | None = Form(None),
+    pymatting_background_normalization: str | None = Form(None),
+    route_decision: str | None = Form(None),
+    semantic_decision: str | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
     include_image: bool = Form(True),
 ) -> dict[str, Any]:
     started = time.perf_counter()
     bg = _parse_bg_color(fallback_bg_color)
+    route_decision_payload = _parse_json_object(route_decision, "route_decision")
+    semantic_decision_payload = _parse_semantic_decision(semantic_decision)
     ck_params = _corridorkey_form_params(
         corridorkey_gamma_space=corridorkey_gamma_space,
         corridorkey_despill_strength=corridorkey_despill_strength,
@@ -493,30 +681,64 @@ async def matte_endpoint(
         corridorkey_preset=corridorkey_preset,
         corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
     )
+    known_b_params = _known_b_form_params(
+        pymatting_method=pymatting_method,
+        pymatting_image_space=pymatting_image_space,
+        pymatting_bg_source=pymatting_bg_source,
+        pymatting_bg_color=pymatting_bg_color,
+        pymatting_bg_threshold=pymatting_bg_threshold,
+        pymatting_fg_threshold=pymatting_fg_threshold,
+        pymatting_boundary_band_px=pymatting_boundary_band_px,
+        pymatting_auto_adapt=pymatting_auto_adapt,
+        pymatting_cg_maxiter=pymatting_cg_maxiter,
+        pymatting_cg_rtol=pymatting_cg_rtol,
+        pymatting_trimap_mode=pymatting_trimap_mode,
+        pymatting_unknown_grow_px=pymatting_unknown_grow_px,
+        pymatting_input_preprocessed_known_b=pymatting_input_preprocessed_known_b,
+        pymatting_background_normalization=pymatting_background_normalization,
+    )
     data = await image.read()
     hint_mask = None
     if corridorkey_hint_mask is not None and corridorkey_auto_mask is not True:
         hint_data = await corridorkey_hint_mask.read()
         hint = np.asarray(Image.open(io.BytesIO(hint_data)).convert("L"), dtype=np.float32) / 255.0
         hint_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
+    keep_mask = await _read_mask_upload(user_keep_mask)
+    remove_mask = await _read_mask_upload(user_remove_mask)
     try:
-        prepared = _prepare_request(
-            0,
-            image.filename or "image",
-            data,
-            corridorkey_screen_mode=corridorkey_screen_mode,
-            corridorkey_preset=corridorkey_preset,
-            fallback_bg_color=bg,
-        )
-        decision = _apply_execution_backend_override(
-            prepared.decision,
-            execution_backend,
-            rgb=prepared.rgb,
-            fallback_bg_color=bg,
-        )
+        if route_decision_payload is not None:
+            prepared = _prepare_request_from_route_decision(
+                0,
+                image.filename or "image",
+                data,
+                route_decision_payload,
+            )
+            decision = prepared.decision
+        else:
+            prepared = _prepare_request(
+                0,
+                image.filename or "image",
+                data,
+                corridorkey_screen_mode=corridorkey_screen_mode,
+                corridorkey_preset=corridorkey_preset,
+                fallback_bg_color=bg,
+            )
+            decision = _apply_execution_backend_override(
+                prepared.decision,
+                execution_backend,
+                rgb=prepared.rgb,
+                fallback_bg_color=bg,
+            )
         decision = _with_known_bg_glow_params(
             decision,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
+        )
+        decision = _with_known_b_params(decision, known_b_params)
+        decision = _with_semantic_decision_params(decision, semantic_decision_payload)
+        decision = _with_user_mask_params(
+            decision,
+            user_keep_mask=keep_mask,
+            user_remove_mask=remove_mask,
         )
         prepared = replace(prepared, decision=_with_corridorkey_params(decision, ck_params))
         result = _run_prepared_main(

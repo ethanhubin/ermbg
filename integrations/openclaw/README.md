@@ -2,11 +2,11 @@
 
 ERMBG 在 OpenClaw 里是独立 skill: `ermbg-matte`。
 
-OpenClaw 不是 ERMBG 主线。当前主线是 Web/API/CLI 走 Direct Worker,远端 ComfyUI
-`ErmbgRouteMatte` 是可选执行路径。这里保留的是一个可选外围适配器,用于需要
-OpenClaw 调用时复用同一条 RouteMatte 合约。
+OpenClaw 不是 ERMBG 主线。当前主线是 Web/API/CLI 走 Direct Worker。这里保留的
+是一个可选外围适配器,用于需要 OpenClaw 调用时复用同一条 ERMBG route/matte
+合约。
 
-它不是 `comfyui-rmbg` 的子模式,也不复用 RMBG/rembg 的意图入口。这样做的
+它不是通用 RMBG/rembg 的子模式,也不复用 RMBG/rembg 的意图入口。这样做的
 目标是让 agent 明确区分:
 
 - 普通 RMBG/rembg: 通用语义去背景。
@@ -45,30 +45,27 @@ python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
 - `rgba_rgb.png`: 与 alpha 组合的 RGB 层
 - `aux.png`: 辅助预览
 - `metadata.json`: ERMBG route/result metadata
-- `workflow.json`: 提交给 ComfyUI 的 API workflow
-- `history_outputs.json`: Comfy history outputs
 - `manifest.json`: 本地运行 manifest
 
 ## 服务器侧依赖
 
-ComfyUI 服务器要先按 [DEPLOY.md](../../DEPLOY.md) 装好 ERMBG 节点。
-`ermbg-matte` 提交的是 `ErmbgRouteMatte`;该节点在 Comfy 进程内完成 route、
-参数选择、CorridorKey / PyMatting Known-B / PyMatting fallback / passthrough
-和 ShadowPatch。
+OpenClaw skill 应调用维护中的 ERMBG Web/API 或 Direct Worker 服务。服务端完成
+route、参数选择、CorridorKey / PyMatting Known-B / PyMatting fallback /
+passthrough 和 ShadowPatch。
 
 ## 内部工作流
 
 ```text
-LoadImage -> ERMBG Route Matte -> foreground / alpha / rgba_rgb / aux / metadata
+input image -> ERMBG API -> foreground / alpha / rgba_rgb / aux / metadata
 ```
 
-OpenClaw skill 只负责上传输入、提交 workflow、下载输出和写归档。它不应该
-复制 ERMBG router 的判断逻辑。
+OpenClaw skill 只负责上传输入、提交请求、下载输出和写归档。它不应该复制
+ERMBG router 的判断逻辑。
 
-## 自定义 ComfyUI 服务器
+## 自定义 ERMBG 服务
 
 ```bash
-COMFY_URL=http://10.0.0.5:8188 \
+ERMBG_DIRECT_URL=http://10.0.0.5:7871 \
 python3 ~/.openclaw/workspace/skills/ermbg-matte/scripts/ermbg_matte.py \
     --image /path/to/in.png
 ```

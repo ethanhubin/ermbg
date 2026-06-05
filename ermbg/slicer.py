@@ -80,7 +80,10 @@ def analyze_checkerboard_background(image_srgb: np.ndarray) -> dict[str, object]
     chroma_span = small_f.max(axis=2) - small_f.min(axis=2)
     neutral_bright = (small_f.mean(axis=2) >= 180.0) & (chroma_span <= 18.0)
     edge_sample_mask = edge & neutral_bright
-    min_samples = max(64, int(round(float(edge.sum()) * 0.25)))
+    # A fake transparency sheet should be visible across most of the canvas
+    # border. Sparse neutral strips can also come from UI card gutters or page
+    # layouts, so keep those out of auto opt-in.
+    min_samples = max(64, int(round(float(edge.sum()) * 0.72)))
     if int(edge_sample_mask.sum()) < min_samples:
         return {
             "accepted": False,
@@ -132,8 +135,12 @@ def analyze_checkerboard_background(image_srgb: np.ndarray) -> dict[str, object]
                     p = (((sample_x + ox) // tile + (sample_y + oy) // tile) & 1).astype(bool)
                     if p.mean() < 0.25 or p.mean() > 0.75:
                         continue
-                    v0 = float(strip_values[~p].mean())
-                    v1 = float(strip_values[p].mean())
+                    # Generated checker sheets are often blurred/compressed or
+                    # slightly shaded inside each square. The median preserves
+                    # the two square centers when per-square gradients would
+                    # otherwise pull the two means toward each other.
+                    v0 = float(np.median(strip_values[~p]))
+                    v1 = float(np.median(strip_values[p]))
                     c = abs(v1 - v0)
                     if c < 3.0 or c > 36.0:
                         continue

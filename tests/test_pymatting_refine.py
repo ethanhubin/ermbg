@@ -107,6 +107,91 @@ def test_known_background_trimap_marks_enclosed_same_bg_as_sure_background():
     assert trimap.unknown[transition_edge].mean() > 0.20
 
 
+def test_known_background_trimap_consumes_enclosed_near_bg_semantic_policy():
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    image = np.full((96, 96, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    outer = (xx - 48) ** 2 + (yy - 48) ** 2 <= 34**2
+    inner = (xx - 48) ** 2 + (yy - 48) ** 2 <= 17**2
+    image[outer] = (230, 30, 30)
+    image[inner] = bg
+
+    subject_trimap, subject_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+    )
+    hole_trimap, hole_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        semantic_decision={"enclosed_near_bg_policy": "transparent_hole"},
+    )
+
+    dist_to_subject = cv2.distanceTransform(inner.astype(np.uint8), cv2.DIST_L2, 3)
+    clean_center = inner & (dist_to_subject >= 8.0)
+    assert subject_trimap.sure_fg[clean_center].mean() > 0.95
+    assert subject_trimap.sure_bg[clean_center].mean() == 0.0
+    assert hole_trimap.sure_bg[clean_center].mean() > 0.95
+    assert subject_info["semantic_decision"]["enclosed_near_bg_policy"] == "subject"
+    assert hole_info["semantic_decision"]["enclosed_near_bg_policy"] == "transparent_hole"
+    assert subject_info["semantic_decision"]["forced_subject_pixels"] >= int(clean_center.sum())
+    assert hole_info["semantic_decision"]["forced_background_pixels"] >= int(clean_center.sum())
+
+
+def test_known_background_trimap_consumes_user_keep_remove_masks():
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    image = np.full((96, 96, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    r = np.sqrt((yy - 48) ** 2 + (xx - 48) ** 2)
+    ring = (r <= 34) & (r >= 17)
+    inner = r <= 14
+    image[ring] = (230, 30, 30)
+
+    empty_trimap, empty_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        semantic_decision={"enclosed_near_bg_policy": "transparent_hole"},
+        user_keep_mask=np.zeros(inner.shape, dtype=np.float32),
+    )
+    keep_trimap, keep_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        semantic_decision={"enclosed_near_bg_policy": "transparent_hole"},
+        user_keep_mask=inner.astype(np.float32),
+    )
+    remove_trimap, remove_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+        user_remove_mask=inner.astype(np.float32),
+    )
+    conflict_trimap, conflict_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+        user_keep_mask=inner.astype(np.float32),
+        user_remove_mask=inner.astype(np.float32),
+    )
+
+    assert empty_trimap.sure_bg[inner].mean() > 0.95
+    assert empty_info["user_mask_decision"]["applied"] is False
+    assert keep_trimap.sure_fg[inner].mean() > 0.95
+    assert keep_trimap.sure_bg[inner].mean() == 0.0
+    assert keep_info["user_mask_decision"]["forced_subject_pixels"] == int(inner.sum())
+    assert remove_trimap.sure_bg[inner].mean() > 0.95
+    assert remove_trimap.sure_fg[inner].mean() == 0.0
+    assert remove_info["user_mask_decision"]["forced_background_pixels"] == int(inner.sum())
+    assert conflict_trimap.sure_bg[inner].mean() > 0.95
+    assert conflict_trimap.sure_fg[inner].mean() == 0.0
+    assert conflict_info["user_mask_decision"]["conflict_pixels"] == int(inner.sum())
+
+
 def test_known_background_trimap_allows_broad_ui_antialias_band():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     fg = np.array([40, 110, 245], dtype=np.uint8)

@@ -136,3 +136,79 @@ def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():
     assert calls[0]["hint_alpha"] is None
     assert calls[0]["hint_source"] is None
     assert calls[0]["execution_profile"] == "corridorkey-shaped-icon"
+
+
+def test_direct_matte_from_decision_passes_semantic_decision(monkeypatch):
+    rgb = np.full((8, 8, 3), (255, 255, 255), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    def fake_known_b(image, **kwargs):
+        captured.update(kwargs)
+        return MatteResponse(
+            rgba=_rgba(image),
+            alpha=np.ones(image.shape[:2], dtype=np.float32),
+            foreground_srgb=image.copy(),
+            strategy_name="pymatting_known_b",
+            background_color=(255, 255, 255),
+            debug={},
+        )
+
+    monkeypatch.setattr(direct_worker, "_matte_image_pymatting_known_b", fake_known_b)
+
+    direct_worker.direct_matte_from_decision(
+        rgb,
+        decision=RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={
+                "pymatting_bg_color": (255, 255, 255),
+                "semantic_decision": {"enclosed_near_bg_policy": "subject"},
+            },
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    assert captured["semantic_decision"] == {"enclosed_near_bg_policy": "subject"}
+
+
+def test_direct_matte_from_decision_passes_user_masks(monkeypatch):
+    rgb = np.full((8, 8, 3), (255, 255, 255), dtype=np.uint8)
+    keep_mask = np.zeros((8, 8), dtype=np.float32)
+    remove_mask = np.zeros((8, 8), dtype=np.float32)
+    keep_mask[2:4, 2:4] = 1.0
+    remove_mask[5:7, 5:7] = 1.0
+    captured: dict[str, object] = {}
+
+    def fake_known_b(image, **kwargs):
+        captured.update(kwargs)
+        return MatteResponse(
+            rgba=_rgba(image),
+            alpha=np.ones(image.shape[:2], dtype=np.float32),
+            foreground_srgb=image.copy(),
+            strategy_name="pymatting_known_b",
+            background_color=(255, 255, 255),
+            debug={},
+        )
+
+    monkeypatch.setattr(direct_worker, "_matte_image_pymatting_known_b", fake_known_b)
+
+    direct_worker.direct_matte_from_decision(
+        rgb,
+        decision=RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={
+                "pymatting_bg_color": (255, 255, 255),
+                "user_keep_mask": keep_mask,
+                "user_remove_mask": remove_mask,
+            },
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    assert np.asarray(captured["user_keep_mask"]).sum() == 4.0
+    assert np.asarray(captured["user_remove_mask"]).sum() == 4.0
