@@ -54,6 +54,216 @@ class UIKindPrediction:
         }
 
 
+def analyze_checkerboard_background(image_srgb: np.ndarray) -> dict[str, object]:
+    """Detect a fake-transparent gray/white checkerboard sheet background."""
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("image_srgb must be HxWx3 uint8")
+
+    h, w = image_srgb.shape[:2]
+    if h < 32 or w < 32:
+        return {"accepted": False, "reason": "image too small for checkerboard analysis"}
+
+    stride = max(1, int(np.ceil(float(max(h, w)) / 768.0)))
+    scale = 1.0 / float(stride)
+    small = image_srgb[::stride, ::stride]
+    sh, sw = small.shape[:2]
+    band = max(4, min(24, int(round(float(min(sh, sw)) * 0.08))))
+    yy, xx = np.indices((sh, sw))
+    edge = np.zeros((sh, sw), dtype=bool)
+    edge[:band, :] = True
+    edge[-band:, :] = True
+    edge[:, :band] = True
+    edge[:, -band:] = True
+
+    small_f = small.astype(np.float32)
+    luma = (0.2126 * small_f[..., 0] + 0.7152 * small_f[..., 1] + 0.0722 * small_f[..., 2]).astype(np.float32)
+    chroma_span = small_f.max(axis=2) - small_f.min(axis=2)
+    neutral_bright = (small_f.mean(axis=2) >= 180.0) & (chroma_span <= 18.0)
+    edge_sample_mask = edge & neutral_bright
+    min_samples = max(64, int(round(float(edge.sum()) * 0.25)))
+    if int(edge_sample_mask.sum()) < min_samples:
+        return {
+            "accepted": False,
+            "reason": "insufficient bright neutral border samples",
+            "bright_neutral_edge_pixels": int(edge_sample_mask.sum()),
+            "min_samples": int(min_samples),
+        }
+
+    values = luma[edge_sample_mask]
+    low_luma = float(np.percentile(values, 35.0))
+    high_luma = float(np.percentile(values, 65.0))
+    contrast = high_luma - low_luma
+    # Fake transparency grids are visible but subtle. Very low contrast is just
+    # drift; very high contrast is likely real artwork or a strong pattern.
+    if contrast < 3.0 or contrast > 36.0:
+        return {
+            "accepted": False,
+            "reason": "border neutral split is outside checkerboard contrast range",
+            "luma_p35": low_luma,
+            "luma_p65": high_luma,
+            "contrast": contrast,
+        }
+
+    strip_masks = {
+        "top": yy < band,
+        "bottom": yy >= sh - band,
+        "left": xx < band,
+        "right": xx >= sw - band,
+    }
+    best: tuple[float, float, float, int, int, int, float, float, str, np.ndarray, float] | None = None
+    max_tile = max(5, min(36, int(round(72.0 * scale)), int(round(float(min(sh, sw)) * 0.12))))
+    for strip_name, strip_mask in strip_masks.items():
+        sample_mask = strip_mask & neutral_bright
+        if int(sample_mask.sum()) < max(64, int(round(float(strip_mask.sum()) * 0.25))):
+            continue
+        strip_values = luma[sample_mask]
+        sample_y, sample_x = np.nonzero(sample_mask)
+        # Period fitting does not need every edge pixel. A deterministic sample
+        # keeps upload-time detection light while preserving all phases.
+        if sample_y.size > 3000:
+            take = np.linspace(0, sample_y.size - 1, 3000, dtype=np.int32)
+            sample_y = sample_y[take]
+            sample_x = sample_x[take]
+            strip_values = strip_values[take]
+        for tile in range(4, max_tile + 1):
+            step = max(1, tile // 3)
+            for ox in range(0, tile, step):
+                for oy in range(0, tile, step):
+                    p = (((sample_x + ox) // tile + (sample_y + oy) // tile) & 1).astype(bool)
+                    if p.mean() < 0.25 or p.mean() > 0.75:
+                        continue
+                    v0 = float(strip_values[~p].mean())
+                    v1 = float(strip_values[p].mean())
+                    c = abs(v1 - v0)
+                    if c < 3.0 or c > 36.0:
+                        continue
+                    pred = np.where(p, v1, v0)
+                    mae = float(np.mean(np.abs(strip_values - pred)))
+                    residual_p90 = float(np.percentile(np.abs(strip_values - pred), 90.0))
+                    score = mae / max(c, 1e-6)
+                    if best is None or score < best[0]:
+                        best = (score, mae, c, tile, ox, oy, v0, v1, strip_name, sample_mask, residual_p90)
+
+    if best is None:
+        return {"accepted": False, "reason": "no periodic two-color checker model fit"}
+
+    score, mae, model_contrast, tile, ox, oy, v0, v1, strip_name, sample_mask, residual_p90 = best
+    if score > 1.35:
+        return {
+            "accepted": False,
+            "reason": "checker model residual too high",
+            "checker_score": score,
+            "checker_mae": mae,
+            "checker_contrast": model_contrast,
+        }
+
+    parity = (((xx + ox) // tile + (yy + oy) // tile) & 1).astype(bool)
+    light_parity = parity if v1 >= v0 else ~parity
+    dark_parity = ~light_parity
+    light_pixels = small[sample_mask & light_parity]
+    dark_pixels = small[sample_mask & dark_parity]
+    if light_pixels.size == 0 or dark_pixels.size == 0:
+        return {"accepted": False, "reason": "empty checker color cluster"}
+
+    light_color = np.median(light_pixels, axis=0).astype(np.uint8)
+    dark_color = np.median(dark_pixels, axis=0).astype(np.uint8)
+    color_delta = float(np.linalg.norm(light_color.astype(np.float32) - dark_color.astype(np.float32)))
+    if color_delta < 3.0 or color_delta > 64.0:
+        return {
+            "accepted": False,
+            "reason": "checker color distance outside expected range",
+            "color_delta": color_delta,
+            "light_color": [int(c) for c in light_color],
+            "dark_color": [int(c) for c in dark_color],
+        }
+
+    return {
+        "accepted": True,
+        "reason": "accepted",
+        "source": "checkerboard_border_periodic_model",
+        "background_color": [int(c) for c in light_color],
+        "light_color": [int(c) for c in light_color],
+        "dark_color": [int(c) for c in dark_color],
+        "tile_px": float(tile / max(scale, 1e-6)),
+        "phase_xy": [float(ox / max(scale, 1e-6)), float(oy / max(scale, 1e-6))],
+        "scale": float(scale),
+        "sample_stride": int(stride),
+        "checker_score": score,
+        "checker_mae": mae,
+        "checker_residual_p90": residual_p90,
+        "checker_contrast": model_contrast,
+        "two_value_tendency": float(model_contrast / max(mae, 1e-6)),
+        "color_delta": color_delta,
+        "bright_neutral_edge_pixels": int(sample_mask.sum()),
+        "bright_neutral_all_edge_pixels": int(edge_sample_mask.sum()),
+        "edge_pixels": int(edge.sum()),
+        "edge_sample_fraction": float(sample_mask.mean()),
+        "fit_strip": strip_name,
+    }
+
+
+def _flood_from_border(mask: np.ndarray) -> np.ndarray:
+    h, w = mask.shape
+    work = mask.astype(np.uint8).copy()
+    flood = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    seeds: list[tuple[int, int]] = []
+    _, xs = np.nonzero(work[0:1, :])
+    seeds.extend((int(x), 0) for x in xs)
+    _, xs = np.nonzero(work[-1:, :])
+    seeds.extend((int(x), h - 1) for x in xs)
+    ys, _ = np.nonzero(work[:, 0:1])
+    seeds.extend((0, int(y)) for y in ys)
+    ys, _ = np.nonzero(work[:, -1:])
+    seeds.extend((w - 1, int(y)) for y in ys)
+    for x, y in seeds:
+        if work[y, x]:
+            cv2.floodFill(work, flood, (x, y), 2)
+    return work == 2
+
+
+def normalize_checkerboard_background_to_light_square(image_srgb: np.ndarray) -> tuple[np.ndarray, dict[str, object]]:
+    """Map exterior fake-transparent checkerboard pixels to the light square."""
+    info = analyze_checkerboard_background(image_srgb)
+    if not info.get("accepted", False):
+        return image_srgb, {"enabled": True, "applied": False, **info}
+
+    light = np.asarray(info["light_color"], dtype=np.uint8)
+    dark = np.asarray(info["dark_color"], dtype=np.uint8)
+    light_lab = srgb_to_oklab(light.reshape(1, 1, 3))[0, 0]
+    dark_lab = srgb_to_oklab(dark.reshape(1, 1, 3))[0, 0]
+    lab = srgb_to_oklab(image_srgb)
+    distance_to_light = oklab_distance(lab, light_lab)
+    distance_to_dark = oklab_distance(lab, dark_lab)
+    nearest_distance = np.minimum(distance_to_light, distance_to_dark)
+    # Checker squares can be blurred/compressed. Connectivity limits where this
+    # loose color gate is allowed to rewrite pixels.
+    close_to_checker = nearest_distance <= 7.5
+    exterior_checker = _flood_from_border(close_to_checker)
+    changed = exterior_checker & np.any(image_srgb != light.reshape(1, 1, 3), axis=2)
+    if int(exterior_checker.sum()) < max(32, int(round(float(image_srgb.shape[0] * image_srgb.shape[1]) * 0.01))):
+        return image_srgb, {
+            "enabled": True,
+            "applied": False,
+            "reason": "insufficient exterior checkerboard support",
+            **info,
+            "exterior_checker_pixels": int(exterior_checker.sum()),
+            "changed_pixels": 0,
+        }
+
+    normalized = image_srgb.copy()
+    normalized[exterior_checker] = light.reshape(1, 3)
+    return normalized, {
+        "enabled": True,
+        "applied": bool(changed.any()),
+        "reason": "checkerboard background normalized to light square",
+        **info,
+        "background_color": [int(c) for c in light],
+        "exterior_checker_pixels": int(exterior_checker.sum()),
+        "changed_pixels": int(changed.sum()),
+        "distance_threshold_oklab": 7.5,
+    }
+
+
 def estimate_background_color(image_srgb: np.ndarray, border_fraction: float = 0.08) -> tuple[int, int, int]:
     """Estimate the sheet background from border pixels.
 
@@ -110,12 +320,51 @@ def foreground_mask_from_background(
     return mask, bg, float(distance_threshold)
 
 
+def exterior_background_mask_from_background(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | None = None,
+) -> np.ndarray:
+    """Find background-color pixels connected to the image exterior."""
+    bg = background_color or estimate_background_color(image_srgb)
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(np.asarray(bg, dtype=np.uint8).reshape(1, 1, 3)).reshape(3)
+    dist = oklab_distance(lab, bg_lab)
+
+    h, w = image_srgb.shape[:2]
+    border = max(1, int(round(min(h, w) * 0.08)))
+    border_dist = np.concatenate(
+        [
+            dist[:border, :].reshape(-1),
+            dist[-border:, :].reshape(-1),
+            dist[:, :border].reshape(-1),
+            dist[:, -border:].reshape(-1),
+        ]
+    )
+    median = float(np.median(border_dist))
+    mad = float(np.median(np.abs(border_dist - median)))
+    # This is a tight background-ownership gate, separate from the foreground
+    # detection threshold. It follows measured border noise, but stays strict so
+    # low-contrast blue button material is not promoted to exterior background.
+    background_threshold = max(1.5, median + 3.0 * mad + 1.0)
+    close_to_bg = dist <= background_threshold
+
+    count, labels = cv2.connectedComponents(close_to_bg.astype(np.uint8), connectivity=8)
+    exterior_labels = np.zeros(count, dtype=bool)
+    exterior_labels[np.unique(labels[0, :])] = True
+    exterior_labels[np.unique(labels[-1, :])] = True
+    exterior_labels[np.unique(labels[:, 0])] = True
+    exterior_labels[np.unique(labels[:, -1])] = True
+    exterior_labels[0] = False
+    return exterior_labels[labels]
+
+
 def find_slice_boxes(
     mask: np.ndarray,
     *,
     min_area: int = 64,
     padding: int = 2,
     close_iterations: int = 1,
+    exterior_background_mask: np.ndarray | None = None,
 ) -> list[SliceBox]:
     """Find connected foreground rectangles, sorted top-to-bottom then left-to-right."""
     m = mask.astype(np.uint8) * 255
@@ -136,7 +385,7 @@ def find_slice_boxes(
             continue
         boxes.append(SliceBox(id=0, bbox=(x, y, bw, bh), area=area))
 
-    boxes = merge_overlapping_slice_boxes(boxes)
+    boxes = merge_overlapping_slice_boxes(boxes, exterior_background_mask=exterior_background_mask)
     boxes.sort(key=lambda box: (box.bbox[1], box.bbox[0]))
     return [SliceBox(id=i + 1, bbox=box.bbox, area=box.area) for i, box in enumerate(boxes)]
 
@@ -147,7 +396,7 @@ def _boxes_overlap(a: SliceBox, b: SliceBox) -> bool:
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 
 
-def _boxes_are_near_aligned_parts(a: SliceBox, b: SliceBox) -> bool:
+def _boxes_are_touching_shadow_strip(a: SliceBox, b: SliceBox) -> bool:
     ax, ay, aw, ah = a.bbox
     bx, by, bw, bh = b.bbox
     x_overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx))
@@ -159,14 +408,64 @@ def _boxes_are_near_aligned_parts(a: SliceBox, b: SliceBox) -> bool:
     overlap_ratio = x_overlap / float(max(1, min(aw, bw)))
     thin_ratio = min(ah, bh) / float(max(1, max(ah, bh)))
     # Sprite sheets often render a button/drop shadow as a separate thin
-    # component whose bbox touches the main control. Merge only when the pieces
-    # are vertically adjacent, strongly horizontally aligned, and one piece is
-    # clearly a shallow appendage, so stacked independent controls stay split.
+    # component whose bbox touches the main control. Without image background
+    # evidence, stay conservative so stacked independent controls remain split.
     return y_gap <= 2 and overlap_ratio >= 0.65 and thin_ratio <= 0.22
 
 
-def _boxes_should_merge(a: SliceBox, b: SliceBox) -> bool:
-    return _boxes_overlap(a, b) or _boxes_are_near_aligned_parts(a, b)
+def _boxes_are_vertically_related(a: SliceBox, b: SliceBox) -> bool:
+    ax, ay, aw, ah = a.bbox
+    bx, by, bw, bh = b.bbox
+    x_overlap = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    y_overlap = max(0, min(ay + ah, by + bh) - max(ay, by))
+    if x_overlap <= 0 or y_overlap > 0:
+        return False
+    y_gap = max(0, max(ay, by) - min(ay + ah, by + bh))
+    gap_limit = min(96, max(2, int(round(max(ah, bh) * 0.35))))
+    # With exterior-background evidence available, this is only a candidate
+    # relation. The actual split/merge decision is made by the background
+    # corridor test below.
+    return y_gap <= gap_limit and x_overlap / float(max(1, min(aw, bw))) >= 0.45
+
+
+def _has_exterior_background_barrier_between(a: SliceBox, b: SliceBox, exterior_background_mask: np.ndarray) -> bool:
+    ax, ay, aw, ah = a.bbox
+    bx, by, bw, bh = b.bbox
+    top, bottom = (a, b) if ay <= by else (b, a)
+    tx, ty, tw, th = top.bbox
+    bx2, by2, bw2, _ = bottom.bbox
+    x0 = max(tx, bx2)
+    x1 = min(tx + tw, bx2 + bw2)
+    y0 = ty + th
+    y1 = by2
+    if x1 <= x0 or y1 <= y0:
+        return False
+
+    gap = exterior_background_mask[y0:y1, x0:x1]
+    if gap.size == 0:
+        return False
+
+    # A true split is an exterior-background corridor crossing the whole gap.
+    # Connected left-to-right support expresses background-color obstruction
+    # directly and avoids deciding from bbox size alone.
+    count, labels = cv2.connectedComponents(gap.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return False
+    left = set(int(v) for v in np.unique(labels[:, 0]) if int(v) != 0)
+    right = set(int(v) for v in np.unique(labels[:, -1]) if int(v) != 0)
+    return bool(left & right)
+
+
+def _boxes_should_merge(a: SliceBox, b: SliceBox, exterior_background_mask: np.ndarray | None = None) -> bool:
+    if _boxes_overlap(a, b):
+        return True
+    if exterior_background_mask is None:
+        return _boxes_are_touching_shadow_strip(a, b)
+    if not _boxes_are_vertically_related(a, b):
+        return False
+    if _has_exterior_background_barrier_between(a, b, exterior_background_mask):
+        return False
+    return True
 
 
 def _merge_pair(a: SliceBox, b: SliceBox) -> SliceBox:
@@ -179,7 +478,11 @@ def _merge_pair(a: SliceBox, b: SliceBox) -> SliceBox:
     return SliceBox(id=0, bbox=(x0, y0, x1 - x0, y1 - y0), area=a.area + b.area)
 
 
-def merge_overlapping_slice_boxes(boxes: list[SliceBox]) -> list[SliceBox]:
+def merge_overlapping_slice_boxes(
+    boxes: list[SliceBox],
+    *,
+    exterior_background_mask: np.ndarray | None = None,
+) -> list[SliceBox]:
     """Collapse any intersecting slice rectangles into their union rectangle.
 
     A fragmented translucent object can produce a main component plus interior
@@ -205,7 +508,7 @@ def merge_overlapping_slice_boxes(boxes: list[SliceBox]) -> list[SliceBox]:
 
     for i, box in enumerate(boxes):
         for j in range(i + 1, len(boxes)):
-            if _boxes_should_merge(box, boxes[j]):
+            if _boxes_should_merge(box, boxes[j], exterior_background_mask=exterior_background_mask):
                 union(i, j)
 
     groups: dict[int, list[SliceBox]] = {}
@@ -237,11 +540,13 @@ def slice_image(
         background_color=background_color,
         distance_threshold=distance_threshold,
     )
+    exterior_background_mask = exterior_background_mask_from_background(image_srgb, background_color=bg)
     boxes = find_slice_boxes(
         mask,
         min_area=min_area,
         padding=padding,
         close_iterations=close_iterations,
+        exterior_background_mask=exterior_background_mask,
     )
     return SliceResult(background_color=bg, foreground_mask=mask.astype(np.float32), boxes=boxes, padding=max(0, int(padding)))
 
@@ -366,6 +671,7 @@ __all__ = [
     "classify_ui_slice",
     "crop_slice",
     "estimate_background_color",
+    "exterior_background_mask_from_background",
     "find_slice_boxes",
     "foreground_mask_from_background",
     "merge_overlapping_slice_boxes",

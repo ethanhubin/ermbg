@@ -1772,6 +1772,17 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     source_shadow = _known_bg_display_shadow_alpha(image_srgb, background_color)
     source_shadow_replay = (1.0 - source_shadow[..., None]) * bg
     source_shadow_error = np.mean(np.abs(source_shadow_replay - image), axis=2)
+    edge_subject_aa, edge_subject_alpha, edge_subject_foreground, edge_subject_info = (
+        _known_bg_subject_edge_aa_compete(
+            image_srgb,
+            background_color,
+            subject,
+            subject_foreground_srgb,
+            repair,
+            source_shadow,
+            source_shadow_error,
+        )
+    )
     foreground_other_max = np.max(np.delete(foreground, dominant, axis=2), axis=2)
     foreground_screen_like = (
         screen_dominant_bg
@@ -1784,6 +1795,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     # the enclosed-hole counterpart of the B003 hard-shadow failure mode.
     source_shadow_candidate = (
         repair
+        & ~edge_subject_aa
         & foreground_screen_like
         & (subject > 0.05)
         & (source_shadow > 0.035)
@@ -1835,6 +1847,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     )
     clean_source_shadow = (
         repair
+        & ~edge_subject_aa
         & relaxed_screen_residue
         & (subject > 0.05)
         & (source_shadow > 0.035)
@@ -1858,9 +1871,20 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     source_shadow_write = force_shadow_write | source_shadow_connected_write
     reduce_subject &= ~source_shadow_write
     corrected_subject = subject.copy()
+    corrected_foreground_srgb = subject_foreground_srgb.copy()
+    edge_subject_write = edge_subject_aa & ~source_shadow_write
     corrected_subject[reduce_subject] = projected_subject[reduce_subject]
+    corrected_subject[edge_subject_write] = edge_subject_alpha[edge_subject_write]
     corrected_subject[source_shadow_write] = 0.0
-    after_subject = np.where(reduce_subject, after_reduce_candidate, before)
+    corrected_foreground_srgb[edge_subject_write] = edge_subject_foreground[edge_subject_write]
+    foreground = corrected_foreground_srgb.astype(np.float32)
+    after_subject = _subject_shadow_reprojection_error_map(
+        image_srgb,
+        background_color,
+        corrected_foreground_srgb,
+        corrected_subject,
+        empty,
+    )
 
     base = (1.0 - corrected_subject[..., None]) * bg
     residual = image - corrected_subject[..., None] * foreground
@@ -1873,7 +1897,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     after_candidate = _subject_shadow_reprojection_error_map(
         image_srgb,
         background_color,
-        subject_foreground_srgb,
+        corrected_foreground_srgb,
         corrected_subject,
         solved_shadow,
     )
@@ -1882,7 +1906,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     shadow_display = np.where(write, solved_shadow, 0.0).astype(np.float32)
     shadow_display[source_shadow_write] = source_shadow[source_shadow_write]
     alpha, rgba_rgb_srgb = _composite_subject_with_display_shadow_srgb(
-        subject_foreground_srgb,
+        corrected_foreground_srgb,
         corrected_subject,
         shadow_display,
     )
@@ -1891,7 +1915,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     after = _subject_shadow_reprojection_error_map(
         image_srgb,
         background_color,
-        subject_foreground_srgb,
+        corrected_foreground_srgb,
         corrected_subject,
         shadow_display,
     )
@@ -1930,12 +1954,15 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
             "source_shadow_seed_written_pixels": int(force_shadow_write.sum()),
             "source_shadow_connected_written_pixels": int(source_shadow_connected_write.sum()),
             "source_shadow_written_pixels": int(source_shadow_write.sum()),
+            "subject_edge_aa_candidate_pixels": int(edge_subject_info["candidate_pixels"]),
+            "subject_edge_aa_written_pixels": int(edge_subject_write.sum()),
             "subject_alpha_reduced_pixels": int(reduce_subject.sum()),
             "mean_abs_error_before_u8": float(before_values.mean()) if before_values.size else 0.0,
             "mean_abs_error_after_u8": float(after_values.mean()) if after_values.size else 0.0,
             "p95_abs_error_before_u8": float(np.percentile(before_values, 95.0)) if before_values.size else 0.0,
             "p95_abs_error_after_u8": float(np.percentile(after_values, 95.0)) if after_values.size else 0.0,
             "max_abs_error_after_u8": float(after_values.max()) if after_values.size else 0.0,
+            "subject_edge_aa": edge_subject_info,
         },
     }
     return (
@@ -2373,6 +2400,114 @@ def _known_bg_display_shadow_alpha_under_subject(
     channel_alpha = 1.0 - residual / np.maximum(base, 1.0)
     alpha = (channel_alpha * weights).sum(axis=-1) / weight_sum
     return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+
+def _known_bg_subject_edge_aa_compete(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    repair_domain: np.ndarray,
+    source_shadow_alpha: np.ndarray,
+    source_shadow_error: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Prefer subject AA over shadow when the local replay evidence is tied.
+
+    Near a hard UI edge, the same pixel can be read as either subject coverage
+    or scalar known-background shadow. A wrong shadow decision exports black
+    color through the PNG and shows up as bright/dark speckles on previews.
+    This arbitration is deliberately local: it only runs next to an opaque
+    subject core, uses the nearest core color as foreground evidence, and
+    compares direct source reconstruction against a pure-shadow explanation.
+    """
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    domain = np.asarray(repair_domain, dtype=bool)
+    empty_mask = np.zeros(subject.shape, dtype=bool)
+    empty_alpha = np.zeros(subject.shape, dtype=np.float32)
+    foreground_out = subject_foreground_srgb.copy()
+    subject_core = subject >= 0.985
+    if not bool(subject_core.any()):
+        return empty_mask, empty_alpha, foreground_out, {
+            "enabled": True,
+            "candidate_pixels": 0,
+            "written_pixels": 0,
+            "reason": "missing opaque subject core",
+        }
+
+    from scipy import ndimage
+
+    dist_to_core = cv2.distanceTransform((~subject_core).astype(np.uint8), cv2.DIST_L2, 3)
+    candidate = domain & (subject > 0.012) & (subject < 0.985) & (dist_to_core <= 3.0)
+    if not bool(candidate.any()):
+        return empty_mask, empty_alpha, foreground_out, {
+            "enabled": True,
+            "candidate_pixels": 0,
+            "written_pixels": 0,
+            "reason": "",
+        }
+
+    _, indices = ndimage.distance_transform_edt(~subject_core, return_indices=True)
+    nearest_foreground = image_srgb[indices[0], indices[1]].astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    image = image_srgb.astype(np.float32)
+    source_shadow = np.clip(source_shadow_alpha.astype(np.float32), 0.0, 1.0)
+
+    plain_bg = np.broadcast_to(bg, image.shape).astype(np.float32)
+    shadowed_bg = (1.0 - source_shadow[..., None]) * bg
+    plain_alpha, plain_error = _solve_subject_coverage_error(image, nearest_foreground, plain_bg)
+    shadowed_alpha, shadowed_error = _solve_subject_coverage_error(image, nearest_foreground, shadowed_bg)
+    use_shadowed_bg = shadowed_error < plain_error
+    solved_alpha = np.where(use_shadowed_bg, shadowed_alpha, plain_alpha).astype(np.float32)
+    subject_error = np.where(use_shadowed_bg, shadowed_error, plain_error).astype(np.float32)
+    shadow_error = np.asarray(source_shadow_error, dtype=np.float32)
+
+    current_error = _subject_shadow_reprojection_error_map(
+        image_srgb,
+        background_color,
+        subject_foreground_srgb,
+        subject,
+        np.zeros(subject.shape, dtype=np.float32),
+    )
+    # One 8-bit code value is the replay tolerance for "no clear winner". In
+    # that tie zone, subject AA is the safer owner because a false shadow writes
+    # black foreground into the exported RGBA, while a false subject-AA pixel
+    # remains locally color-consistent with the nearby opaque edge.
+    tie_tolerance_u8 = 1.0
+    prefer = (
+        candidate
+        & (solved_alpha >= 0.02)
+        & (solved_alpha <= 0.985)
+        & (subject_error <= shadow_error + tie_tolerance_u8)
+        & (subject_error <= current_error + tie_tolerance_u8)
+    )
+    alpha_out = np.zeros(subject.shape, dtype=np.float32)
+    alpha_out[prefer] = solved_alpha[prefer]
+    foreground_out[prefer] = np.clip(nearest_foreground[prefer], 0.0, 255.0).astype(np.uint8)
+    return prefer, alpha_out, foreground_out, {
+        "enabled": True,
+        "candidate_pixels": int(candidate.sum()),
+        "written_pixels": int(prefer.sum()),
+        "used_shadowed_background_pixels": int((prefer & use_shadowed_bg).sum()),
+        "mean_subject_error_u8": float(subject_error[prefer].mean()) if bool(prefer.any()) else 0.0,
+        "mean_shadow_error_u8": float(shadow_error[prefer].mean()) if bool(prefer.any()) else 0.0,
+        "mean_alpha": float(solved_alpha[prefer].mean()) if bool(prefer.any()) else 0.0,
+        "tie_tolerance_u8": float(tie_tolerance_u8),
+        "reason": "",
+    }
+
+
+def _solve_subject_coverage_error(
+    image_srgb: np.ndarray,
+    foreground_srgb: np.ndarray,
+    background_srgb: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    direction = foreground_srgb.astype(np.float32) - background_srgb.astype(np.float32)
+    denom = np.sum(direction * direction, axis=2)
+    alpha = np.sum((image_srgb.astype(np.float32) - background_srgb.astype(np.float32)) * direction, axis=2)
+    alpha = np.clip(alpha / np.maximum(denom, 1.0e-6), 0.0, 1.0).astype(np.float32)
+    predicted = alpha[..., None] * foreground_srgb.astype(np.float32) + (1.0 - alpha[..., None]) * background_srgb.astype(np.float32)
+    error = np.mean(np.abs(predicted - image_srgb.astype(np.float32)), axis=2).astype(np.float32)
+    return alpha, error
 
 
 def _subject_shadow_reprojection_error_map(

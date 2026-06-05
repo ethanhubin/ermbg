@@ -14,6 +14,7 @@ from ermbg.api import matte_image
 from ermbg.pymatting_refine import (
     _same_key_opaque_stroke_core_from_component,
     analyze_same_key_opaque_body_outline,
+    build_known_background_hard_edge_boundary_mask,
     build_known_background_trimap,
     build_same_key_opaque_inner_opaque_mask,
     build_same_key_opaque_proxy_subject_mask,
@@ -657,6 +658,62 @@ def test_known_background_trimap_does_not_release_neutral_subject_edge_without_s
 
     assert info["neutral_shadow_subject_evidence_release_pixels"] == 0
     assert info["neutral_shadow_subject_evidence"]["reason"] == "missing sure foreground or shadow evidence"
+
+
+def test_known_background_hard_edge_boundary_crosses_cast_shadow_by_family():
+    cases = [
+        (
+            "button_green_yellow_a_outlined_no_shadow/green.png",
+            "button_green_yellow_a_outlined_soft_heavy_shadow/green.png",
+            (0, 200, 0),
+        ),
+        (
+            "button_green_yellow_b_unoutlined_no_shadow/green.png",
+            "button_green_yellow_b_unoutlined_soft_heavy_shadow/green.png",
+            (0, 200, 0),
+        ),
+        (
+            "button_blue_green_a_outlined_no_shadow/blue.png",
+            "button_blue_green_a_outlined_soft_heavy_shadow/blue.png",
+            (0, 0, 200),
+        ),
+        (
+            "button_blue_green_b_unoutlined_no_shadow/blue.png",
+            "button_blue_green_b_unoutlined_soft_heavy_shadow/blue.png",
+            (0, 0, 200),
+        ),
+        (
+            "button_green_blue_a_outlined_no_shadow/green.png",
+            "button_green_blue_a_outlined_soft_heavy_shadow/green.png",
+            (0, 200, 0),
+        ),
+        (
+            "button_green_blue_b_unoutlined_no_shadow/green.png",
+            "button_green_blue_b_unoutlined_soft_heavy_shadow/green.png",
+            (0, 200, 0),
+        ),
+    ]
+    for clean_rel, shadow_rel, bg in cases:
+        clean_image = np.asarray(
+            Image.open(PROJECT_ROOT / f"samples/corridorkey_semantic/button/{clean_rel}").convert("RGB")
+        )
+        shadow_image = np.asarray(
+            Image.open(PROJECT_ROOT / f"samples/corridorkey_semantic/button/{shadow_rel}").convert("RGB")
+        )
+
+        clean_mask, clean_info = build_known_background_hard_edge_boundary_mask(clean_image, bg)
+        shadow_mask, shadow_info = build_known_background_hard_edge_boundary_mask(shadow_image, bg)
+
+        intersection = int((clean_mask & shadow_mask).sum())
+        union = int((clean_mask | shadow_mask).sum())
+        iou = intersection / float(max(1, union))
+        area_delta = abs(int(clean_mask.sum()) - int(shadow_mask.sum())) / float(max(1, int(clean_mask.sum())))
+
+        assert clean_info["accepted"] is True, clean_rel
+        assert shadow_info["accepted"] is True, shadow_rel
+        assert shadow_info["shadow_bg_pixels"] > clean_info["shadow_bg_pixels"], shadow_rel
+        assert iou >= 0.94, (clean_rel, shadow_rel, iou)
+        assert area_delta <= 0.08, (clean_rel, shadow_rel, area_delta)
 
 
 def test_same_key_opaque_body_outline_trimap_uses_measured_outline_evidence():

@@ -527,32 +527,20 @@ def _route_asset_kind(
     image_srgb: np.ndarray,
     profile: str,
     screen_mode: str,
-    *,
-    foreground_aspect_ratio: float | None = None,
-    foreground_long_side: int | None = None,
 ) -> str:
-    h, w = image_srgb.shape[:2]
-    image_aspect = float(w / max(1, h))
-    image_long_side = int(max(h, w))
-    aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else image_aspect
-    long_side = foreground_long_side if foreground_long_side is not None and foreground_long_side > 0 else image_long_side
-    # Character routing should not be a pure "square image" shortcut. The game
-    # eval set has 512x512 square UI controls with known-B holes that can look
-    # composite to CorridorKey's profile classifier; treating every 512 square
-    # as a character sends deterministic button mechanics to the learned keyer.
-    # Reserve character routing for large composite assets whose observed
-    # foreground support is not button-wide; square export canvases are common
-    # for wide UI buttons.
-    if profile == "composite_character_corridor_only" and 0.55 <= aspect <= 1.45 and long_side >= 768:
+    del image_srgb
+    if profile == "composite_character_corridor_only":
         return "character"
-    if profile == "composite_character_corridor_only" and long_side < 768:
+    if screen_mode not in {"green", "blue"}:
+        return "unknown"
+    if profile.startswith("opaque_hard_ui") or profile in {
+        "translucent_button",
+        "screen_tinted_translucency",
+        "edge_cleanup",
+        "balanced",
+        "key_color_material",
+    }:
         return "button"
-    if aspect >= 1.45 or profile.startswith("opaque_hard_ui") or profile == "translucent_button":
-        return "button"
-    if profile in {"edge_cleanup", "balanced", "key_color_material"} and long_side >= 256:
-        return "button"
-    if screen_mode in {"green", "blue"}:
-        return "icon"
     return "unknown"
 
 
@@ -617,28 +605,21 @@ def _known_bg_glow_route_params(
     }
 
 
-def _wide_button_complex_boundary_score(
+def _complex_boundary_score(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
-    *,
-    foreground_aspect_ratio: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Detect glass/translucent button edges missed by aggregate CK profiles.
 
     Failure mode: blue-screen translucent/real-glass buttons can look like
     ordinary ``edge_cleanup`` or ``balanced`` in same-key-color statistics
     because their material is far from the blue screen hue. The observable
-    signal is a wide UI support region with either very high luminance-gradient
-    percentiles from specular/glass texture or a meaningful mid-alpha band from
-    screen-tinted translucency. Hard outlined buttons can have strong contour
-    gradients, so the gradient threshold is intentionally high and the
-    semi-alpha fraction provides the separate glass/translucency escape hatch.
+    signal is either very high luminance-gradient percentiles from specular/glass
+    texture or a meaningful mid-alpha band from screen-tinted translucency. Hard
+    outlined UI can have strong contours, so the gradient threshold is
+    intentionally high and the semi-alpha fraction provides the separate
+    glass/translucency escape hatch.
     """
-    h, w = image_srgb.shape[:2]
-    aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else float(w / max(1, h))
-    if aspect < 1.45:
-        return False, {"enabled": True, "foreground_aspect_ratio": aspect, "reason": "not wide button"}
-
     key = chromatic_key_alpha(
         image_srgb,
         background_color,
@@ -647,11 +628,18 @@ def _wide_button_complex_boundary_score(
     support = key >= 0.16
     support_pixels = int(support.sum())
     semi_alpha_fraction = float(np.count_nonzero((key > 0.16) & (key < 0.92)) / max(1, support_pixels))
+    distance_to_exterior = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3)
+    interior_support = distance_to_exterior >= 3.0
+    interior_semi_alpha = interior_support & (key > 0.16) & (key < 0.92)
+    interior_semi_alpha_fraction = float(np.count_nonzero(interior_semi_alpha) / max(1, support_pixels))
+    interior_semi_alpha_density = float(np.count_nonzero(interior_semi_alpha) / max(1, int(interior_support.sum())))
     if support_pixels < max(32, int(key.size * 0.04)):
         return False, {
             "enabled": True,
             "support_pixels": support_pixels,
             "semi_alpha_fraction": semi_alpha_fraction,
+            "interior_semi_alpha_fraction": interior_semi_alpha_fraction,
+            "interior_semi_alpha_density": interior_semi_alpha_density,
             "reason": "insufficient known-B support",
         }
 
@@ -659,34 +647,74 @@ def _wide_button_complex_boundary_score(
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     gradient = np.sqrt(gx * gx + gy * gy)
+    edges = cv2.Canny(gray, 40, 120) > 0
+    boundary = (
+        cv2.dilate(support.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        & ~cv2.erode(support.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+    )
+    edge_in_boundary = edges & boundary
+    n_edge_labels, _edge_labels, edge_stats, _ = cv2.connectedComponentsWithStats(
+        edge_in_boundary.astype(np.uint8),
+        connectivity=8,
+    )
+    small_edge_components = int(
+        sum(1 for i in range(1, n_edge_labels) if 2 <= int(edge_stats[i, cv2.CC_STAT_AREA]) <= 40)
+    )
+    boundary_edge_fraction = float(np.count_nonzero(edge_in_boundary) / max(1, int(boundary.sum())))
     support_gradient = gradient[support].astype(np.float32)
     p75 = float(np.percentile(support_gradient, 75.0))
     mean = float(support_gradient.mean())
-    gradient_gate = p75 >= 200.0
+    # Crisp outlines can have very high gradient energy at the edge. Require a
+    # measurable non-edge semi-alpha population before treating strong gradients
+    # as glass/complex-material evidence; hard outlined icons stay Known-B.
+    gradient_gate = p75 >= 200.0 and semi_alpha_fraction >= 0.06
     # A broad mid-alpha band alone is not enough for "glass": soft/contact
     # shadows on hard UI also produce lots of mid-alpha key evidence, but with
     # low local structure. Require meaningful gradient energy for the pure
     # semi-alpha gate so heavy shadows stay on deterministic PyMatting.
     semi_alpha_gate = semi_alpha_fraction >= 0.18 and p75 >= 100.0
     # Broad glass/translucency evidence can split across two imperfect
-    # observables: a material band that is not wide enough to pass the pure
+    # observables: a material band that is not strong enough to pass the pure
     # semi-alpha gate, plus distributed specular/edge gradients that are below
-    # the very-high hard contour guard. When both moderate signals appear on a
-    # wide known-screen button, prefer CorridorKey so complex boundaries stay
-    # with the learned keyer instead of the deterministic hard-edge solver.
+    # the very-high hard contour guard. When both moderate signals appear on
+    # known-screen UI, prefer CorridorKey so complex boundaries stay with the
+    # learned keyer instead of the deterministic hard-edge solver.
     combined_glass_gate = p75 >= 160.0 and semi_alpha_fraction >= 0.14
-    accepted = gradient_gate or semi_alpha_gate or combined_glass_gate
+    # This gate is specifically for "the middle is translucent", not soft
+    # outline antialiasing. Distance-to-exterior excludes the edge band, and
+    # the area/density thresholds keep contact shadows from becoming glass.
+    interior_material_gate = interior_semi_alpha_fraction >= 0.30 and interior_semi_alpha_density >= 0.35
+    # Character-like transparent fabric and hair can present as many small,
+    # disconnected edge fragments plus a modest but real semi-alpha population.
+    # This is topology + alpha evidence, not image size or aspect.
+    fine_detail_translucent_gate = (
+        small_edge_components >= 250
+        and semi_alpha_fraction >= 0.05
+        and boundary_edge_fraction >= 0.25
+    )
+    accepted = (
+        gradient_gate
+        or semi_alpha_gate
+        or combined_glass_gate
+        or interior_material_gate
+        or fine_detail_translucent_gate
+    )
     return accepted, {
         "enabled": True,
-        "foreground_aspect_ratio": aspect,
         "support_pixels": support_pixels,
         "support_fraction": float(support.mean()),
         "semi_alpha_fraction": semi_alpha_fraction,
+        "interior_semi_alpha_fraction": interior_semi_alpha_fraction,
+        "interior_semi_alpha_density": interior_semi_alpha_density,
+        "boundary_edge_fraction": boundary_edge_fraction,
+        "small_edge_components": small_edge_components,
         "support_gradient_p75": p75,
         "support_gradient_mean": mean,
         "gradient_gate": gradient_gate,
         "semi_alpha_gate": semi_alpha_gate,
         "combined_glass_gate": combined_glass_gate,
+        "interior_material_gate": interior_material_gate,
+        "fine_detail_translucent_gate": fine_detail_translucent_gate,
         # Experience-driven but feature-bound: hard outlined buttons can reach
         # the low hundreds from a single crisp contour; glass/specular buttons
         # that need CorridorKey show either much higher distributed gradients
@@ -696,6 +724,11 @@ def _wide_button_complex_boundary_score(
         "semi_alpha_gradient_p75_min": 100.0,
         "combined_support_gradient_p75_min": 160.0,
         "combined_semi_alpha_fraction_min": 0.14,
+        "interior_semi_alpha_fraction_min": 0.30,
+        "interior_semi_alpha_density_min": 0.35,
+        "fine_detail_small_edge_components_min": 250,
+        "fine_detail_semi_alpha_fraction_min": 0.05,
+        "fine_detail_boundary_edge_fraction_min": 0.25,
         "reason": "" if accepted else "below complex-boundary and semi-alpha gates",
     }
 
@@ -788,19 +821,21 @@ def classify_route(
         image_srgb,
         profile,
         ck.screen_mode if known_corridor_screen else "unknown",
-        foreground_aspect_ratio=ck.foreground_aspect_ratio,
-        foreground_long_side=ck.foreground_long_side,
     )
     button_corridor_profiles = {"translucent_button"}
-    complex_button_boundary, complex_button_info = _wide_button_complex_boundary_score(
+    complex_button_boundary, complex_button_info = _complex_boundary_score(
         image_srgb,
         ck.background_color,
-        foreground_aspect_ratio=ck.foreground_aspect_ratio,
     )
     analysis["complex_button_boundary"] = complex_button_info
+    complex_button_can_use_corridorkey = (
+        complex_button_boundary
+        and not profile.startswith("opaque_hard_ui")
+        and profile != "key_color_material"
+    )
     if known_corridor_screen and (
         asset_kind in {"icon", "character"}
-        or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_boundary))
+        or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_can_use_corridorkey))
     ):
         if asset_kind == "character":
             execution_profile = "corridorkey-character"
@@ -817,7 +852,7 @@ def classify_route(
             # the complete execution recipe. Downstream code should not infer
             # button behavior from CorridorKey's generic semantic profile.
             params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
-        if complex_button_boundary and asset_kind == "button" and profile not in button_corridor_profiles:
+        if complex_button_can_use_corridorkey and asset_kind == "button" and profile not in button_corridor_profiles:
             reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
         else:
             reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")

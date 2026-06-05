@@ -942,6 +942,127 @@ def _flood_exterior(mask: np.ndarray) -> np.ndarray:
     return work == 2
 
 
+def _largest_filled_component(mask: np.ndarray, *, close_px: int = 1) -> np.ndarray:
+    mask_bool = np.asarray(mask, dtype=bool)
+    h, w = mask_bool.shape
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), 8)
+    if labels_count <= 1:
+        return np.zeros((h, w), dtype=bool)
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = labels == label
+    component = np.asarray(ndimage.binary_fill_holes(component), dtype=bool)
+    close = max(0, int(close_px))
+    if close > 0:
+        component = cv2.morphologyEx(
+            component.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=close,
+        ).astype(bool)
+        component = np.asarray(ndimage.binary_fill_holes(component), dtype=bool)
+    return component
+
+
+def build_known_background_hard_edge_boundary_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    bg_threshold: float = 7.0,
+    fg_threshold: float = 24.0,
+    shadow_close_px: int = 1,
+    subject_close_px: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Find a hard opaque subject boundary across known-background shadow.
+
+    This is the production form of the base-close experiment: flood only
+    high-confidence exterior known background, identify scalar-darkened
+    known-B shadow as background support, close tiny gaps in that shadow
+    support, then take the largest remaining filled component as the hard
+    subject boundary. It deliberately returns a binary hard-edge support mask;
+    it does not solve antialiasing or shadow alpha.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("image_srgb must be HxWx3 uint8")
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
+    distance = oklab_distance(lab, bg_lab).astype(np.float32)
+    rgb_distance = np.sqrt(
+        np.sum((image_srgb.astype(np.float32) - bg.astype(np.float32).reshape(1, 1, 3)) ** 2, axis=2)
+    ).astype(np.float32)
+    effective_bg_threshold = float(max(bg_threshold, 0.0))
+    bg_close = (distance <= effective_bg_threshold) | (rgb_distance <= max(5.0, effective_bg_threshold + 2.0))
+    exterior_bg = _flood_from_border(bg_close)
+
+    broad_support = _largest_filled_component(~exterior_bg, close_px=1)
+    if not bool(broad_support.any()):
+        empty = np.zeros(image_srgb.shape[:2], dtype=bool)
+        return empty, {
+            "enabled": True,
+            "method": "known_background_hard_edge_boundary_base_close",
+            "accepted": False,
+            "reason": "missing non-background component",
+            "background_color": [int(c) for c in bg],
+            "bg_threshold": float(effective_bg_threshold),
+            "fg_threshold": float(fg_threshold),
+            "mask_pixels": 0,
+        }
+
+    dist_to_broad_edge = cv2.distanceTransform(broad_support.astype(np.uint8), cv2.DIST_L2, 3)
+    strong_material = broad_support & (distance >= float(fg_threshold)) & (dist_to_broad_edge > 2.0)
+    min_seed_pixels = int(max(16, round(float(image_srgb.shape[0] * image_srgb.shape[1]) * 0.0005)))
+    if int(strong_material.sum()) >= min_seed_pixels:
+        subject_seed = _largest_filled_component(strong_material, close_px=1)
+        seed_source = "strong_material_core"
+    else:
+        subject_seed = broad_support & (dist_to_broad_edge > 4.0)
+        subject_seed = _largest_filled_component(subject_seed, close_px=1)
+        seed_source = "broad_support_inset_fallback"
+
+    shadow_bg_raw, shadow_info = _known_background_shadow_like_background_mask(
+        image_srgb,
+        bg,
+        subject_seed=subject_seed,
+    )
+    shadow_close = max(0, int(shadow_close_px))
+    if shadow_close > 0 and bool(shadow_bg_raw.any()):
+        shadow_bg = cv2.morphologyEx(
+            shadow_bg_raw.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=shadow_close,
+        ).astype(bool)
+    else:
+        shadow_bg = shadow_bg_raw
+
+    hard_bg = exterior_bg | shadow_bg
+    subject_mask = _largest_filled_component(~hard_bg, close_px=int(subject_close_px))
+    accepted = bool(subject_mask.any())
+    return subject_mask, {
+        "enabled": True,
+        "method": "known_background_hard_edge_boundary_base_close",
+        "accepted": accepted,
+        "reason": "" if accepted else "empty subject after exterior and shadow background removal",
+        "background_color": [int(c) for c in bg],
+        "bg_threshold": float(effective_bg_threshold),
+        "fg_threshold": float(fg_threshold),
+        "shadow_close_px": int(shadow_close),
+        "subject_close_px": int(max(0, subject_close_px)),
+        "bg_close_pixels": int(bg_close.sum()),
+        "exterior_bg_pixels": int(exterior_bg.sum()),
+        "broad_support_pixels": int(broad_support.sum()),
+        "subject_seed_source": seed_source,
+        "subject_seed_pixels": int(subject_seed.sum()),
+        "shadow_bg_raw_pixels": int(shadow_bg_raw.sum()),
+        "shadow_bg_pixels": int(shadow_bg.sum()),
+        "shadow_bg_closed_pixels": int((shadow_bg & ~shadow_bg_raw).sum()),
+        "hard_bg_pixels": int(hard_bg.sum()),
+        "mask_pixels": int(subject_mask.sum()),
+        "shadow_background": shadow_info,
+    }
+
+
 def _median_smooth_1d(values: np.ndarray, k: int = 9) -> np.ndarray:
     radius = k // 2
     padded = np.pad(values.astype(np.float32), (radius, radius), mode="edge")
@@ -2672,6 +2793,7 @@ def estimate_alpha_with_pymatting(
 __all__ = [
     "PyMattingAlphaResult",
     "analyze_same_key_opaque_body_outline",
+    "build_known_background_hard_edge_boundary_mask",
     "build_same_key_opaque_inner_opaque_mask",
     "build_same_key_opaque_proxy_subject_mask",
     "build_known_background_trimap",

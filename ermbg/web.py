@@ -43,7 +43,17 @@ from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_
 from .local_ownership import generate_local_ownership_candidate
 from .runtime_capabilities import collect_runtime_capabilities
 from .settings import get_bool_setting, get_direct_worker_endpoints, get_direct_worker_servers, get_setting
-from .slicer import SliceBox, SliceResult, classify_ui_slice, crop_slice, merge_overlapping_slice_boxes, pad_slice_box, slice_image
+from .slicer import (
+    SliceBox,
+    SliceResult,
+    analyze_checkerboard_background,
+    classify_ui_slice,
+    crop_slice,
+    merge_overlapping_slice_boxes,
+    normalize_checkerboard_background_to_light_square,
+    pad_slice_box,
+    slice_image,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -299,6 +309,21 @@ def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str
     return _image_from_upload_bytes(data), hashlib.sha256(data).hexdigest()
 
 
+def _preprocess_checkerboard_image(image: Image.Image, enabled: bool) -> tuple[Image.Image, dict[str, object]]:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    if not enabled:
+        return image, {"enabled": True, "requested": False, "applied": False}
+    normalized, info = normalize_checkerboard_background_to_light_square(rgb)
+    if not info.get("applied", False):
+        return image, {"requested": True, **info}
+    return Image.fromarray(normalized, mode="RGB"), {"requested": True, **info}
+
+
+def _image_digest(image: Image.Image) -> str:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    return hashlib.sha256(rgb.tobytes()).hexdigest()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -330,6 +355,18 @@ def runtime_capabilities(
         "enable_comfy": WEB_ENABLE_COMFY,
     }
     return payload
+
+
+@app.post("/api/checkerboard-background")
+def checkerboard_background_endpoint(file: Annotated[UploadFile, File()]) -> dict[str, object]:
+    image = _load_upload_image(file)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    analysis = analyze_checkerboard_background(rgb)
+    return {
+        "accepted": bool(analysis.get("accepted", False)),
+        "recommended": bool(analysis.get("accepted", False)),
+        "analysis": analysis,
+    }
 
 
 @app.get("/api/artifacts")
@@ -635,6 +672,7 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
+      <label class="check-label"><span>去网格</span><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"></label>
       <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="direct-known-bg-glow">Direct Worker Known-B Glow</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
       <button id="submit" type="submit">抠图</button>
       <details class="settings" id="corridorkey-settings" open>
@@ -751,6 +789,7 @@ def _matte_page_html() -> str:
     const form = document.getElementById("matte-form");
     const file = document.getElementById("file");
     const backend = document.getElementById("backend");
+    const removeCheckerboard = document.getElementById("remove-checkerboard");
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
@@ -828,7 +867,7 @@ def _matte_page_html() -> str:
     }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; removeCheckerboard.disabled = isBusy || !file.files.length; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
@@ -861,9 +900,10 @@ def _matte_page_html() -> str:
     function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `候选 ${index + 1}`, selected: candidate.selected === true, meta: `候选 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的候选结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
     async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); maskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); maskStatus.textContent = "Sam3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "Sam3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; maskStatus.textContent = elapsed ? `已生成 Sam3 mask · ${elapsed}` : "已生成 Sam3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); maskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
+    async function detectCheckerboard(fileObj) { removeCheckerboard.checked = false; removeCheckerboard.disabled = true; const data = new FormData(); data.append("file", fileObj); try { const response = await fetch("/api/checkerboard-background", { method: "POST", body: data }); if (!response.ok) throw new Error("checkerboard detection failed"); const payload = await response.json(); const analysis = payload.analysis || {}; removeCheckerboard.checked = payload.recommended === true; if (payload.recommended === true) { const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : ""; statusEl.textContent = `检测到网格${tile}，已勾选去网格`; } } catch (_) { removeCheckerboard.checked = false; } finally { removeCheckerboard.disabled = false; } }
     function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; detectCheckerboard(selected); });
     backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
     protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
     protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
@@ -887,6 +927,7 @@ def _matte_page_html() -> str:
       const formData = new FormData();
       formData.append("file", file.files[0]);
       formData.append("backend", backend.value);
+      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
       formData.append("shadow_mode", shadowMode.value);
       formData.append("parameter_source", backend.value === "auto" ? "auto" : "manual");
       corridorSettingControls.forEach((control) => {
@@ -1406,6 +1447,10 @@ def _matte_page_html() -> str:
         </div>
         <div class="source-meta" id="source-meta">未选择图片</div>
       </div>
+      <label class="checkbox-field">
+        <input id="remove-checkerboard" name="remove_checkerboard" type="checkbox">
+        <span>去网格</span>
+      </label>
       <div class="field">
         任务
         <span class="mode-switch" role="group" aria-label="任务">
@@ -1477,6 +1522,7 @@ def _matte_page_html() -> str:
     const sliceSettings = document.getElementById("slice-settings");
     const sliceMinArea = document.getElementById("slice-min-area");
     const slicePadding = document.getElementById("slice-padding");
+    const removeCheckerboard = document.getElementById("remove-checkerboard");
     const submit = document.getElementById("submit");
     const confirmSlices = document.getElementById("confirm-slices");
     const statusEl = document.getElementById("status");
@@ -1498,6 +1544,8 @@ def _matte_page_html() -> str:
     let previewPanY = 0;
     let dragStart = null;
     let slicePreviewPayload = null;
+    let sourceMetaBase = "未选择图片";
+    let sourceCheckerMeta = "";
 
     function humanSize(bytes) {
       if (bytes < 1024) return `${bytes} B`;
@@ -1536,6 +1584,7 @@ def _matte_page_html() -> str:
       });
       sliceMinArea.disabled = isBusy;
       slicePadding.disabled = isBusy;
+      removeCheckerboard.disabled = isBusy || !file.files.length;
       confirmSlices.disabled = isBusy || !slicePreviewPayload;
       submit.textContent = isBusy ? "处理中" : (task.value === "slice" ? "自动标注" : "抠图");
     }
@@ -1563,6 +1612,30 @@ def _matte_page_html() -> str:
       tabs.forEach((tab) => {
         tab.setAttribute("aria-selected", String(tab.dataset.bg === mode));
       });
+    }
+
+    async function detectCheckerboard(fileObj) {
+      removeCheckerboard.checked = false;
+      removeCheckerboard.disabled = true;
+      sourceCheckerMeta = "";
+      const data = new FormData();
+      data.append("file", fileObj);
+      try {
+        const response = await fetch("/api/checkerboard-background", { method: "POST", body: data });
+        if (!response.ok) throw new Error("checkerboard detection failed");
+        const payload = await response.json();
+        const analysis = payload.analysis || {};
+        removeCheckerboard.checked = payload.recommended === true;
+        if (payload.recommended === true) {
+          const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : "";
+          sourceCheckerMeta = ` · 检测到网格${tile}`;
+          sourceMeta.textContent = `${sourceMetaBase}${sourceCheckerMeta}`;
+        }
+      } catch (_) {
+        removeCheckerboard.checked = false;
+      } finally {
+        removeCheckerboard.disabled = false;
+      }
     }
 
     function resetResult() {
@@ -1724,6 +1797,7 @@ def _matte_page_html() -> str:
       const formData = new FormData();
       formData.append("file", dataUrlToBlob(crop.rgb), crop.filename);
       formData.append("backend", backend.value);
+      formData.append("remove_checkerboard", "false");
       setBusy(true);
       statusEl.textContent = `正在抠图 · ${crop.label}`;
       strategyEl.textContent = crop.label;
@@ -1815,6 +1889,8 @@ def _matte_page_html() -> str:
       if (sourceUrl) URL.revokeObjectURL(sourceUrl);
 
       const selected = file.files[0];
+      sourceMetaBase = `${selected.name} · ${humanSize(selected.size)}`;
+      sourceCheckerMeta = "";
       sourceUrl = URL.createObjectURL(selected);
       sourcePreview.classList.add("is-visible");
       sourceFrame.innerHTML = "";
@@ -1822,12 +1898,22 @@ def _matte_page_html() -> str:
       img.src = sourceUrl;
       img.alt = "上传图片预览";
       img.onload = () => {
-        sourceMeta.textContent = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`;
+        sourceMetaBase = `${selected.name} · ${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`;
+        sourceMeta.textContent = `${sourceMetaBase}${sourceCheckerMeta}`;
       };
       img.onerror = () => {
-        sourceMeta.textContent = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`;
+        sourceMetaBase = `${selected.name} · 无法预览 · ${humanSize(selected.size)}`;
+        sourceMeta.textContent = `${sourceMetaBase}${sourceCheckerMeta}`;
       };
       sourceFrame.appendChild(img);
+      detectCheckerboard(selected);
+    });
+
+    removeCheckerboard.addEventListener("change", () => {
+      if (task.value !== "slice") return;
+      slicePreviewPayload = null;
+      confirmSlices.disabled = true;
+      candidateList.innerHTML = '<span class="empty">预处理已修改，重新自动标注</span>';
     });
 
     modeButtons.forEach((button) => {
@@ -1897,6 +1983,7 @@ def _matte_page_html() -> str:
       if (!file.files.length || !slicePreviewPayload) return;
       const formData = new FormData();
       formData.append("file", file.files[0]);
+      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
       formData.append("min_area", sliceMinArea.value || "64");
       formData.append("padding", slicePadding.value || "2");
       setBusy(true);
@@ -1924,6 +2011,7 @@ def _matte_page_html() -> str:
       if (!file.files.length) return;
       const formData = new FormData();
       formData.append("file", file.files[0]);
+      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
       if (task.value === "slice") {
         formData.append("min_area", sliceMinArea.value || "64");
         formData.append("padding", slicePadding.value || "2");
@@ -2026,6 +2114,26 @@ def _batch_page_html() -> str:
     label { display: grid; gap: 8px; color: #47524c; font-size: 13px; font-weight: 800; }
     input, select, button { min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
     input[type="file"] { padding: 8px; }
+    .checkbox-field {
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #cfd7cc;
+      border-radius: 6px;
+      background: #fbfcfa;
+      color: #47524c;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .checkbox-field input {
+      width: 16px;
+      min-width: 16px;
+      height: 16px;
+      min-height: 16px;
+      margin: 0;
+    }
     button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
     button.secondary { border: 1px solid #b8c1b7; background: #f7faf6; color: #196f5a; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -2389,6 +2497,8 @@ def _slice_page_html() -> str:
     label { display: grid; gap: 8px; font-size: 13px; font-weight: 700; color: #47524c; }
     input, button { width: 100%; min-height: 40px; border-radius: 6px; border: 1px solid #b8c1b7; background: #ffffff; color: #1c2320; font: inherit; }
     input[type="file"] { padding: 8px; }
+    .checkbox-field { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #cfd7cc; border-radius: 6px; background: #fbfcfa; color: #47524c; font-size: 13px; font-weight: 800; }
+    .checkbox-field input { width: 16px; min-width: 16px; height: 16px; min-height: 16px; margin: 0; }
     button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -2434,6 +2544,7 @@ def _slice_page_html() -> str:
   <main>
     <form id="slice-form">
       <label>图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
+      <label class="checkbox-field"><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"><span>去网格</span></label>
       <div class="settings">
         <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
         <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
@@ -2457,6 +2568,7 @@ def _slice_page_html() -> str:
     const file = document.getElementById("file");
     const minArea = document.getElementById("min-area");
     const padding = document.getElementById("padding");
+    const removeCheckerboard = document.getElementById("remove-checkerboard");
     const previewButton = document.getElementById("preview-button");
     const confirmButton = document.getElementById("confirm");
     const batchAll = document.getElementById("batch-all");
@@ -2469,12 +2581,14 @@ def _slice_page_html() -> str:
     let selectedCrop = null;
     let previewRequestId = 0;
     let lastPreviewSettingsKey = "";
+    let uploadedPreviewUrl = null;
     const SLICE_STATE_KEY = "ermbgSliceWorkspace";
 
     function setSliceBusy(isBusy) {
       previewButton.disabled = isBusy || !file.files.length;
       confirmButton.disabled = isBusy || !hasPreview;
       file.disabled = isBusy;
+      removeCheckerboard.disabled = isBusy || !file.files.length;
     }
 
     function setTransferBusy(isBusy) {
@@ -2490,6 +2604,7 @@ def _slice_page_html() -> str:
       data.append("file", file.files[0]);
       data.append("min_area", minArea.value || "64");
       data.append("padding", padding.value || "2");
+      data.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
       return data;
     }
 
@@ -2498,6 +2613,28 @@ def _slice_page_html() -> str:
         minArea: minArea.value || "64",
         padding: padding.value || "2",
       };
+    }
+
+    async function detectCheckerboard(fileObj) {
+      removeCheckerboard.checked = false;
+      removeCheckerboard.disabled = true;
+      const data = new FormData();
+      data.append("file", fileObj);
+      try {
+        const response = await fetch("/api/checkerboard-background", { method: "POST", body: data });
+        if (!response.ok) throw new Error("checkerboard detection failed");
+        const payload = await response.json();
+        const analysis = payload.analysis || {};
+        removeCheckerboard.checked = payload.recommended === true;
+        if (payload.recommended === true) {
+          const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : "";
+          statusEl.textContent = `检测到网格${tile}，已勾选去网格`;
+        }
+      } catch (_) {
+        removeCheckerboard.checked = false;
+      } finally {
+        removeCheckerboard.disabled = false;
+      }
     }
 
     function saveSliceState(patch) {
@@ -2711,9 +2848,12 @@ def _slice_page_html() -> str:
       clearSliceState();
       previewButton.disabled = false;
       confirmButton.disabled = true;
-      previewViewport.clear('<span class="empty">自动标注会显示在这里</span>');
+      if (uploadedPreviewUrl) URL.revokeObjectURL(uploadedPreviewUrl);
+      uploadedPreviewUrl = URL.createObjectURL(file.files[0]);
+      renderPreviewImage(uploadedPreviewUrl, "上传图片预览");
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
       statusEl.textContent = "已载入图片，点击预览";
+      detectCheckerboard(file.files[0]);
     });
 
     function invalidatePreview() {
@@ -2731,6 +2871,7 @@ def _slice_page_html() -> str:
 
     minArea.addEventListener("change", invalidatePreview);
     padding.addEventListener("change", invalidatePreview);
+    removeCheckerboard.addEventListener("change", invalidatePreview);
 
     async function runAnnotate() {
       if (!file.files.length) return;
@@ -3498,6 +3639,7 @@ def matte_endpoint(
     pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
+    remove_checkerboard: Annotated[bool, Form()] = False,
 ) -> Response:
     if not _is_allowed_backend(backend):
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
@@ -3505,6 +3647,7 @@ def matte_endpoint(
         raise HTTPException(status_code=400, detail="parameter_source must be auto or manual")
 
     image = _load_upload_image(file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
     shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
     pymatting_params = _pymatting_kwargs(
         pymatting_method=pymatting_method,
@@ -3528,6 +3671,7 @@ def matte_endpoint(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
+    result.debug["input_preprocess"] = {"checkerboard": preprocess_info}
 
     effective_backend = _effective_backend(backend, result)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -3558,6 +3702,7 @@ def matte_endpoint(
             "X-ERMBG-Strategy": result.strategy_name,
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
             "X-ERMBG-Local-Ownership": "1" if local_ownership_used else "0",
+            "X-ERMBG-Checkerboard-Preprocess": "1" if preprocess_info.get("applied") else "0",
         },
     )
 
@@ -3593,6 +3738,7 @@ def matte_candidates_endpoint(
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
+    remove_checkerboard: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     if not _is_allowed_backend(backend):
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
@@ -3646,6 +3792,7 @@ def matte_candidates_endpoint(
     )
 
     image = _load_upload_image(file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
     hint_mask = (
         _load_upload_image(corridorkey_hint_mask)
         if corridorkey_hint_mask is not None and not corridorkey_auto_mask
@@ -3676,6 +3823,7 @@ def matte_candidates_endpoint(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
+    result.debug["input_preprocess"] = {"checkerboard": preprocess_info}
 
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -3757,8 +3905,12 @@ def slice_endpoint(
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
     transparent: Annotated[bool, Form()] = False,
+    remove_checkerboard: Annotated[bool, Form()] = False,
 ) -> Response:
     image, image_digest = _load_upload_image_with_digest(file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    if preprocess_info.get("applied", False):
+        image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     try:
         result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
@@ -3783,6 +3935,7 @@ def slice_endpoint(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-ERMBG-Slice-Count": str(len(result.boxes)),
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
+            "X-ERMBG-Checkerboard-Preprocess": "1" if preprocess_info.get("applied") else "0",
         },
     )
 
@@ -3792,13 +3945,19 @@ def slice_preview_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
+    remove_checkerboard: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    if preprocess_info.get("applied", False):
+        image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
         result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
-        return _slice_preview_payload(image_rgb, stem, result)
+        payload = _slice_preview_payload(image_rgb, stem, result)
+        payload["preprocess"] = {"checkerboard": preprocess_info}
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice preview failed: {e}") from e
 
@@ -3808,13 +3967,19 @@ def slice_crops_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
+    remove_checkerboard: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
+    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    if preprocess_info.get("applied", False):
+        image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
         result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
-        return _slice_crop_payloads(image_rgb, stem, result)
+        payload = _slice_crop_payloads(image_rgb, stem, result)
+        payload["preprocess"] = {"checkerboard": preprocess_info}
+        return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slice crops failed: {e}") from e
 

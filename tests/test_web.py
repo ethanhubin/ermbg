@@ -34,6 +34,16 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _checker_png_bytes(size: int = 96, tile: int = 12) -> bytes:
+    yy, xx = np.indices((size, size))
+    parity = ((xx // tile + yy // tile) & 1).astype(bool)
+    img = np.where(parity[..., None], np.array([254, 254, 254], dtype=np.uint8), np.array([243, 243, 243], dtype=np.uint8))
+    img[34:62, 28:68] = [120, 60, 210]
+    buf = BytesIO()
+    Image.fromarray(img.astype(np.uint8), mode="RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _mask_png_bytes() -> bytes:
     mask = np.zeros((16, 16), dtype=np.uint8)
     mask[4:12, 4:12] = 255
@@ -123,6 +133,9 @@ def test_index_serves_upload_ui():
     assert 'id="corridorkey-settings" open' in response.text
     assert 'id="pymatting-settings" open' in response.text
     assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
+    assert 'id="remove-checkerboard" name="remove_checkerboard" type="checkbox"' in response.text
+    assert 'fetch("/api/checkerboard-background"' in response.text
+    assert 'formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false")' in response.text
     assert 'id="pymatting-advanced"' in response.text
     assert 'name="pymatting_method"' in response.text
     assert 'name="pymatting_bg_source"' in response.text
@@ -362,7 +375,13 @@ def test_slice_page_serves_slice_mode_entry():
     assert "overflow-x: hidden" in response.text
     assert 'action.className = "row-action"' in response.text
     assert 'file.addEventListener("change", () => {\n      if (!file.files.length) return;' in response.text
+    assert "let uploadedPreviewUrl = null;" in response.text
+    assert 'uploadedPreviewUrl = URL.createObjectURL(file.files[0]);' in response.text
+    assert 'renderPreviewImage(uploadedPreviewUrl, "上传图片预览");' in response.text
+    assert "previewViewport.clear('<span class=\"empty\">自动标注会显示在这里</span>');" not in response.text
     assert 'statusEl.textContent = "已载入图片，点击预览";' in response.text
+    assert 'id="remove-checkerboard" name="remove_checkerboard" type="checkbox"' in response.text
+    assert 'data.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false")' in response.text
 
 
 def test_batch_page_serves_batch_queue_entry():
@@ -1291,6 +1310,85 @@ def test_matte_candidates_endpoint_returns_candidate_json(monkeypatch):
     assert data_url.startswith("data:image/png;base64,")
     png = base64.b64decode(data_url.split(",", 1)[1])
     assert Image.open(BytesIO(png)).mode == "RGBA"
+
+
+def test_checkerboard_background_endpoint_recommends_grid_removal():
+    client = TestClient(app)
+    response = client.post(
+        "/api/checkerboard-background",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["recommended"] is True
+    assert payload["analysis"]["background_color"] == [254, 254, 254]
+
+
+def test_matte_candidates_checkerboard_preprocess_is_explicit_opt_in(monkeypatch):
+    captured: list[np.ndarray] = []
+
+    def fake_matte_image(image, backend="auto", qa=False, **kwargs):
+        del backend, qa, kwargs
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        captured.append(rgb.copy())
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="test",
+            background_color=(254, 254, 254),
+            debug={"backend": "test"},
+        )
+
+    monkeypatch.setattr(web, "matte_image", fake_matte_image)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+        data={"backend": "auto", "remove_checkerboard": "false"},
+    )
+    assert response.status_code == 200
+    assert captured[-1][0, 0].tolist() != captured[-1][0, 12].tolist()
+    assert response.json()["debug"]["input_preprocess"]["checkerboard"]["applied"] is False
+
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+        data={"backend": "auto", "remove_checkerboard": "true"},
+    )
+    assert response.status_code == 200
+    assert captured[-1][0, 0].tolist() == [254, 254, 254]
+    assert captured[-1][0, 12].tolist() == [254, 254, 254]
+    assert response.json()["debug"]["input_preprocess"]["checkerboard"]["applied"] is True
+
+
+def test_slice_preview_checkerboard_preprocess_is_explicit_opt_in():
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/slice-preview",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+        data={"min_area": "20", "padding": "1", "remove_checkerboard": "false"},
+    )
+    assert response.status_code == 200
+    assert response.json()["preprocess"]["checkerboard"]["applied"] is False
+
+    response = client.post(
+        "/api/slice-preview",
+        files={"file": ("checker.png", _checker_png_bytes(), "image/png")},
+        data={"min_area": "20", "padding": "1", "remove_checkerboard": "true"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["preprocess"]["checkerboard"]["applied"] is True
+    assert payload["preprocess"]["checkerboard"]["background_color"] == [254, 254, 254]
 
 
 def test_matte_candidates_endpoint_serializes_comfy_rmbg_debug(monkeypatch):

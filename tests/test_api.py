@@ -258,6 +258,30 @@ def test_pymatting_known_b_shadow_patch_extends_source_shadow_to_connected_scree
     assert float(np.median(shadow_alpha[residue])) > 0.15
 
 
+def test_pymatting_known_b_shadow_patch_arbitrates_subject_edge_aa_before_shadow():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png"
+    )
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+    result = matte_image(
+        image,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(1, 94, 246),
+        shadow_mode="on",
+    )
+
+    objective = result.debug["shadow"]["objective_shadow"]
+    edge_aa = objective["subject_edge_aa"]
+    assert edge_aa["candidate_pixels"] > 0
+    assert edge_aa["written_pixels"] > 0
+    assert objective["subject_edge_aa_written_pixels"] == edge_aa["written_pixels"]
+    assert objective["mean_abs_error_after_u8"] < objective["mean_abs_error_before_u8"]
+    assert objective["source_shadow_written_pixels"] < objective["candidate_pixels"]
+
+
 def test_matte_image_comfy_pymatting_known_b_uses_remote_node(monkeypatch):
     import ermbg.probe.comfyui_pymatting_known_b as remote_module
 

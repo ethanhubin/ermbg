@@ -1,19 +1,16 @@
 # ERMBG 🚀 —— 专为游戏资产链路打造的 AI 像素级抠图工具
 
 [![Python Version](https://img.shields.io/badge/Python-3.12-blue?style=flat-square&logo=python)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-orange?style=flat-square)](https://github.com/ethanhubin/ermbg)
 
 `ERMBG` 是一款专为游戏 UI、图标、特效、角色等资产量身定制的高精度、工业级自动抠图解决方案。
 
 ### 🎮 解决的行业痛点
 
-当前 AI 生成图像技术已广泛应用，但直接生成带透明通道（Alpha）的资产仍不可靠。常见问题包括边缘残留白边/杂色，以及半透明玻璃、特效资产的通道破损，无法直接满足游戏引擎（Unity / Unreal）的渲染规范。
+当前 AI 生成图像技术已广泛应用，但直接生成带透明通道（Alpha）的资产仍不可靠。最常见的问题是: 要求透明背景时,AI会生成黑白格的"假透明"。而目前市面上的抠图工具,又会遇到边缘残留白边/杂色，半透明玻璃、特效资产的通道破损。无法直接满足游戏引擎（Unity / Unreal）的渲染规范。
 
 **ERMBG 的解法是：借鉴影视行业绿幕经验，主动制造纯色背景约束。**
 在资产生成阶段，引导 AI 将目标物体生成在纯色（绿幕/蓝幕）背景上。随后由 ERMBG 进行精准的背景扣除与边缘修复，输出像素级干净、可直接投入游戏 UI、动效及角色链路的透明 RGBA PNG。
-
-[English](./README_EN.md) | 中文说明
 
 ---
 
@@ -227,6 +224,6 @@ curl -sS "<web-url>/api/runtime-capabilities?include_comfy=false&include_object_
 
 ## 📄 参考文档
 
-* [docs/architecture.md](docs/architecture.md) — 架构与服务边界
-* [docs/ermbg-route-strategy.md](docs/ermbg-route-strategy.md) — route / profile / backend 契约
-* [docs/install-startup.md](docs/install-startup.md) — 完整安装与启动流程
+* [docs/architecture.md](https://www.google.com/search?q=docs/architecture.md) — 架构与服务边界
+* [docs/ermbg-route-strategy.md](https://www.google.com/search?q=docs/ermbg-route-strategy.md) — route / profile / backend 契约
+* [docs/install-startup.md](https://www.google.com/search?q=docs/install-startup.md) — 完整安装与启动流程

@@ -1,0 +1,25 @@
+{
+  "id": "button_blue_play_clipped_hard_shadow",
+  "sample_id": "B057",
+  "category": "button",
+  "family": "real_blue_ui_hard_shadow",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      1,
+      94,
+      246
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png",
+  "input": "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png",
+  "image_size": [
+    226,
+    105
+  ],
+  "subject_color_family": "blue_white",
+  "primary_ambiguity": "blue glossy play button on near-blue known background with clipped contact hard shadow and antialiased outline",
+  "target_route": "opaque_hard_ui",
+  "source_review_id": "B057",
+  "source_batch": "manual_user_regression_20260604_button_003"
+}

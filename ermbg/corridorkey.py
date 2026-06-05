@@ -141,13 +141,7 @@ def _foreground_component_stats(key_alpha: np.ndarray) -> tuple[bool, int]:
 
 
 def _foreground_geometry(key_alpha: np.ndarray) -> tuple[tuple[int, int, int, int] | None, float | None, int]:
-    """Return largest foreground-support geometry for semantic routing.
-
-    Canvas size is a weak proxy for asset type: a wide button can sit on a
-    square export canvas, and a character can leave wide empty margins. Use the
-    observed key support bbox so character/button routing follows the subject
-    geometry rather than the file dimensions.
-    """
+    """Return largest foreground-support geometry for debug metadata."""
     support = key_alpha >= 0.16
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), connectivity=8)
     if n_labels <= 1:
@@ -419,7 +413,6 @@ def _candidate_confidences(
 
 def _opaque_hard_ui_profile_candidates(
     *,
-    image_aspect_ratio: float,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -437,13 +430,6 @@ def _opaque_hard_ui_profile_candidates(
     outrank these candidates.
     """
     candidates: list[CorridorKeyDecisionCandidate] = []
-    # Current opaque UI shadow profiles are calibrated for wide button-like
-    # assets in the semantic sample matrix. Square icons/characters can share
-    # the same color statistics, so they must not be captured by this button
-    # route until we add stronger component-geometry evidence.
-    if image_aspect_ratio < 1.45:
-        return candidates
-
     hard_shape = key_transition_fraction <= 0.025
 
     # B001-style no-shadow hard UI: only thin near-key edge residue is present.
@@ -506,10 +492,6 @@ def _opaque_hard_ui_profile_candidates(
 
 def _decision_candidates(
     *,
-    image_aspect_ratio: float,
-    image_long_side: int,
-    foreground_aspect_ratio: float | None,
-    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -523,10 +505,6 @@ def _decision_candidates(
     purity_sigma: float,
 ) -> list[CorridorKeyDecisionCandidate]:
     semantic_candidates = _semantic_decision_candidates(
-        image_aspect_ratio=image_aspect_ratio,
-        image_long_side=image_long_side,
-        foreground_aspect_ratio=foreground_aspect_ratio,
-        foreground_long_side=foreground_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -565,10 +543,6 @@ def _decision_candidates(
 
 def _semantic_decision_candidates(
     *,
-    image_aspect_ratio: float,
-    image_long_side: int,
-    foreground_aspect_ratio: float | None,
-    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -597,10 +571,7 @@ def _semantic_decision_candidates(
         key_color_compact_fraction=key_color_compact_fraction,
         key_transition_fraction=key_transition_fraction,
     )
-    subject_aspect = foreground_aspect_ratio if foreground_aspect_ratio is not None else image_aspect_ratio
-    subject_long_side = foreground_long_side if foreground_long_side > 0 else image_long_side
     opaque_hard_ui_candidates = _opaque_hard_ui_profile_candidates(
-        image_aspect_ratio=subject_aspect,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -611,28 +582,6 @@ def _semantic_decision_candidates(
     )
     candidates: list[CorridorKeyDecisionCandidate] = []
     candidates.extend(opaque_hard_ui_candidates)
-
-    # Size is only a coarse eligibility gate. The semantic claim is "character",
-    # so the observed foreground support must also be roughly character-shaped;
-    # otherwise wide buttons exported on square canvases are misrouted.
-    composite_character = (
-        0.75 <= image_aspect_ratio <= 1.35
-        and 0.55 <= subject_aspect <= 1.45
-        and subject_long_side >= 512
-    )
-    if composite_character:
-        candidates.append(
-            CorridorKeyDecisionCandidate(
-                profile="composite_character_corridor_only",
-                label="复合角色 · 交给 CorridorKey",
-                confidence=1.0,
-                settings=CorridorKeyRecommendedSettings(),
-                reason=(
-                    "Large square character asset can mix opaque body, hair, glow, and translucent material; "
-                    "avoid coarse color-protection ownership and let CorridorKey solve the matte."
-                ),
-            )
-        )
 
     # Require dominant same-key ownership before calling this "opaque material":
     # lower-risk hard plateaus are usually shadow/antialias residue, not the
@@ -654,7 +603,6 @@ def _semantic_decision_candidates(
 
     translucent_button = (
         same_key_opaque_plateau_confidence < 0.85
-        and subject_aspect >= 1.45
         and subject_key_color_risk >= 0.25
         and key_transition_fraction >= 0.30
     )
@@ -666,7 +614,7 @@ def _semantic_decision_candidates(
                 confidence=1.0,
                 settings=CorridorKeyRecommendedSettings(),
                 reason=(
-                    "Wide button has broad near-screen transition ownership; "
+                    "UI material has broad near-screen transition ownership; "
                     "color protection is unreliable for globally translucent material."
                 ),
             )
@@ -896,10 +844,6 @@ def _settings_for_profile(
 def _recommend_settings(
     *,
     preset: str,
-    image_aspect_ratio: float,
-    image_long_side: int,
-    foreground_aspect_ratio: float | None,
-    foreground_long_side: int,
     screen_mode: str,
     subject_key_color_risk: float,
     key_color_solid_fraction: float,
@@ -959,10 +903,6 @@ def _recommend_settings(
         return candidate.settings, candidate.profile, [candidate], ["detail_safe preset protects small ornaments and key-color subject material"]
 
     candidates = _decision_candidates(
-        image_aspect_ratio=image_aspect_ratio,
-        image_long_side=image_long_side,
-        foreground_aspect_ratio=foreground_aspect_ratio,
-        foreground_long_side=foreground_long_side,
         screen_mode=screen_mode,
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -1089,10 +1029,6 @@ def corridorkey_analyze_asset(
     hard_residue_risk = _hard_screen_residue_risk(subject_risk, transition_fraction)
     settings, parameter_profile, decision_candidates, setting_notes = _recommend_settings(
         preset=preset,
-        image_aspect_ratio=float(image_srgb.shape[1] / max(1, image_srgb.shape[0])),
-        image_long_side=int(max(image_srgb.shape[:2])),
-        foreground_aspect_ratio=foreground_aspect,
-        foreground_long_side=foreground_long_side,
         screen_mode=selected_mode,
         subject_key_color_risk=subject_risk,
         key_color_solid_fraction=solid_fraction,

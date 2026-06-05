@@ -4,10 +4,21 @@ from __future__ import annotations
 
 import json
 
+import cv2
 import numpy as np
+import pytest
 from PIL import Image
 
-from ermbg.slicer import SliceBox, classify_ui_slice, crop_slice, merge_overlapping_slice_boxes, save_slices, slice_image
+from ermbg.slicer import (
+    SliceBox,
+    analyze_checkerboard_background,
+    classify_ui_slice,
+    crop_slice,
+    merge_overlapping_slice_boxes,
+    normalize_checkerboard_background_to_light_square,
+    save_slices,
+    slice_image,
+)
 
 
 def test_slice_image_finds_separated_subject_rectangles(tmp_path):
@@ -30,6 +41,45 @@ def test_slice_image_finds_separated_subject_rectangles(tmp_path):
     report = json.loads((out_dir / "sheet.slices.json").read_text())
     assert report["count"] == 2
     assert (out_dir / "sheet_mask.png").exists()
+
+
+def test_checkerboard_background_detects_two_value_periodic_border_and_uses_light_square():
+    h, w = 160, 224
+    tile = 14
+    yy, xx = np.indices((h, w))
+    parity = ((xx // tile + yy // tile) & 1).astype(bool)
+    light = np.array([254, 254, 254], dtype=np.uint8)
+    dark = np.array([243, 243, 243], dtype=np.uint8)
+    image = np.where(parity[..., None], light, dark).astype(np.uint8)
+    cv2.rectangle(image, (48, 46), (176, 106), (120, 60, 210), -1, cv2.LINE_AA)
+
+    info = analyze_checkerboard_background(image)
+    normalized, normalization = normalize_checkerboard_background_to_light_square(image)
+
+    assert info["accepted"] is True
+    assert info["tile_px"] == pytest.approx(tile, abs=2.0)
+    assert info["two_value_tendency"] > 1.0
+    assert tuple(info["background_color"]) == tuple(int(c) for c in light)
+    assert normalization["applied"] is True
+    assert normalization["changed_pixels"] > int((~parity).sum() * 0.5)
+    border = np.zeros((h, w), dtype=bool)
+    border[:tile, :] = True
+    border[-tile:, :] = True
+    border[:, :tile] = True
+    border[:, -tile:] = True
+    assert np.all(normalized[border] == light.reshape(1, 3))
+
+
+def test_checkerboard_background_rejects_smooth_low_chroma_drift():
+    h, w = 128, 192
+    yy = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+    xx = np.linspace(0.0, 1.0, w, dtype=np.float32)[None, :]
+    gray = 236.0 + 12.0 * xx + 5.0 * yy
+    image = np.dstack([gray, gray + 1.0, gray]).astype(np.uint8)
+
+    info = analyze_checkerboard_background(image)
+
+    assert info["accepted"] is False
 
 
 def test_slice_image_merges_overlapping_subject_rectangles():
@@ -70,6 +120,31 @@ def test_merge_slice_boxes_joins_aligned_touching_shadow_strip():
     merged = merge_overlapping_slice_boxes(boxes)
 
     assert [box.bbox for box in merged] == [(609, 707, 206, 95), (609, 819, 207, 96)]
+
+
+def test_merge_slice_boxes_joins_detached_lower_glow_strip():
+    boxes = [
+        SliceBox(id=1, bbox=(11, 12, 239, 192), area=29866),
+        SliceBox(id=2, bbox=(37, 249, 194, 7), area=584),
+    ]
+    exterior_background = np.zeros((268, 261), dtype=bool)
+
+    merged = merge_overlapping_slice_boxes(boxes, exterior_background_mask=exterior_background)
+
+    assert [box.bbox for box in merged] == [(11, 12, 239, 244)]
+
+
+def test_merge_slice_boxes_keeps_regions_split_across_background_corridor():
+    boxes = [
+        SliceBox(id=1, bbox=(37, 63, 530, 863), area=455143),
+        SliceBox(id=2, bbox=(36, 945, 332, 101), area=33309),
+    ]
+    exterior_background = np.zeros((1402, 1122), dtype=bool)
+    exterior_background[926:945, 37:368] = True
+
+    merged = merge_overlapping_slice_boxes(boxes, exterior_background_mask=exterior_background)
+
+    assert [box.bbox for box in merged] == [(37, 63, 530, 863), (36, 945, 332, 101)]
 
 
 def test_merge_slice_boxes_does_not_chain_through_union_rectangles():

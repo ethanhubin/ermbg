@@ -204,8 +204,6 @@ def test_route_translucent_button_uses_corridorkey():
 def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundary_gate():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
     for rel in [
-        "button/button_blue_green_c_translucent_no_shadow/blue.png",
-        "button/button_green_blue_c_translucent_soft_heavy_shadow/green.png",
         "button/button_real_glass_blue_bg_yellow/blue.png",
         "button/button_real_glass_blue_bg_green/blue.png",
     ]:
@@ -221,6 +219,36 @@ def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundar
             or complex_info["semi_alpha_gate"]
             or complex_info["combined_glass_gate"]
         ), rel
+
+
+def test_route_opaque_hard_ui_profile_is_not_overridden_by_complex_boundary_gate():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    for rel in [
+        "button/button_green_blue_c_translucent_soft_heavy_shadow/green.png",
+        "button/button_blue_play_clipped_hard_shadow/blue.png",
+    ]:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        decision = classify_route(img)
+        assert decision.route == "pymatting_known_b", rel
+        assert decision.params["execution_profile"] == "pymatting-hard-button", rel
+        assert decision.analysis["corridorkey_analysis"]["parameter_profile"].startswith("opaque_hard_ui"), rel
+
+
+def test_route_low_transition_translucent_named_button_uses_known_b_without_geometry_gate():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    img = np.asarray(
+        Image.open(root / "button/button_blue_green_c_translucent_no_shadow/blue.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    ck = decision.analysis["corridorkey_analysis"]
+    assert ck["key_transition_fraction"] < 0.03
+    assert decision.analysis["complex_button_boundary"]["semi_alpha_fraction"] < 0.04
 
 
 def test_route_hard_shadow_buttons_do_not_use_corridorkey_semialpha_shadow_gate():
@@ -252,7 +280,7 @@ def test_route_square_known_b_hole_buttons_stay_pymatting_not_character():
         assert decision.asset_kind == "button", rel
 
 
-def test_route_icon_and_character_use_corridorkey():
+def test_route_hard_icon_uses_known_b_and_soft_character_uses_corridorkey_without_geometry_gate():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
     icon = np.asarray(
         Image.open(root / "icon/icon_icon_a01_hard_boundary_strong_outline/green.png").convert("RGB"),
@@ -264,15 +292,15 @@ def test_route_icon_and_character_use_corridorkey():
     )
     icon_decision = classify_route(icon)
     character_decision = classify_route(character)
-    assert icon_decision.route == "corridorkey"
-    assert icon_decision.asset_kind == "icon"
-    assert icon_decision.params["execution_profile"] == "corridorkey-shaped-icon"
+    assert icon_decision.route == "pymatting_known_b"
+    assert icon_decision.asset_kind == "button"
+    assert icon_decision.params["execution_profile"] == "pymatting-hard-button"
     assert character_decision.route == "corridorkey"
-    assert character_decision.asset_kind == "character"
-    assert character_decision.params["execution_profile"] == "corridorkey-character"
+    assert character_decision.params["execution_profile"] == "corridorkey-transparent-button"
+    assert character_decision.analysis["complex_button_boundary"]["semi_alpha_gate"] is True
 
 
-def test_route_square_canvas_wide_button_uses_foreground_geometry_not_canvas_size():
+def test_route_square_canvas_button_uses_known_b_without_geometry_gate():
     img = np.full((1024, 1024, 3), (8, 205, 8), dtype=np.uint8)
     img[420:650, 110:914] = (0, 90, 245)
     img[418:422, 130:894] = (120, 190, 255)
@@ -285,10 +313,8 @@ def test_route_square_canvas_wide_button_uses_foreground_geometry_not_canvas_siz
     assert decision.params["execution_profile"] == "pymatting-hard-button"
     assert "button_" in decision.reasons[0]
     ck = decision.analysis["corridorkey_analysis"]
-    assert ck["foreground_aspect_ratio"] >= 1.45
     assert ck["parameter_profile"] != "composite_character_corridor_only"
-    assert decision.analysis["complex_button_boundary"]["foreground_aspect_ratio"] >= 1.45
-    assert decision.analysis["complex_button_boundary"]["reason"] != "not wide button"
+    assert decision.analysis["complex_button_boundary"]["reason"] == "below complex-boundary and semi-alpha gates"
 
 
 def test_route_round_same_key_opaque_button_uses_pymatting_without_aspect_gate():
