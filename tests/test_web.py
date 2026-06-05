@@ -162,6 +162,12 @@ def test_index_serves_upload_ui():
     assert "function renderSemanticCandidates(payload)" in response.text
     assert "function serverSemanticPreviewAsset(candidate, mode)" in response.text
     assert "function semanticPreviewKind(candidate)" in response.text
+    assert "function semanticCandidateDisplayLabel(candidate, fallback)" in response.text
+    assert 'raw === "Auto default" || raw === "auto_default" ? "默认" : raw' in response.text
+    assert "function routeAssetKindLabel(payload)" in response.text
+    assert 'return raw ? labels[raw] || raw : ""' in response.text
+    assert 'const assetKindLabel = routeAssetKindLabel(payload)' in response.text
+    assert 'subtitle.textContent = assetKindLabel' in response.text
     assert 'presentSemanticPreview(previewCanvas.toDataURL("image/png"), candidate, previewKind === "trimap" ? "trimap unknown" : previewKind)' in response.text
     assert "value >= 64 && value <= 191" in response.text
     assert "const sureFgAlpha = 0.28" in response.text
@@ -2915,4 +2921,3 @@ def test_matte_candidates_endpoint_rejects_unknown_backend():
         data={"backend": "unknown"},
     )
     assert response.status_code == 400
-
