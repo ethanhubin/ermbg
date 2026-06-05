@@ -9,7 +9,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ermbg.router import assess_source_alpha, classify_route, classify_strategy
+from ermbg.known_bg_glow import KnownBgGlowAnalysis
+from ermbg.router import (
+    _bright_neutral_glass_button_glow_candidate,
+    assess_source_alpha,
+    classify_route,
+    classify_strategy,
+)
 
 pytestmark = pytest.mark.core
 
@@ -30,6 +36,51 @@ def _make_clean_rgba(h=128, w=128):
     F = np.array([220, 30, 30], dtype=np.float32)
     rgb = (a[..., None] * F).astype(np.uint8)
     return rgb, a
+
+
+def test_bright_neutral_glass_button_glow_candidate_uses_soft_connected_support():
+    glass = KnownBgGlowAnalysis(
+        accepted=False,
+        reason="not exterior glow",
+        mode="rejected",
+        background_color=(254, 254, 254),
+        target_color=(0, 88, 193),
+        support_pixels=84085,
+        support_fraction=0.32,
+        largest_component_fraction=0.999,
+        soft_fraction=0.96,
+        outer_fraction=0.97,
+        strong_fraction=0.02,
+        residual_median=5.4,
+        residual_p90=8.5,
+        target_distance=42.0,
+        alpha_mean=0.04,
+        outer_roughness_p90=0.022,
+        falloff_correlation=-0.22,
+        strong_core_gradient_p90=226.0,
+    )
+    hard_ui = KnownBgGlowAnalysis(
+        accepted=False,
+        reason="hard core",
+        mode="rejected",
+        background_color=(254, 254, 254),
+        target_color=(45, 220, 255),
+        support_pixels=2401,
+        support_fraction=0.04,
+        largest_component_fraction=1.0,
+        soft_fraction=0.27,
+        outer_fraction=0.30,
+        strong_fraction=0.70,
+        residual_median=1.4,
+        residual_p90=2.4,
+        target_distance=38.0,
+        alpha_mean=0.03,
+        outer_roughness_p90=0.15,
+    )
+
+    assert _bright_neutral_glass_button_glow_candidate((254, 254, 254), glass) is True
+    assert _bright_neutral_glass_button_glow_candidate((254, 254, 254), hard_ui) is False
+    assert _bright_neutral_glass_button_glow_candidate((0, 200, 0), glass) is False
 
 
 def test_classify_saturated_green():

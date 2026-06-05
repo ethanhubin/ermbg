@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -73,6 +74,21 @@ def _blue_screen_green_chromatic_glow() -> np.ndarray:
     noise_band = (alpha > 0.04) & (alpha < 0.40) & (((x * 17 + y * 31) % 19) == 0)
     rgb[noise_band] = rgb[noise_band] * 0.65 + bg.reshape(1, 1, 3) * 0.35
     return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
+
+
+def _white_glass_button_with_near_bg_highlight() -> np.ndarray:
+    h = w = 128
+    image = np.full((h, w, 3), 254, dtype=np.uint8)
+    cv2.rectangle(image, (34, 42), (94, 86), (235, 247, 253), -1, cv2.LINE_AA)
+    cv2.circle(image, (34, 64), 22, (235, 247, 253), -1, cv2.LINE_AA)
+    cv2.circle(image, (94, 64), 22, (235, 247, 253), -1, cv2.LINE_AA)
+    cv2.rectangle(image, (34, 42), (94, 86), (45, 220, 255), 2, cv2.LINE_AA)
+    cv2.circle(image, (34, 64), 22, (45, 220, 255), 2, cv2.LINE_AA)
+    cv2.circle(image, (94, 64), 22, (45, 220, 255), 2, cv2.LINE_AA)
+    # Almost background-colored highlight: it is a reflective glass layer, not a
+    # transparent hole, even though it is close to the white canvas color.
+    cv2.ellipse(image, (56, 52), (32, 8), -10, 0, 360, (252, 254, 255), -1, cv2.LINE_AA)
+    return image
 
 
 def _wide_full_frame_continuous_glow() -> np.ndarray:
@@ -193,6 +209,24 @@ def test_adaptive_known_bg_glow_repairs_additive_screen_color_endpoints():
     assert np.all(changed[:, 0] >= changed[:, 1])
     assert int(screen_green.sum()) == 0
     assert result.foreground_srgb[39, 36].min() >= 220
+
+
+def test_white_glass_button_restores_near_background_highlight_alpha():
+    image = _white_glass_button_with_near_bg_highlight()
+
+    result = matte_known_bg_glow(
+        image,
+        (254, 254, 254),
+        target_color=(0, 88, 193),
+        mode="white_glass_button",
+    )
+
+    assert result.debug["source"] == "known_bg_glow_white_glass_button_solver"
+    assert result.debug["highlight_soft_edge_px"] > 0.0
+    assert result.debug["highlight_recovered_pixels"] > 0
+    assert result.debug["body_hull"]["hull_pixels"] > 0
+    assert result.alpha[52, 56] >= 0.22
+    assert np.array_equal(result.foreground_srgb[52, 56], image[52, 56])
 
 
 def test_known_bg_glow_uses_chromatic_swap_ray_for_blue_screen_green_glow():

@@ -626,6 +626,51 @@ def analyze_known_bg_glow(
     )
 
 
+def _white_glass_button_body_hull(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return a filled glass-button body mask from measured rim evidence."""
+    bg = np.asarray(background_color, dtype=np.float32)
+    rgb = image_srgb.astype(np.float32)
+    bg_distance = np.linalg.norm(rgb - bg.reshape(1, 1, 3), axis=2)
+    chroma = image_srgb.max(axis=2).astype(np.int16) - image_srgb.min(axis=2).astype(np.int16)
+    # Threshold intent: use colored/contrast rim pixels on a neutral background
+    # to bound where near-white glass highlights may be restored. The alpha
+    # guard ties the rim to the adaptive support field so random white canvas
+    # texture outside the object cannot become a filled hull.
+    rim = (chroma > 35) & (bg_distance > 20.0) & (alpha > 0.02)
+    long_side = max(image_srgb.shape[:2])
+    kernel_px = int(round(long_side * 0.03))
+    kernel_px = int(np.clip(kernel_px, 7, 31))
+    if kernel_px % 2 == 0:
+        kernel_px += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_px, kernel_px))
+    closed = cv2.morphologyEx(rim.astype(np.uint8), cv2.MORPH_CLOSE, kernel, iterations=2)
+    closed = cv2.dilate(closed, kernel, iterations=1)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull = np.zeros(image_srgb.shape[:2], dtype=np.uint8)
+    min_area = max(256.0, image_srgb.shape[0] * image_srgb.shape[1] * 0.01)
+    kept: list[dict[str, Any]] = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(contour)
+        if h <= 0 or w / max(1, h) < 1.2:
+            continue
+        cv2.drawContours(hull, [contour], -1, 1, -1)
+        kept.append({"area": area, "bbox_xywh": [int(x), int(y), int(w), int(h)]})
+    return hull.astype(bool), {
+        "rim_pixels": int(rim.sum()),
+        "hull_pixels": int(hull.sum()),
+        "kernel_px": int(kernel_px),
+        "components": kept[:12],
+        "omitted_components": max(0, len(kept) - 12),
+    }
+
+
 def matte_known_bg_glow(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
@@ -643,6 +688,76 @@ def matte_known_bg_glow(
         mode = analysis.mode if analysis.accepted else "single_target_line"
         if target_color is None and analysis.accepted:
             target_color = analysis.target_color
+    if mode == "white_glass_button":
+        alpha, _foreground, _distance = _solve_adaptive_ray(image_srgb, background_color)
+        metrics = _adaptive_ray_metrics(alpha)
+        keep = metrics["main_component"].astype(bool)
+        # White/near-white glass buttons are not an exterior glow field. The
+        # adaptive solver gives a useful low-alpha support mask, but its dark
+        # endpoint foreground makes the exported glass look black on dark
+        # backgrounds. Preserve the source material color and gently strengthen
+        # low alpha so the glass remains visible without becoming an opaque
+        # white plate. The tiny-alpha floor removes residual white canvas haze.
+        alpha = np.where(keep, alpha, 0.0).astype(np.float32)
+        alpha = np.where(alpha < 0.012, 0.0, np.clip(alpha * 2.0, 0.0, 0.82)).astype(np.float32)
+        body_hull, body_hull_info = _white_glass_button_body_hull(image_srgb, background_color, alpha)
+        chroma = image_srgb.max(axis=2).astype(np.int16) - image_srgb.min(axis=2).astype(np.int16)
+        mean_rgb = image_srgb.mean(axis=2)
+        gray = cv2.cvtColor(image_srgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        gradient = np.sqrt(gx * gx + gy * gy)
+        yy = np.indices(image_srgb.shape[:2])[0]
+        # White glass highlights are a reflection layer, not transparent holes.
+        # They can be almost the same RGB as the white canvas, so the adaptive
+        # background solver underestimates their alpha. Restore only the
+        # specular reflection strokes: near-white, low-chroma pixels inside the
+        # rim-measured body hull, with either top-half placement or local edge
+        # evidence. This keeps the broad pale glass body transparent.
+        hull_rows = np.any(body_hull, axis=1)
+        top_cutoff = int(np.argmax(hull_rows)) + int(round(image_srgb.shape[0] * 0.19)) if bool(hull_rows.any()) else image_srgb.shape[0]
+        highlight_seed = (
+            body_hull
+            & (mean_rgb > 244.0)
+            & (chroma < 25)
+            & ((yy < top_cutoff) | (gradient > 5.0))
+        )
+        long_side = max(image_srgb.shape[:2])
+        soft_edge_px = float(np.clip(long_side * 0.012, 2.0, 8.0))
+        # Keep the highlight edge soft without expanding it. Gaussian feathering
+        # grows the reflection shape; an inward distance ramp only fades pixels
+        # already inside the measured specular seed.
+        highlight_distance = cv2.distanceTransform(highlight_seed.astype(np.uint8), cv2.DIST_L2, 3)
+        highlight_weight = np.clip(highlight_distance / soft_edge_px, 0.0, 1.0).astype(np.float32)
+        highlight_floor = 0.44 * highlight_weight
+        highlight_recovered = highlight_floor > alpha
+        alpha = np.maximum(alpha, highlight_floor).astype(np.float32)
+        foreground = image_srgb.copy()
+        foreground[alpha <= 0.0] = 0
+        alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        rgba = np.dstack([foreground, alpha_u8]).astype(np.uint8)
+        debug = {
+            "source": "known_bg_glow_white_glass_button_solver",
+            "mode": "white_glass_button",
+            "background_color": [int(c) for c in background_color],
+            "target_color": [int(c) for c in target_color] if target_color is not None else [255, 255, 255],
+            "material_strength": float(material_strength),
+            "background_removal_strength": 1.0,
+            "support_pixels": int((alpha > 0.0).sum()),
+            "alpha_mean": float(alpha.mean()),
+            "alpha_gain": 2.0,
+            "alpha_cap": 0.82,
+            "alpha_floor": 0.012,
+            "highlight_alpha_floor": 0.44,
+            "highlight_soft_edge_px": soft_edge_px,
+            "highlight_seed_pixels": int(highlight_seed.sum()),
+            "highlight_recovered_pixels": int(highlight_recovered.sum()),
+            "body_hull": body_hull_info,
+            "outer_roughness_p90": float(metrics["outer_roughness_p90"]),
+            "falloff_correlation": float(metrics["falloff_correlation"]),
+            "foreground_source": "source_rgb",
+        }
+        return KnownBgGlowResult(rgba=rgba, alpha=alpha, foreground_srgb=foreground, debug=debug)
     if mode == "chromatic_swap_ray":
         if target_color is None:
             target_color = tuple(int(c) for c in _estimate_target_color(image_srgb, background_color))

@@ -607,13 +607,51 @@ def _known_bg_glow_route_params(
     target_color: tuple[int, int, int],
     *,
     mode: str,
+    execution_profile: str = "known-bg-glow",
 ) -> dict[str, Any]:
     return {
-        "execution_profile": "known-bg-glow",
+        "execution_profile": execution_profile,
         "known_bg_glow_mode": mode,
         "known_bg_glow_bg_color": tuple(int(c) for c in background_color),
         "known_bg_glow_target_color": tuple(int(c) for c in target_color),
     }
+
+
+def _bright_neutral_glass_button_glow_candidate(
+    background_color: tuple[int, int, int],
+    glow: Any,
+) -> bool:
+    """Detect white/near-white glass buttons that need adaptive known-B glow.
+
+    The signal is deliberately different from same-key opaque UI: a bright
+    neutral known background plus one broad, connected, mostly low-alpha support
+    field. This protects ordinary hard buttons and text/icons from being
+    flattened by the glow solver while allowing translucent glass material whose
+    foreground color cannot be reconstructed by standard PyMatting known-B.
+    """
+    bg = np.asarray(background_color, dtype=np.float32)
+    if float(bg.min()) < 235.0 or float(bg.max() - bg.min()) > 18.0:
+        return False
+    support_fraction = float(getattr(glow, "support_fraction", 0.0))
+    largest_component_fraction = float(getattr(glow, "largest_component_fraction", 0.0))
+    soft_fraction = float(getattr(glow, "soft_fraction", 0.0))
+    outer_fraction = float(getattr(glow, "outer_fraction", 0.0))
+    strong_fraction = float(getattr(glow, "strong_fraction", 0.0))
+    alpha_mean = float(getattr(glow, "alpha_mean", 0.0))
+    outer_roughness_p90 = float(getattr(glow, "outer_roughness_p90", 1.0))
+    # Threshold intent: glass pills on white often have a large measured support
+    # area, but most of it is soft material/reflection rather than opaque body.
+    # Require one stable component and a smooth low-alpha field; reject tiny glow
+    # flecks, opaque hard interiors, frame-wide haze, and rough particle fields.
+    return (
+        0.16 <= support_fraction <= 0.58
+        and largest_component_fraction >= 0.985
+        and soft_fraction >= 0.78
+        and outer_fraction >= 0.72
+        and strong_fraction <= 0.14
+        and alpha_mean <= 0.12
+        and outer_roughness_p90 <= 0.045
+    )
 
 
 def _wide_button_complex_boundary_score(
@@ -833,6 +871,27 @@ def classify_route(
     stable_bg, stable_info = estimate_stable_background_color(image_srgb)
     analysis["stable_background"] = stable_info
     if stable_info.get("accepted", False):
+        if asset_kind == "button" and not known_corridor_screen:
+            from .known_bg_glow import analyze_known_bg_glow
+
+            glow = analyze_known_bg_glow(image_srgb, stable_bg)
+            analysis["known_bg_glow"] = glow.to_dict()
+            if _bright_neutral_glass_button_glow_candidate(stable_bg, glow):
+                reasons.append(f"button_{profile}_bright_neutral_glass_uses_known_bg_glow")
+                return RouteDecision(
+                    route="known_bg_glow",
+                    asset_kind="button",
+                    backend="known_bg_glow",
+                    params=_known_bg_glow_route_params(
+                        stable_bg,
+                        glow.target_color,
+                        mode="white_glass_button",
+                        execution_profile="known-bg-glass-button",
+                    ),
+                    confidence=0.72,
+                    reasons=reasons,
+                    analysis=analysis,
+                )
         trimap_mode = "standard"
         unknown_grow_px = 0
         # Threshold intent: the semantic profile can be won by key_color_material
