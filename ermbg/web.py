@@ -51,12 +51,11 @@ from .pipeline_contracts import (
     semantic_manifest_summary,
 )
 from .preprocess import (
-    NORMALIZE_KNOWN_BACKGROUND,
-    REMOVE_CHECKERBOARD,
+    BACKGROUND_REPAIR,
     analyze_input_preprocess,
     apply_input_preprocess,
     checkerboard_info_from_decision,
-    normalize_known_background_preprocess,
+    repair_known_background_preprocess,
 )
 from .runtime_capabilities import collect_runtime_capabilities
 from .settings import get_bool_setting, get_direct_worker_endpoints, get_direct_worker_servers, get_setting
@@ -166,7 +165,7 @@ class WebExecutionRequest:
     pymatting_cg_maxiter: int = 1000
     pymatting_cg_rtol: float = 1e-6
     known_bg_glow_material_strength: float = 1.0
-    remove_checkerboard: bool = False
+    background_repair: bool = False
     semantic_decision: str | None = None
     analysis_payload: dict[str, Any] | None = None
     execution_request_payload: dict[str, Any] | None = None
@@ -414,15 +413,16 @@ def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str
     return _image_from_upload_bytes(data), hashlib.sha256(data).hexdigest()
 
 
-def _preprocess_checkerboard_image(image: Image.Image, enabled: bool) -> tuple[Image.Image, dict[str, object]]:
+def _preprocess_background_repair_image(image: Image.Image, enabled: bool) -> tuple[Image.Image, dict[str, object]]:
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     result = apply_input_preprocess(
         rgb,
-        selected=[REMOVE_CHECKERBOARD] if enabled else [],
+        selected=[BACKGROUND_REPAIR] if enabled else [],
     )
     info = checkerboard_info_from_decision(result.decision)
     info["analysis"] = result.analysis.to_dict()
     info["decision"] = result.decision.to_dict()
+    info["background_repair"] = dict(result.decision.metadata.get("background_repair") or {})
     if not info.get("applied", False):
         return image, info
     return Image.fromarray(result.image_srgb, mode="RGB"), info
@@ -483,13 +483,13 @@ def checkerboard_background_endpoint(file: Annotated[UploadFile, File()]) -> dic
 @app.post("/api/preprocess-analysis")
 def preprocess_analysis_endpoint(
     file: Annotated[UploadFile, File()],
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image = _load_upload_image(file)
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     result = apply_input_preprocess(
         rgb,
-        selected=[REMOVE_CHECKERBOARD] if remove_checkerboard else [],
+        selected=[BACKGROUND_REPAIR] if background_repair else [],
     )
     checkerboard = checkerboard_info_from_decision(result.decision)
     return _json_safe_debug(
@@ -511,7 +511,7 @@ def preprocess_analysis_endpoint(
 @app.post("/api/analyze-candidates")
 def analyze_candidates_endpoint(
     file: Annotated[UploadFile, File()],
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
     corridorkey_screen_mode: Annotated[str, Form()] = "auto",
     corridorkey_preset: Annotated[str, Form()] = "auto",
     fallback_bg_color: Annotated[str, Form()] = "0,200,0",
@@ -525,7 +525,7 @@ def analyze_candidates_endpoint(
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     preprocess = apply_input_preprocess(
         rgb,
-        selected=[REMOVE_CHECKERBOARD] if remove_checkerboard else [],
+        selected=[BACKGROUND_REPAIR] if background_repair else [],
     )
     result = analyze_candidates(
         preprocess.image_srgb,
@@ -584,10 +584,10 @@ def _selected_preprocess_ids_from_contract(contract_payload: dict[str, Any] | No
     return [str(item) for item in selected] if isinstance(selected, list) else []
 
 
-def _execute_remove_checkerboard_from_contract(analysis_payload: dict[str, Any], fallback: bool) -> bool:
+def _execute_background_repair_from_contract(analysis_payload: dict[str, Any], fallback: bool) -> bool:
     selected = _selected_preprocess_ids_from_analysis(analysis_payload)
     if selected:
-        return REMOVE_CHECKERBOARD in selected
+        return BACKGROUND_REPAIR in selected
     if isinstance(analysis_payload.get("preprocess"), dict):
         return False
     return fallback
@@ -661,7 +661,7 @@ def _known_b_preprocess_from_contract(
 
     analysis = analysis_payload or {}
     selected = _selected_preprocess_ids_from_contract(analysis)
-    if NORMALIZE_KNOWN_BACKGROUND not in selected or _analysis_algorithm(analysis) != "pymatting_known_b":
+    if BACKGROUND_REPAIR not in selected or _analysis_algorithm(analysis) != "pymatting_known_b":
         return image, {}, {}
 
     route_params = _analysis_route_params(analysis)
@@ -672,7 +672,7 @@ def _known_b_preprocess_from_contract(
         return image, {"skipped": True, "reason": "missing_known_background_color"}, {}
 
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    normalized, decision = normalize_known_background_preprocess(
+    normalized, decision = repair_known_background_preprocess(
         rgb,
         background,
         bg_threshold=float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
@@ -704,7 +704,7 @@ def _known_b_preprocess_from_contract(
             execution_params[key] = pymatting_params[key]
     info = {
         "selected": True,
-        "applied": NORMALIZE_KNOWN_BACKGROUND in decision.applied,
+        "applied": BACKGROUND_REPAIR in decision.applied,
         "background_color": [int(c) for c in background],
         "metadata": normalization,
     }
@@ -1144,20 +1144,15 @@ def _matte_page_html() -> str:
     .mask-mode-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
     #mask-brush-size { width: 104px; min-height: 32px; }
     .mask-actions { display: flex; gap: 8px; flex: 0 0 auto; }
-    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 104px 56px; overflow: hidden; }
+    .preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 56px; overflow: hidden; }
     .preview > .preview-bar { grid-row: 1; }
     .preview > .mask-toolbar { grid-row: 2; }
     .preview > .canvas { grid-row: 3; }
-    .preview > .candidate-panel { grid-row: 4; }
-    .preview > .preview-actions { grid-row: 5; }
+    .preview > .preview-actions { grid-row: 4; }
     .preview-bar, .preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
     .preview-actions { height: 56px; min-height: 56px; max-height: 56px; border-top: 1px solid #d9dfd7; border-bottom: 0; overflow: hidden; }
     .preview-actions a.download { flex: 0 0 auto; min-width: 128px; padding: 0 18px; white-space: nowrap; }
-    .semantic-view-tabs[hidden] { display: none; }
-    .semantic-view-tabs { min-width: 0; overflow-x: auto; }
-    .semantic-view-button { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 800; white-space: nowrap; }
-    .semantic-view-button[aria-pressed="true"] { background: #196f5a; color: #ffffff; }
-    .confirm-matte { flex: 0 0 auto; min-width: 104px; padding: 0 14px; background: #1f5f9d; white-space: nowrap; }
+    .confirm-matte { flex: 0 0 112px; width: 112px; min-width: 112px; max-width: 112px; height: 36px; min-height: 36px; max-height: 36px; padding: 0; display: grid; place-items: center; background: #1f5f9d; white-space: nowrap; }
     .confirm-matte[hidden] { display: none; }
     .tabs { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #cfd7cc; border-radius: 6px; background: #f7f9f6; flex-shrink: 0; }
     .tab { width: auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #47524c; font-size: 12px; font-weight: 700; }
@@ -1178,19 +1173,17 @@ def _matte_page_html() -> str:
     .canvas img { max-width: 100%; max-height: 100%; -webkit-user-drag: none; user-select: none; }
     .result-image { width: 100%; height: 100%; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
-    .candidate-panel { height: 104px; min-height: 104px; max-height: 104px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid #d9dfd7; background: #fbfcfa; overflow: hidden; }
-    .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 0 56px; }
-    .preview.is-mask-mode .candidate-panel { display: none; min-height: 0; padding: 0; border: 0; }
+    .candidate-panel { min-height: 0; display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 8px; padding: 10px; border: 1px solid #d9dfd7; border-radius: 6px; background: #fbfcfa; overflow: hidden; }
+    .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 56px; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
-    .candidate-list { min-width: 0; display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
-    .candidate-tab { width: 76px; min-width: 76px; display: grid; grid-template-rows: 64px auto; gap: 4px; padding: 4px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; }
+    .candidate-list { min-width: 0; display: grid; grid-template-columns: 1fr; gap: 8px; max-height: 240px; overflow-y: auto; padding: 2px; }
+    .candidate-tab { width: 100%; min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 8px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; text-align: left; }
     .candidate-tab[aria-selected="true"] { border-color: #196f5a; box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18); color: #1c2320; }
-    .semantic-candidate-tab { width: 196px; min-width: 196px; grid-template-rows: auto; align-content: center; padding: 10px 12px; text-align: left; }
     .semantic-candidate-tab .candidate-name { white-space: normal; line-height: 1.2; }
-    .candidate-thumb { width: 68px; height: 64px; display: block; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
-    .candidate-thumb img { width: 64px; height: 64px; object-fit: contain; display: block; }
+    .candidate-thumb { width: 56px; height: 56px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
+    .candidate-thumb img { width: 56px; height: 56px; object-fit: contain; display: block; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 112px 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .candidate-panel { grid-template-columns: 1fr; align-items: stretch; gap: 8px; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
+    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
   </style>
 </head>
 <body>
@@ -1213,9 +1206,13 @@ def _matte_page_html() -> str:
   <main>
     <form id="matte-form">
       <label>图片<input id="file" name="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
-      <label class="check-label"><span>去网格</span><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"></label>
+      <label class="check-label"><span>背景修复</span><input id="background-repair" name="background_repair" type="checkbox" checked></label>
       <label class="inline-label">后端<select id="backend" name="backend"><option value="auto" selected>Auto</option><option value="direct-worker">direct-worker</option><option value="direct-corridorkey">Direct Worker CorridorKey</option><option value="direct-known-bg-glow">Direct Worker Known-B Glow</option><option value="pymatting-known-b">pymatting-known-b</option></select></label>
-      <button id="submit" type="submit">抠图</button>
+      <div class="candidate-panel" aria-label="语义候选">
+        <span class="candidate-title">候选</span>
+        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="语义候选缩略图"><span class="empty">上传后生成候选</span></div>
+      </div>
+      <button id="submit" type="submit" disabled>抠图</button>
       <details class="settings" id="corridorkey-settings" open>
         <summary>[设置]</summary>
         <div class="settings-grid">
@@ -1315,19 +1312,10 @@ def _matte_page_html() -> str:
           <div class="source-frame" id="source-frame"><span class="empty">选择图片后显示预览</span></div>
         </div>
       </div>
-      <div class="candidate-panel" aria-label="执行结果与语义候选">
-        <span class="candidate-title">结果</span>
-        <div class="candidate-list" id="candidate-list" role="tablist" aria-label="执行结果缩略图"><span class="empty">执行结果会显示在这里</span></div>
-      </div>
       <div class="preview-actions">
         <span class="preview-statuses">
           <span class="status" id="status">等待上传</span>
         </span>
-        <div class="tabs semantic-view-tabs" id="semantic-view-tabs" role="group" aria-label="语义预览" hidden>
-          <button class="semantic-view-button" type="button" aria-pressed="true" data-semantic-view="overlay">Overlay</button>
-          <button class="semantic-view-button" type="button" aria-pressed="false" data-semantic-view="trimap">Trimap</button>
-          <button class="semantic-view-button" type="button" aria-pressed="false" data-semantic-view="hint">Hint</button>
-        </div>
         <button class="confirm-matte" id="confirm-matte" type="button" disabled hidden>确定抠图</button>
         <a class="download" id="download" aria-disabled="true" download="ermbg_rgba.png">下载 PNG</a>
       </div>
@@ -1335,10 +1323,9 @@ def _matte_page_html() -> str:
   </main>
   <script>
     const form = document.getElementById("matte-form");
-    const compatibleMatteCandidatesEndpoint = "/api/matte-candidates";
     const file = document.getElementById("file");
     const backend = document.getElementById("backend");
-    const removeCheckerboard = document.getElementById("remove-checkerboard");
+    const backgroundRepair = document.getElementById("background-repair");
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
     const strategyEl = document.getElementById("strategy");
@@ -1348,8 +1335,6 @@ def _matte_page_html() -> str:
     const previewStage = document.getElementById("preview-stage");
     const download = document.getElementById("download");
     const confirmMatte = document.getElementById("confirm-matte");
-    const semanticViewTabs = document.getElementById("semantic-view-tabs");
-    const semanticViewButtons = Array.from(document.querySelectorAll(".semantic-view-button"));
     const candidateList = document.getElementById("candidate-list");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
@@ -1401,7 +1386,8 @@ def _matte_page_html() -> str:
     let pendingAnalyzePayload = null;
     let pendingExecuteFormData = null;
     let selectedSemanticCandidate = null;
-    let semanticPreviewMode = "overlay";
+    let semanticPreviewRenderSeq = 0;
+    let analyzeRequestId = 0;
 
     function humanSize(bytes) { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(2)} MB`; }
     function formatElapsed(ms) { return `${(ms / 1000).toFixed(2)}s`; }
@@ -1422,7 +1408,7 @@ def _matte_page_html() -> str:
     }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy; file.disabled = isBusy; backend.disabled = isBusy; removeCheckerboard.disabled = isBusy || !file.files.length; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = isBusy || !pendingAnalyzePayload || !selectedSemanticCandidate; if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy || !file.files.length || (!!pendingAnalyzePayload && !selectedSemanticCandidate); file.disabled = isBusy; backend.disabled = isBusy; backgroundRepair.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = true; if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
     function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
@@ -1436,7 +1422,7 @@ def _matte_page_html() -> str:
     function resetMaskTransform() { maskScale = 1; maskPanX = 0; maskPanY = 0; applyMaskTransform(); }
     function maskTransformCss() { return `translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})`; }
     function applyMaskTransform() { const transform = maskTransformCss(); if (sourceImage) sourceImage.style.transform = transform; if (maskCanvas) maskCanvas.style.transform = transform; }
-    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewMode = "overlay"; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">执行结果会显示在这里</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); semanticViewTabs.hidden = true; semanticViewButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.semanticView === semanticPreviewMode))); confirmMatte.hidden = true; confirmMatte.disabled = true; }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewRenderSeq += 1; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = true; confirmMatte.disabled = true; }
     function clearMaskState() { maskDirty = false; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
     function layoutMaskCanvas() { if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) return; const frameRect = sourceFrame.getBoundingClientRect(); if (frameRect.width <= 0 || frameRect.height <= 0) { requestAnimationFrame(layoutMaskCanvas); return; } const fit = Math.min(frameRect.width / sourceImage.naturalWidth, frameRect.height / sourceImage.naturalHeight); if (!Number.isFinite(fit) || fit <= 0) return; const displayWidth = Math.max(1, sourceImage.naturalWidth * fit); const displayHeight = Math.max(1, sourceImage.naturalHeight * fit); const transform = maskTransformCss(); sourceImage.style.width = `${displayWidth}px`; sourceImage.style.height = `${displayHeight}px`; sourceImage.style.maxWidth = "none"; sourceImage.style.maxHeight = "none"; sourceImage.style.left = "50%"; sourceImage.style.top = "50%"; sourceImage.style.transform = transform; if (maskCanvas) { maskCanvas.style.left = "50%"; maskCanvas.style.top = "50%"; maskCanvas.style.width = `${displayWidth}px`; maskCanvas.style.height = `${displayHeight}px`; maskCanvas.style.transform = transform; } }
     function ensureMaskCanvas(width, height) { if (!maskCanvas) { maskCanvas = document.createElement("canvas"); maskCanvas.className = "mask-overlay"; sourceFrame.appendChild(maskCanvas); maskCanvas.addEventListener("pointerdown", beginMaskPaint); maskCanvas.addEventListener("pointermove", paintMask); maskCanvas.addEventListener("pointerup", endMaskPaint); maskCanvas.addEventListener("pointercancel", endMaskPaint); } maskCanvas.width = width; maskCanvas.height = height; maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true }); layoutMaskCanvas(); }
@@ -1450,15 +1436,14 @@ def _matte_page_html() -> str:
     function beginMaskPaint(event) { if (!maskCanvas) return; event.preventDefault(); event.stopPropagation(); maskPainting = true; maskCanvas.setPointerCapture(event.pointerId); drawMaskBrush(event); }
     function paintMask(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); drawMaskBrush(event); }
     function endMaskPaint(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); maskPainting = false; try { maskCanvas.releasePointerCapture(event.pointerId); } catch (_) {} }
-    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">执行结果会显示在这里</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
+    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
     function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); setPreviewView("preview"); }
-    function setCandidatePayloads(payload, name) { resetResult(); const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `结果 ${index + 1}`, selected: candidate.selected === true, meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的执行结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); setActiveCandidate(selectedIndex >= 0 ? selectedIndex : 0); }
+    function setCandidatePayloads(payload, name) { const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `结果 ${index + 1}`, selected: candidate.selected === true, meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的执行结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); const index = selectedIndex >= 0 ? selectedIndex : 0; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; setPreviewView("preview"); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
     async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); maskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); maskStatus.textContent = "Sam3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "Sam3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; maskStatus.textContent = elapsed ? `已生成 Sam3 mask · ${elapsed}` : "已生成 Sam3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); maskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
-    async function detectCheckerboard(fileObj) { removeCheckerboard.checked = false; removeCheckerboard.disabled = true; const data = new FormData(); data.append("file", fileObj); try { const response = await fetch("/api/checkerboard-background", { method: "POST", body: data }); if (!response.ok) throw new Error("checkerboard detection failed"); const payload = await response.json(); const analysis = payload.analysis || {}; removeCheckerboard.checked = payload.recommended === true; if (payload.recommended === true) { const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : ""; statusEl.textContent = `检测到网格${tile}，已勾选去网格`; } } catch (_) { removeCheckerboard.checked = false; } finally { removeCheckerboard.disabled = false; } }
-    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "已载入切图，可直接抠图"; strategyEl.textContent = backend.value; } catch (error) { statusEl.textContent = "切图载入失败"; } }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; backgroundRepair.checked = true; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "正在生成候选"; strategyEl.textContent = backend.value; setBusy(false); } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); statusEl.textContent = "等待抠图"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; detectCheckerboard(selected); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); backgroundRepair.checked = true; statusEl.textContent = "正在生成候选"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
     backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
     protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
     protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
@@ -1480,7 +1465,7 @@ def _matte_page_html() -> str:
       const formData = new FormData();
       formData.append("file", file.files[0]);
       formData.append("backend", backend.value);
-      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
+      formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       formData.append("shadow_mode", shadowMode.value);
       formData.append("parameter_source", backend.value === "auto" ? "auto" : "manual");
       corridorSettingControls.forEach((control) => {
@@ -1501,62 +1486,13 @@ def _matte_page_html() -> str:
       if (shouldUseCustomMask) formData.append("corridorkey_hint_mask", userMasks.keep);
       return formData;
     }
-    function appendAnalyzeControls(formData) { formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false"); formData.append("corridorkey_screen_mode", document.getElementById("ck-screen-mode").value || "auto"); formData.append("corridorkey_preset", document.querySelector("[name='corridorkey_preset']").value || "auto"); }
+    function appendAnalyzeControls(formData) { formData.append("background_repair", backgroundRepair.checked ? "true" : "false"); formData.append("corridorkey_screen_mode", document.getElementById("ck-screen-mode").value || "auto"); formData.append("corridorkey_preset", document.querySelector("[name='corridorkey_preset']").value || "auto"); }
     function semanticRegionsForCandidate(candidate) { const ids = Array.isArray(candidate && candidate.regions) ? candidate.regions : []; const regions = Array.isArray(pendingAnalyzePayload && pendingAnalyzePayload.ambiguity_regions) ? pendingAnalyzePayload.ambiguity_regions : []; return ids.length ? regions.filter((region) => ids.includes(region.id)) : regions; }
+    function serverSemanticPreviewAsset(candidate, mode) { const assets = pendingAnalyzePayload && pendingAnalyzePayload.preview_assets; const refs = candidate && candidate.preview && candidate.preview.assets; const key = refs && refs[mode]; const asset = assets && key ? assets[key] : null; return asset && asset.data_url ? asset.data_url : null; }
+    function semanticPreviewKind(candidate) { const refs = candidate && candidate.preview && candidate.preview.assets ? candidate.preview.assets : {}; if (refs.trimap) return "trimap"; if (refs.hint) return "hint"; if (refs.overlay) return "overlay"; return "regions"; }
+    function loadPreviewImage(src) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("候选预览载入失败")); img.src = src; }); }
     function regionBox(region, width, height) { const raw = Array.isArray(region && region.bbox_xyxy) ? region.bbox_xyxy : [0, 0, 0, 0]; const x1 = Math.max(0, Math.min(width, Number(raw[0]) || 0)); const y1 = Math.max(0, Math.min(height, Number(raw[1]) || 0)); const x2 = Math.max(x1, Math.min(width, Number(raw[2]) || 0)); const y2 = Math.max(y1, Math.min(height, Number(raw[3]) || 0)); return { x: x1, y: y1, w: Math.max(1, x2 - x1), h: Math.max(1, y2 - y1) }; }
-    function renderSemanticPreview(candidate) {
-      if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) {
-        previewStage.innerHTML = '<span class="empty">预览载入中</span>';
-        return;
-      }
-      const width = sourceImage.naturalWidth;
-      const height = sourceImage.naturalHeight;
-      const previewCanvas = document.createElement("canvas");
-      previewCanvas.width = width;
-      previewCanvas.height = height;
-      const ctx = previewCanvas.getContext("2d");
-      const regions = semanticRegionsForCandidate(candidate);
-      if (semanticPreviewMode === "overlay") {
-        ctx.drawImage(sourceImage, 0, 0, width, height);
-        regions.forEach((region, index) => {
-          const box = regionBox(region, width, height);
-          ctx.fillStyle = "rgba(31, 95, 157, 0.22)";
-          ctx.strokeStyle = "rgba(31, 95, 157, 0.95)";
-          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 180));
-          ctx.fillRect(box.x, box.y, box.w, box.h);
-          ctx.strokeRect(box.x, box.y, box.w, box.h);
-          ctx.fillStyle = "rgba(31, 95, 157, 0.95)";
-          ctx.fillRect(box.x, Math.max(0, box.y - 22), Math.min(132, box.w), 22);
-          ctx.fillStyle = "#ffffff";
-          ctx.font = "700 14px system-ui";
-          ctx.fillText(region.id || `region_${index + 1}`, box.x + 6, Math.max(16, box.y - 6));
-        });
-      } else if (semanticPreviewMode === "trimap") {
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, width, height);
-        regions.forEach((region) => {
-          const box = regionBox(region, width, height);
-          ctx.fillStyle = "rgba(128, 128, 128, 0.96)";
-          ctx.fillRect(box.x, box.y, box.w, box.h);
-          ctx.strokeStyle = "#202825";
-          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 160));
-          ctx.strokeRect(box.x, box.y, box.w, box.h);
-        });
-      } else {
-        const policy = candidate && candidate.decision ? candidate.decision.enclosed_near_bg_policy : "";
-        const keep = policy === "subject" || policy === "keep";
-        ctx.fillStyle = "#171c1a";
-        ctx.fillRect(0, 0, width, height);
-        regions.forEach((region) => {
-          const box = regionBox(region, width, height);
-          ctx.fillStyle = keep ? "rgba(0, 190, 255, 0.72)" : "rgba(255, 86, 72, 0.72)";
-          ctx.fillRect(box.x, box.y, box.w, box.h);
-          ctx.strokeStyle = keep ? "#7ee7ff" : "#ffd0c9";
-          ctx.lineWidth = Math.max(2, Math.round(Math.min(width, height) / 160));
-          ctx.strokeRect(box.x, box.y, box.w, box.h);
-        });
-      }
-      const dataUrl = previewCanvas.toDataURL("image/png");
+    function presentSemanticPreview(dataUrl, candidate, label) {
       previewStage.innerHTML = "";
       const img = document.createElement("img");
       img.src = dataUrl;
@@ -1570,10 +1506,64 @@ def _matte_page_html() -> str:
       setPreviewView("preview");
       download.removeAttribute("href");
       download.setAttribute("aria-disabled", "true");
-      metaEl.textContent = `${candidate.label || candidate.id || "语义候选"} · ${semanticPreviewMode}`;
+      metaEl.textContent = `${candidate.label || candidate.id || "语义候选"} · ${label}`;
     }
-    function setSemanticPreviewMode(mode) { semanticPreviewMode = ["overlay", "trimap", "hint"].includes(mode) ? mode : "overlay"; semanticViewButtons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.semanticView === semanticPreviewMode))); if (selectedSemanticCandidate) renderSemanticPreview(selectedSemanticCandidate); }
-    function setSelectedSemanticCandidate(candidate) { selectedSemanticCandidate = candidate; candidateList.querySelectorAll(".semantic-candidate-tab").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.candidateId === (candidate.id || "")))); confirmMatte.hidden = false; confirmMatte.disabled = false; renderSemanticPreview(candidate); statusEl.textContent = "候选已选择，等待确认"; }
+    async function renderSemanticPreview(candidate) {
+      const renderSeq = ++semanticPreviewRenderSeq;
+      const previewKind = semanticPreviewKind(candidate);
+      const serverPreview = serverSemanticPreviewAsset(candidate, previewKind);
+      if (previewKind === "hint" && serverPreview) {
+        presentSemanticPreview(serverPreview, candidate, "hint");
+        return;
+      }
+      if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) {
+        try {
+          await waitForSourceImage();
+        } catch (_) {
+          previewStage.innerHTML = '<span class="empty">预览载入中</span>';
+          return;
+        }
+      }
+      const width = sourceImage.naturalWidth;
+      const height = sourceImage.naturalHeight;
+      const previewCanvas = document.createElement("canvas");
+      previewCanvas.width = width;
+      previewCanvas.height = height;
+      const ctx = previewCanvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(sourceImage, 0, 0, width, height);
+      if (previewKind === "trimap" && serverPreview) {
+        try {
+          const trimapImage = await loadPreviewImage(serverPreview);
+          if (renderSeq !== semanticPreviewRenderSeq) return;
+          const trimapCanvas = document.createElement("canvas");
+          trimapCanvas.width = width;
+          trimapCanvas.height = height;
+          const trimapCtx = trimapCanvas.getContext("2d", { willReadFrequently: true });
+          trimapCtx.drawImage(trimapImage, 0, 0, width, height);
+          const trimapPixels = trimapCtx.getImageData(0, 0, width, height).data;
+          const output = ctx.getImageData(0, 0, width, height);
+          const data = output.data;
+          const unknownAlpha = 0.42;
+          const sureFgAlpha = 0.28;
+          for (let i = 0; i < data.length; i += 4) {
+            const value = trimapPixels[i];
+            if (value >= 64 && value <= 191) {
+              data[i] = Math.round(data[i] * (1 - unknownAlpha) + 255 * unknownAlpha);
+              data[i + 1] = Math.round(data[i + 1] * (1 - unknownAlpha) + 72 * unknownAlpha);
+              data[i + 2] = Math.round(data[i + 2] * (1 - unknownAlpha) + 64 * unknownAlpha);
+            } else if (value > 191) {
+              data[i] = Math.round(data[i] * (1 - sureFgAlpha) + 18 * sureFgAlpha);
+              data[i + 1] = Math.round(data[i + 1] * (1 - sureFgAlpha) + 24 * sureFgAlpha);
+              data[i + 2] = Math.round(data[i + 2] * (1 - sureFgAlpha) + 22 * sureFgAlpha);
+            }
+          }
+          ctx.putImageData(output, 0, 0);
+        } catch (_) {}
+      }
+      if (renderSeq !== semanticPreviewRenderSeq) return;
+      presentSemanticPreview(previewCanvas.toDataURL("image/png"), candidate, previewKind === "trimap" ? "trimap unknown" : previewKind);
+    }
+    function setSelectedSemanticCandidate(candidate) { selectedSemanticCandidate = candidate; candidateList.querySelectorAll(".semantic-candidate-tab").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.candidateId === (candidate.id || "")))); confirmMatte.hidden = true; confirmMatte.disabled = true; renderSemanticPreview(candidate); statusEl.textContent = "候选已选择，点击抠图执行"; setBusy(false); }
     async function executeSemanticCandidate(candidate) {
       if (!candidate) return;
       if (!pendingExecuteFormData || !pendingAnalyzePayload) return;
@@ -1609,10 +1599,11 @@ def _matte_page_html() -> str:
         setBusy(false);
       }
     }
-    function renderSemanticCandidates(payload) { pendingAnalyzePayload = payload; selectedSemanticCandidate = null; semanticViewTabs.hidden = false; previewStage.innerHTML = '<span class="empty">选择语义候选</span>'; canvas.classList.remove("has-image", "is-dragging"); download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = false; confirmMatte.disabled = true; candidateList.innerHTML = ""; const semanticCandidates = payload.candidates || []; semanticCandidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab semantic-candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", "false"); button.dataset.candidateId = candidate.id || ""; button.title = candidate.intent || candidate.label || "semantic candidate"; const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label || candidate.id || `候选 ${index + 1}`; button.appendChild(label); button.addEventListener("click", () => setSelectedSemanticCandidate(candidate)); candidateList.appendChild(button); }); if (!semanticCandidates.length) { candidateList.innerHTML = '<span class="empty">没有可执行候选</span>'; confirmMatte.disabled = true; } const defaultCandidate = semanticCandidates.find((candidate) => candidate.id === payload.default_candidate_id) || semanticCandidates.find((candidate) => candidate.default === true) || semanticCandidates[0]; if (defaultCandidate) setSelectedSemanticCandidate(defaultCandidate); setPreviewView("preview"); if (!defaultCandidate) metaEl.textContent = `语义候选 ${semanticCandidates.length}`; }
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    function renderSemanticCandidates(payload) { pendingAnalyzePayload = payload; selectedSemanticCandidate = null; previewStage.innerHTML = '<span class="empty">选择语义候选</span>'; canvas.classList.remove("has-image", "is-dragging"); download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = true; confirmMatte.disabled = true; candidateList.innerHTML = ""; const semanticCandidates = payload.candidates || []; semanticCandidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab semantic-candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", "false"); button.dataset.candidateId = candidate.id || ""; button.title = candidate.intent || candidate.label || "semantic candidate"; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.alt = `${candidate.label || candidate.id || `候选 ${index + 1}`} 预览`; img.src = serverSemanticPreviewAsset(candidate, semanticPreviewKind(candidate)) || ""; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label || candidate.id || `候选 ${index + 1}`; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setSelectedSemanticCandidate(candidate)); candidateList.appendChild(button); }); if (!semanticCandidates.length) { candidateList.innerHTML = '<span class="empty">没有可执行候选</span>'; confirmMatte.disabled = true; } const defaultCandidate = semanticCandidates.find((candidate) => candidate.id === payload.default_candidate_id) || semanticCandidates.find((candidate) => candidate.default === true) || semanticCandidates[0]; if (defaultCandidate) setSelectedSemanticCandidate(defaultCandidate); setPreviewView("preview"); if (!defaultCandidate) metaEl.textContent = `语义候选 ${semanticCandidates.length}`; }
+    async function analyzeCurrentUpload() {
       if (!file.files.length) return;
+      const requestId = analyzeRequestId + 1;
+      analyzeRequestId = requestId;
       setBusy(true);
       statusEl.textContent = "正在分析";
       strategyEl.textContent = backend.value;
@@ -1631,17 +1622,25 @@ def _matte_page_html() -> str:
           throw new Error(message);
         }
         const payload = await response.json();
+        if (requestId !== analyzeRequestId) return;
         pendingAnalyzePayload = payload;
         renderSemanticCandidates(payload);
-        statusEl.textContent = payload.status === "needs_decision" ? "需要选择语义候选" : "候选已就绪，等待确认";
+        statusEl.textContent = selectedSemanticCandidate ? "候选已就绪，点击抠图执行" : "请选择候选后抠图";
         strategyEl.textContent = payload.route && payload.route.route ? payload.route.route : (payload.status || "ready");
       } catch (error) {
-        statusEl.textContent = error.message;
+        if (requestId === analyzeRequestId) statusEl.textContent = error.message;
       } finally {
-        setBusy(false);
+        if (requestId === analyzeRequestId) setBusy(false);
       }
+    }
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file.files.length) return;
+      if (!pendingAnalyzePayload || !selectedSemanticCandidate) {
+        await analyzeCurrentUpload();
+      }
+      if (selectedSemanticCandidate) await executeSemanticCandidate(selectedSemanticCandidate);
     });
-    semanticViewButtons.forEach((button) => button.addEventListener("click", () => setSemanticPreviewMode(button.dataset.semanticView)));
     confirmMatte.addEventListener("click", () => executeSemanticCandidate(selectedSemanticCandidate));
     syncColorProtectionRange();
     syncGlowMaterialStrength();
@@ -2119,8 +2118,8 @@ def _matte_page_html() -> str:
         <div class="source-meta" id="source-meta">未选择图片</div>
       </div>
       <label class="checkbox-field">
-        <input id="remove-checkerboard" name="remove_checkerboard" type="checkbox">
-        <span>去网格</span>
+        <input id="background-repair" name="background_repair" type="checkbox" checked>
+        <span>背景修复</span>
       </label>
       <div class="field">
         任务
@@ -2193,7 +2192,7 @@ def _matte_page_html() -> str:
     const sliceSettings = document.getElementById("slice-settings");
     const sliceMinArea = document.getElementById("slice-min-area");
     const slicePadding = document.getElementById("slice-padding");
-    const removeCheckerboard = document.getElementById("remove-checkerboard");
+    const backgroundRepair = document.getElementById("background-repair");
     const submit = document.getElementById("submit");
     const confirmSlices = document.getElementById("confirm-slices");
     const statusEl = document.getElementById("status");
@@ -2255,7 +2254,7 @@ def _matte_page_html() -> str:
       });
       sliceMinArea.disabled = isBusy;
       slicePadding.disabled = isBusy;
-      removeCheckerboard.disabled = isBusy || !file.files.length;
+      backgroundRepair.disabled = isBusy;
       confirmSlices.disabled = isBusy || !slicePreviewPayload;
       submit.textContent = isBusy ? "处理中" : (task.value === "slice" ? "自动标注" : "抠图");
     }
@@ -2283,30 +2282,6 @@ def _matte_page_html() -> str:
       tabs.forEach((tab) => {
         tab.setAttribute("aria-selected", String(tab.dataset.bg === mode));
       });
-    }
-
-    async function detectCheckerboard(fileObj) {
-      removeCheckerboard.checked = false;
-      removeCheckerboard.disabled = true;
-      sourceCheckerMeta = "";
-      const data = new FormData();
-      data.append("file", fileObj);
-      try {
-        const response = await fetch("/api/checkerboard-background", { method: "POST", body: data });
-        if (!response.ok) throw new Error("checkerboard detection failed");
-        const payload = await response.json();
-        const analysis = payload.analysis || {};
-        removeCheckerboard.checked = payload.recommended === true;
-        if (payload.recommended === true) {
-          const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : "";
-          sourceCheckerMeta = ` · 检测到网格${tile}`;
-          sourceMeta.textContent = `${sourceMetaBase}${sourceCheckerMeta}`;
-        }
-      } catch (_) {
-        removeCheckerboard.checked = false;
-      } finally {
-        removeCheckerboard.disabled = false;
-      }
     }
 
     function resetResult() {
@@ -2472,7 +2447,7 @@ def _matte_page_html() -> str:
     async function executeDefaultDecision(fileObj, filename, fields) {
       const analyzeFormData = new FormData();
       analyzeFormData.append("file", fileObj, filename);
-      analyzeFormData.append("remove_checkerboard", fields.remove_checkerboard || "false");
+      analyzeFormData.append("background_repair", fields.background_repair || "false");
       const analyzeResponse = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
       if (!analyzeResponse.ok) {
         let message = "分析失败";
@@ -2511,7 +2486,7 @@ def _matte_page_html() -> str:
       try {
         const payload = await executeDefaultDecision(cropBlob, crop.filename, {
           backend: backend.value,
-          remove_checkerboard: "false",
+          background_repair: "false",
         });
         const elapsed = formatElapsed(performance.now() - startedAt);
         const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
@@ -2606,10 +2581,11 @@ def _matte_page_html() -> str:
         sourceMeta.textContent = `${sourceMetaBase}${sourceCheckerMeta}`;
       };
       sourceFrame.appendChild(img);
-      detectCheckerboard(selected);
+      backgroundRepair.checked = true;
+      setBusy(false);
     });
 
-    removeCheckerboard.addEventListener("change", () => {
+    backgroundRepair.addEventListener("change", () => {
       if (task.value !== "slice") return;
       slicePreviewPayload = null;
       confirmSlices.disabled = true;
@@ -2683,7 +2659,7 @@ def _matte_page_html() -> str:
       if (!file.files.length || !slicePreviewPayload) return;
       const formData = new FormData();
       formData.append("file", file.files[0]);
-      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
+      formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       formData.append("min_area", sliceMinArea.value || "64");
       formData.append("padding", slicePadding.value || "2");
       setBusy(true);
@@ -2711,7 +2687,7 @@ def _matte_page_html() -> str:
       if (!file.files.length) return;
       const formData = new FormData();
       formData.append("file", file.files[0]);
-      formData.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
+      formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       if (task.value === "slice") {
         formData.append("min_area", sliceMinArea.value || "64");
         formData.append("padding", slicePadding.value || "2");
@@ -2741,7 +2717,7 @@ def _matte_page_html() -> str:
         } else {
           const payload = await executeDefaultDecision(file.files[0], file.files[0].name, {
             backend: backend.value,
-            remove_checkerboard: removeCheckerboard.checked ? "true" : "false",
+            background_repair: backgroundRepair.checked ? "true" : "false",
           });
           const elapsed = formatElapsed(performance.now() - startedAt);
           const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
@@ -3070,7 +3046,7 @@ def _batch_page_html() -> str:
       const startedAt = performance.now();
       const analyzeFormData = new FormData();
       analyzeFormData.append("file", item.file);
-      analyzeFormData.append("remove_checkerboard", "false");
+      analyzeFormData.append("background_repair", "false");
       const analyzeResponse = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
       if (!analyzeResponse.ok) {
         let message = "处理失败";
@@ -3228,7 +3204,7 @@ def _slice_page_html() -> str:
     button { border: 0; background: #196f5a; color: #ffffff; font-weight: 800; cursor: pointer; }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     .settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .checkerboard-field { grid-column: 1; }
+    .background-repair-field { grid-column: 1; }
     .slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
     .slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }
     .preview, .thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
@@ -3276,7 +3252,7 @@ def _slice_page_html() -> str:
       <div class="settings">
         <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
         <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
-        <label class="checkbox-field checkerboard-field"><input id="remove-checkerboard" name="remove_checkerboard" type="checkbox"><span>去网格</span></label>
+        <label class="checkbox-field background-repair-field"><input id="background-repair" name="background_repair" type="checkbox" checked><span>背景修复</span></label>
       </div>
       <div class="slice-actions-main">
         <button id="preview-button" type="button" disabled>预览</button>
@@ -3297,7 +3273,7 @@ def _slice_page_html() -> str:
     const file = document.getElementById("file");
     const minArea = document.getElementById("min-area");
     const padding = document.getElementById("padding");
-    const removeCheckerboard = document.getElementById("remove-checkerboard");
+    const backgroundRepair = document.getElementById("background-repair");
     const previewButton = document.getElementById("preview-button");
     const confirmButton = document.getElementById("confirm");
     const batchAll = document.getElementById("batch-all");
@@ -3317,7 +3293,7 @@ def _slice_page_html() -> str:
       previewButton.disabled = isBusy || !file.files.length;
       confirmButton.disabled = isBusy || !hasPreview;
       file.disabled = isBusy;
-      removeCheckerboard.disabled = isBusy || !file.files.length;
+      backgroundRepair.disabled = isBusy;
     }
 
     function setTransferBusy(isBusy) {
@@ -3333,7 +3309,7 @@ def _slice_page_html() -> str:
       data.append("file", file.files[0]);
       data.append("min_area", minArea.value || "64");
       data.append("padding", padding.value || "2");
-      data.append("remove_checkerboard", removeCheckerboard.checked ? "true" : "false");
+      data.append("background_repair", backgroundRepair.checked ? "true" : "false");
       return data;
     }
 
@@ -3342,28 +3318,6 @@ def _slice_page_html() -> str:
         minArea: minArea.value || "64",
         padding: padding.value || "2",
       };
-    }
-
-    async function detectCheckerboard(fileObj) {
-      removeCheckerboard.checked = false;
-      removeCheckerboard.disabled = true;
-      const data = new FormData();
-      data.append("file", fileObj);
-      try {
-        const response = await fetch("/api/checkerboard-background", { method: "POST", body: data });
-        if (!response.ok) throw new Error("checkerboard detection failed");
-        const payload = await response.json();
-        const analysis = payload.analysis || {};
-        removeCheckerboard.checked = payload.recommended === true;
-        if (payload.recommended === true) {
-          const tile = typeof analysis.tile_px === "number" ? ` · ${analysis.tile_px.toFixed(0)}px` : "";
-          statusEl.textContent = `检测到网格${tile}，已勾选去网格`;
-        }
-      } catch (_) {
-        removeCheckerboard.checked = false;
-      } finally {
-        removeCheckerboard.disabled = false;
-      }
     }
 
     function saveSliceState(patch) {
@@ -3582,7 +3536,8 @@ def _slice_page_html() -> str:
       renderPreviewImage(uploadedPreviewUrl, "上传图片预览");
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
       statusEl.textContent = "已载入图片，点击预览";
-      detectCheckerboard(file.files[0]);
+      backgroundRepair.checked = true;
+      setSliceBusy(false);
     });
 
     function invalidatePreview() {
@@ -3600,7 +3555,7 @@ def _slice_page_html() -> str:
 
     minArea.addEventListener("change", invalidatePreview);
     padding.addEventListener("change", invalidatePreview);
-    removeCheckerboard.addEventListener("change", invalidatePreview);
+    backgroundRepair.addEventListener("change", invalidatePreview);
 
     async function runAnnotate() {
       if (!file.files.length) return;
@@ -3761,6 +3716,58 @@ def _decode_png_data_url(data_url: str) -> np.ndarray:
     except Exception as e:
         raise HTTPException(status_code=400, detail="rgba must contain readable PNG data") from e
     return np.asarray(image.convert("RGBA"), dtype=np.uint8)
+
+
+def _decode_png_data_url_gray(data_url: str, *, field: str) -> np.ndarray:
+    if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+        raise HTTPException(status_code=400, detail=f"{field} must be a PNG data URL")
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
+        image = Image.open(BytesIO(raw))
+        image.load()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"{field} must contain readable PNG data") from e
+    return np.asarray(image.convert("L"), dtype=np.uint8)
+
+
+def _explicit_trimap_from_analysis(
+    analysis_payload: dict[str, Any] | None,
+    *,
+    selected_candidate_id: str,
+    image_shape: tuple[int, int],
+) -> np.ndarray | None:
+    if not isinstance(analysis_payload, dict) or _analysis_algorithm(analysis_payload) != "pymatting_known_b":
+        return None
+    candidates = analysis_payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    asset_ref = ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or str(candidate.get("id") or "") != selected_candidate_id:
+            continue
+        preview = candidate.get("preview")
+        assets = preview.get("assets") if isinstance(preview, dict) else None
+        if isinstance(assets, dict):
+            asset_ref = str(assets.get("trimap") or "")
+        break
+    if not asset_ref:
+        asset_ref = f"candidate:{selected_candidate_id}:trimap"
+    preview_assets = analysis_payload.get("preview_assets")
+    asset = preview_assets.get(asset_ref) if isinstance(preview_assets, dict) else None
+    if not isinstance(asset, dict):
+        return None
+    if asset.get("execution_role") not in {None, "pymatting_explicit_trimap"}:
+        return None
+    data_url = asset.get("data_url")
+    if not isinstance(data_url, str):
+        return None
+    trimap = _decode_png_data_url_gray(data_url, field="candidate trimap")
+    if trimap.shape != image_shape:
+        raise HTTPException(status_code=400, detail="candidate trimap shape must match image shape")
+    out = np.full(trimap.shape, 128, dtype=np.uint8)
+    out[trimap < 64] = 0
+    out[trimap > 191] = 255
+    return out
 
 
 def _web_batch_root() -> Path:
@@ -4248,6 +4255,8 @@ def _run_web_backend(
             "pymatting_unknown_grow_px",
             "pymatting_input_preprocessed_known_b",
             "pymatting_background_normalization",
+            "pymatting_normalize_known_background",
+            "pymatting_explicit_trimap",
         )
         if direct_execution_backend == "direct-pymatting-known-b":
             for key in known_b_keys:
@@ -4282,7 +4291,7 @@ def _run_web_backend(
             exc = last_exc
             fallback = WEB_AUTO_FALLBACK_BACKEND.strip().lower()
             if not requested_auto or fallback in {"", "none", "off", "disabled"}:
-                raise
+                raise exc
             if fallback not in ALLOWED_BACKENDS or _execution_backend_for_algorithm(fallback) is not None:
                 raise ValueError(
                     "ERMBG_WEB_AUTO_FALLBACK_BACKEND must be a non-direct backend or disabled"
@@ -4398,7 +4407,7 @@ def matte_endpoint(
     pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> Response:
     if not _is_allowed_backend(backend):
         raise HTTPException(status_code=400, detail=f"backend must be one of {_allowed_backend_names()}")
@@ -4406,7 +4415,7 @@ def matte_endpoint(
         raise HTTPException(status_code=400, detail="parameter_source must be auto or manual")
 
     image = _load_upload_image(file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     shadow_mode = _shadow_mode_from_form(shadow_mode, shadow_enabled)
     pymatting_params = _pymatting_kwargs(
         pymatting_method=pymatting_method,
@@ -4420,6 +4429,7 @@ def matte_endpoint(
         pymatting_cg_maxiter=pymatting_cg_maxiter,
         pymatting_cg_rtol=pymatting_cg_rtol,
     )
+    pymatting_params["pymatting_normalize_known_background"] = bool(background_repair)
     try:
         result = _run_web_backend(
             image,
@@ -4430,7 +4440,7 @@ def matte_endpoint(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
-    result.debug["input_preprocess"] = {"checkerboard": preprocess_info}
+    result.debug["input_preprocess"] = {"background_repair": preprocess_info}
 
     effective_backend = _effective_backend(backend, result)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -4461,7 +4471,7 @@ def matte_endpoint(
             "X-ERMBG-Strategy": result.strategy_name,
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
             "X-ERMBG-Local-Ownership": "1" if local_ownership_used else "0",
-            "X-ERMBG-Checkerboard-Preprocess": "1" if preprocess_info.get("applied") else "0",
+            "X-ERMBG-Background-Repair": "1" if preprocess_info.get("applied") else "0",
         },
     )
 
@@ -4521,11 +4531,12 @@ def _execute_matte_candidates_payload(
         pymatting_cg_maxiter=request.pymatting_cg_maxiter,
         pymatting_cg_rtol=request.pymatting_cg_rtol,
     )
+    pymatting_params["pymatting_normalize_known_background"] = bool(request.background_repair)
     semantic_decision_payload = _json_form_object(request.semantic_decision, "semantic_decision")
     execution_contract = request.execution_request_payload or request.analysis_payload
 
     image = _load_upload_image(request.file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, request.remove_checkerboard)
+    image, preprocess_info = _preprocess_background_repair_image(image, request.background_repair)
     image, known_b_preprocess_info, known_b_execution_params = _known_b_preprocess_from_contract(
         image,
         execution_contract,
@@ -4541,6 +4552,13 @@ def _execute_matte_candidates_payload(
     )
     keep_mask = _load_upload_image(request.user_keep_mask) if request.user_keep_mask is not None else None
     remove_mask = _load_upload_image(request.user_remove_mask) if request.user_remove_mask is not None else None
+    execution_request = request.execution_request_payload if isinstance(request.execution_request_payload, dict) else {}
+    selected_candidate_id = str(execution_request.get("selected_candidate_id") or "auto_default")
+    explicit_trimap = _explicit_trimap_from_analysis(
+        request.analysis_payload,
+        selected_candidate_id=selected_candidate_id,
+        image_shape=np.asarray(image.convert("RGB"), dtype=np.uint8).shape[:2],
+    )
     server_started_at = time.perf_counter()
     try:
         result = _run_web_backend(
@@ -4566,12 +4584,13 @@ def _execute_matte_candidates_payload(
             semantic_decision=semantic_decision_payload or None,
             user_keep_mask=keep_mask,
             user_remove_mask=remove_mask,
+            pymatting_explicit_trimap=explicit_trimap,
             **pymatting_params,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
     result.debug["input_preprocess"] = {
-        "checkerboard": preprocess_info,
+        "background_repair": preprocess_info,
         "known_background_normalization": known_b_preprocess_info,
     }
 
@@ -4687,7 +4706,7 @@ def matte_candidates_endpoint(
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
     semantic_decision: Annotated[str | None, Form()] = None,
 ) -> dict[str, object]:
     return _execute_matte_candidates_payload(
@@ -4723,7 +4742,7 @@ def matte_candidates_endpoint(
             pymatting_cg_maxiter=pymatting_cg_maxiter,
             pymatting_cg_rtol=pymatting_cg_rtol,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
-            remove_checkerboard=remove_checkerboard,
+            background_repair=background_repair,
             semantic_decision=semantic_decision,
         ),
         include_compatibility=True,
@@ -4766,7 +4785,7 @@ def execute_candidate_endpoint(
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     analysis = _json_form_object(analysis_payload, "analysis_payload")
     decision = _json_form_object(semantic_decision, "semantic_decision")
@@ -4819,7 +4838,7 @@ def execute_candidate_endpoint(
             pymatting_cg_maxiter=pymatting_cg_maxiter,
             pymatting_cg_rtol=pymatting_cg_rtol,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
-            remove_checkerboard=_execute_remove_checkerboard_from_contract(analysis, remove_checkerboard),
+            background_repair=_execute_background_repair_from_contract(analysis, background_repair),
             semantic_decision=json.dumps(decision),
             analysis_payload=analysis,
             execution_request_payload=execution_summary["execution_request"],
@@ -4841,10 +4860,10 @@ def slice_endpoint(
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
     transparent: Annotated[bool, Form()] = False,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> Response:
     image, image_digest = _load_upload_image_with_digest(file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -4871,7 +4890,7 @@ def slice_endpoint(
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-ERMBG-Slice-Count": str(len(result.boxes)),
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
-            "X-ERMBG-Checkerboard-Preprocess": "1" if preprocess_info.get("applied") else "0",
+            "X-ERMBG-Background-Repair": "1" if preprocess_info.get("applied") else "0",
         },
     )
 
@@ -4881,10 +4900,10 @@ def slice_preview_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -4903,10 +4922,10 @@ def slice_crops_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
     padding: Annotated[int, Form()] = 2,
-    remove_checkerboard: Annotated[bool, Form()] = False,
+    background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
-    image, preprocess_info = _preprocess_checkerboard_image(image, remove_checkerboard)
+    image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -8042,3 +8061,5 @@ def main() -> None:
 
 
 __all__ = ["app", "main"]
+
+

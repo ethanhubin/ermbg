@@ -120,17 +120,19 @@ def test_known_bg_glow_rejects_hard_icon_material():
     assert analysis.support_fraction > 0.0
 
 
-def test_known_bg_glow_rejects_complex_hard_core_effect_icon():
+def test_known_bg_glow_accepts_chromatic_swap_hard_core_effect_icon():
     image = _rgb("samples/corridorkey_semantic/icon/icon_icon_d01_soft_alpha_glow_hard_core/green.png")
 
     decision = classify_route(image)
     analysis = decision.analysis["known_bg_glow"]
 
-    assert analysis["accepted"] is False
-    assert analysis["reason"] == "strong glow core is too textured"
+    assert analysis["accepted"] is True
+    assert analysis["mode"] == "chromatic_swap_ray"
     assert analysis["strong_core_gradient_p90"] >= 160.0
-    assert decision.route == "corridorkey"
-    assert decision.asset_kind == "icon"
+    assert analysis["outer_roughness_p90"] < 0.045
+    assert analysis["falloff_correlation"] >= 0.90
+    assert decision.route == "known_bg_glow"
+    assert decision.asset_kind == "glow"
 
 
 def test_known_bg_glow_accepts_small_textured_but_coherent_halo():

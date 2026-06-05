@@ -35,10 +35,83 @@ from .artifacts import build_run_manifest, write_run_manifest
 from .comfy import DEFAULT_COMFY_URL
 from .qa import run_qa
 from .router import RouteDecision, Strategy, classify_route, classify_strategy
+from .types import Trimap
 
 ImageLike = Union[str, Path, np.ndarray, Image.Image]
 MaskLike = Union[str, Path, np.ndarray, Image.Image]
 _SEGMENTER_CACHE: dict[tuple[str, str, int, str], Any] = {}
+
+
+def _mask_like_to_bool(mask: np.ndarray | None, shape: tuple[int, int], *, field: str) -> np.ndarray | None:
+    if mask is None:
+        return None
+    arr = np.asarray(mask)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.shape != shape:
+        raise ValueError(f"{field} shape must match image shape")
+    if arr.dtype == bool:
+        return arr.astype(bool)
+    values = arr.astype(np.float32)
+    if float(values.max(initial=0.0)) > 1.5:
+        values = values / 255.0
+    return values >= 0.5
+
+
+def _known_b_explicit_trimap(
+    explicit_trimap: np.ndarray,
+    *,
+    shape: tuple[int, int],
+    semantic_decision: dict[str, Any],
+    user_keep_mask: np.ndarray | None,
+    user_remove_mask: np.ndarray | None,
+) -> tuple[Trimap, dict[str, Any]]:
+    """Convert an Analyze candidate trimap preview into executor trimap state."""
+
+    arr = np.asarray(explicit_trimap)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.shape != shape:
+        raise ValueError("pymatting_explicit_trimap shape must match image shape")
+    values = arr.astype(np.float32)
+    if float(values.max(initial=0.0)) <= 1.5:
+        values = values * 255.0
+    sure_bg = values < 64.0
+    sure_fg = values > 191.0
+    unknown = ~(sure_bg | sure_fg)
+    keep_mask = _mask_like_to_bool(user_keep_mask, shape, field="user_keep_mask")
+    remove_mask = _mask_like_to_bool(user_remove_mask, shape, field="user_remove_mask")
+    keep_pixels = 0
+    remove_pixels = 0
+    if keep_mask is not None:
+        keep_only = keep_mask.copy()
+        if remove_mask is not None:
+            keep_only &= ~remove_mask
+        keep_pixels = int(keep_only.sum())
+        sure_fg[keep_only] = True
+        sure_bg[keep_only] = False
+        unknown[keep_only] = False
+    if remove_mask is not None:
+        remove_pixels = int(remove_mask.sum())
+        sure_bg[remove_mask] = True
+        sure_fg[remove_mask] = False
+        unknown[remove_mask] = False
+    trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
+    info = {
+        "method": "explicit_candidate_trimap",
+        "source": "analyze_candidate_preview",
+        "explicit": True,
+        "semantic_decision": dict(semantic_decision),
+        "user_mask_decision": {
+            "keep_pixels": keep_pixels,
+            "remove_pixels": remove_pixels,
+            "remove_overrides_keep": True,
+        },
+        "sure_fg_pixels": int(trimap.sure_fg.sum()),
+        "sure_bg_pixels": int(trimap.sure_bg.sum()),
+        "unknown_pixels": int(trimap.unknown.sum()),
+    }
+    return trimap, info
 
 
 def build_segmenter(*args: Any, **kwargs: Any) -> Any:
@@ -288,6 +361,7 @@ def matte_image(
     pymatting_unknown_grow_px: int = 0,
     pymatting_input_preprocessed_known_b: bool = False,
     pymatting_background_normalization: dict[str, Any] | None = None,
+    pymatting_normalize_known_background: bool = True,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: MaskLike | None = None,
     user_remove_mask: MaskLike | None = None,
@@ -490,6 +564,10 @@ def matte_image(
             input_background_normalization=auto_params.get(
                 "pymatting_background_normalization",
                 pymatting_background_normalization,
+            ),
+            normalize_known_background=auto_params.get(
+                "pymatting_normalize_known_background",
+                pymatting_normalize_known_background,
             ),
             semantic_decision=semantic_decision,
             user_keep_mask=user_keep_alpha,
@@ -824,9 +902,11 @@ def _matte_image_pymatting_known_b(
     unknown_grow_px: int = 0,
     input_preprocessed_known_b: bool = False,
     input_background_normalization: dict[str, Any] | None = None,
+    normalize_known_background: bool = True,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: np.ndarray | None = None,
     user_remove_mask: np.ndarray | None = None,
+    explicit_trimap: np.ndarray | None = None,
     auto_route: dict[str, Any] | None = None,
 ) -> MatteResponse:
     from .pymatting_refine import (
@@ -931,6 +1011,14 @@ def _matte_image_pymatting_known_b(
         background_normalization["executor_skipped"] = True
         background_normalization["skip_reason"] = "already_normalized_by_preprocess"
         background_normalization["background_color"] = [int(c) for c in selected_bg]
+    elif not bool(normalize_known_background):
+        processing_rgb = solver_rgb
+        background_normalization = {
+            "enabled": False,
+            "applied": False,
+            "source": "background_repair_disabled",
+            "background_color": [int(c) for c in selected_bg],
+        }
     else:
         processing_rgb, background_normalization = normalize_known_background_field(
             solver_rgb,
@@ -940,19 +1028,28 @@ def _matte_image_pymatting_known_b(
             adaptive=effective_auto_adapt,
         )
 
-    trimap, trimap_info = build_known_background_trimap(
-        processing_rgb,
-        selected_bg,
-        bg_threshold=float(bg_threshold),
-        fg_threshold=float(fg_threshold),
-        boundary_band_px=int(boundary_band_px),
-        adaptive=effective_auto_adapt,
-        trimap_mode=effective_trimap_mode,
-        unknown_grow_px=int(unknown_grow_px),
-        semantic_decision=semantic_decision_payload,
-        user_keep_mask=user_keep_mask,
-        user_remove_mask=user_remove_mask,
-    )
+    if explicit_trimap is not None:
+        trimap, trimap_info = _known_b_explicit_trimap(
+            explicit_trimap,
+            shape=processing_rgb.shape[:2],
+            semantic_decision=semantic_decision_payload,
+            user_keep_mask=user_keep_mask,
+            user_remove_mask=user_remove_mask,
+        )
+    else:
+        trimap, trimap_info = build_known_background_trimap(
+            processing_rgb,
+            selected_bg,
+            bg_threshold=float(bg_threshold),
+            fg_threshold=float(fg_threshold),
+            boundary_band_px=int(boundary_band_px),
+            adaptive=effective_auto_adapt,
+            trimap_mode=effective_trimap_mode,
+            unknown_grow_px=int(unknown_grow_px),
+            semantic_decision=semantic_decision_payload,
+            user_keep_mask=user_keep_mask,
+            user_remove_mask=user_remove_mask,
+        )
     pm = estimate_alpha_with_pymatting(
         processing_rgb,
         trimap,
@@ -1094,6 +1191,7 @@ def _matte_image_pymatting_known_b(
                     "trimap_mode": requested_trimap_mode,
                     "effective_trimap_mode": effective_trimap_mode,
                     "unknown_grow_px": int(unknown_grow_px),
+                    "explicit_trimap": bool(explicit_trimap is not None),
                     "semantic_decision": semantic_decision_payload,
                     "user_mask_decision": trimap_info.get("user_mask_decision", {}),
                 },

@@ -49,7 +49,7 @@ route 决策描述算法和参数,不描述 server URL。
 
 ## 当前缺口
 
-- 个别样本族仍存在 route 分类回归风险。最近全量 Direct Worker server 测试中,
-  `test_direct_worker_manual_known_bg_glow_preserves_chromatic_swap_ray_mode` 显示一个
-  glow 样本当前被 route 到 `pymatting_known_b`,而测试期望 `known_bg_glow`。
-  这应作为 route/profile 回归单独处理。
+- glow route 仍需持续回归验证。`test_direct_worker_manual_known_bg_glow_preserves_chromatic_swap_ray_mode`
+  覆盖 chromatic-swap 强 core glow:当可测信号显示连续低 roughness halo、强
+  distance/alpha falloff 和 chromatic endpoint 时,route 应为 `known_bg_glow`,
+  而不是退回 `pymatting_known_b`。

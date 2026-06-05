@@ -24,6 +24,14 @@ def _png_bytes(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
+def _gray_png_bytes(gray: np.ndarray) -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    Image.fromarray(gray.astype(np.uint8), mode="L").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button") -> DirectWorkerResult:
     alpha = np.ones(rgb.shape[:2], dtype=np.float32)
     rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
@@ -180,6 +188,7 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
             "pymatting_fg_threshold": "28",
             "pymatting_input_preprocessed_known_b": "true",
             "pymatting_background_normalization": json.dumps({"applied": True, "source": "preprocess"}),
+            "pymatting_normalize_known_background": "false",
         },
     )
 
@@ -190,6 +199,48 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
     assert captured["pymatting_fg_threshold"] == 28.0
     assert captured["pymatting_input_preprocessed_known_b"] is True
     assert captured["pymatting_background_normalization"] == {"applied": True, "source": "preprocess"}
+    assert captured["pymatting_normalize_known_background"] is False
+
+
+def test_direct_worker_server_accepts_explicit_candidate_trimap(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    trimap = np.array([[0, 128, 255], [63, 191, 250]], dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={"execution_profile": "pymatting-hard-button"},
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        captured.update(prepared.decision.params)
+        return _result(prepared.rgb)
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={
+            "image": ("case.png", _png_bytes(rgb), "image/png"),
+            "pymatting_explicit_trimap": ("trimap.png", _gray_png_bytes(trimap), "image/png"),
+        },
+        data={"execution_backend": "direct-pymatting-known-b", "include_image": "false"},
+    )
+
+    assert response.status_code == 200
+    explicit = captured["pymatting_explicit_trimap"]
+    assert isinstance(explicit, np.ndarray)
+    np.testing.assert_array_equal(explicit, np.array([[0, 128, 255], [0, 128, 255]], dtype=np.uint8))
 
 
 def test_direct_worker_server_health_reports_capabilities():

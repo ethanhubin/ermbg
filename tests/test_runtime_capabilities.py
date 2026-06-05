@@ -20,69 +20,6 @@ class _FakeResponse:
         return self._payload
 
 
-def test_inspect_comfy_runtime_reports_ermbg_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-
-    def fake_get(url: str, *, timeout: float) -> _FakeResponse:
-        calls.append(url)
-        assert timeout == 1.5
-        if url.endswith("/system_stats"):
-            return _FakeResponse({"system": {"os": "test"}})
-        if url.endswith("/object_info"):
-            return _FakeResponse(
-                {
-                    "ErmbgRouteMatte": {},
-                    "ErmbgRouteStrategy": {},
-                    "ErmbgPyMattingKnownB": {},
-                }
-            )
-        raise AssertionError(url)
-
-    monkeypatch.setattr(caps.requests, "get", fake_get)
-
-    payload = caps.inspect_comfy_runtime(comfy_url="http://comfy.test/", timeout=1.5)
-
-    assert payload["status"] == "ok"
-    assert payload["url"] == "http://comfy.test"
-    assert payload["capabilities"]["system_stats"] is True
-    assert payload["capabilities"]["object_info"] is True
-    assert payload["capabilities"]["ermbg_route_matte"] is True
-    assert payload["capabilities"]["ermbg_route_strategy"] is True
-    assert payload["capabilities"]["ermbg_pymatting_known_b"] is True
-    assert calls == ["http://comfy.test/system_stats", "http://comfy.test/object_info"]
-
-
-def test_inspect_comfy_runtime_can_skip_object_info(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
-
-    def fake_get(url: str, *, timeout: float) -> _FakeResponse:
-        calls.append(url)
-        return _FakeResponse({"system": {"os": "test"}})
-
-    monkeypatch.setattr(caps.requests, "get", fake_get)
-
-    payload = caps.inspect_comfy_runtime(
-        comfy_url="http://comfy.test",
-        timeout=2.0,
-        include_object_info=False,
-    )
-
-    assert payload["status"] == "ok"
-    assert payload["capabilities"]["system_stats"] is True
-    assert payload["capabilities"]["object_info"] is False
-    assert payload["nodes"] == {}
-    assert calls == ["http://comfy.test/system_stats"]
-
-
-def test_inspect_comfy_runtime_reports_missing_url() -> None:
-    payload = caps.inspect_comfy_runtime(comfy_url="")
-
-    assert payload["status"] == "error"
-    assert payload["url"] == ""
-    assert payload["error_type"] == "MissingComfyUrl"
-    assert payload["capabilities"]["system_stats"] is False
-
-
 def test_inspect_direct_worker_runtime_passes_health_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get(url: str, *, timeout: float) -> _FakeResponse:
         assert url == "http://worker.test/health"
@@ -127,18 +64,6 @@ def test_inspect_direct_worker_runtime_reports_location_on_failure(monkeypatch: 
 
     assert payload["status"] == "error"
     assert payload["location"] == "local"
-
-
-def test_collect_runtime_capabilities_combines_all_layers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(caps, "inspect_comfy_runtime", lambda **kwargs: {"status": "ok", "kind": "comfy"})
-    monkeypatch.setattr(caps, "inspect_direct_worker_runtime", lambda **kwargs: {"status": "ok", "kind": "worker"})
-
-    payload = caps.collect_runtime_capabilities(timeout=1.0, include_object_info=False, include_comfy=True)
-
-    assert payload["status"] == "ok"
-    assert payload["local"]["capabilities"]["router"] is True
-    assert payload["comfy"]["kind"] == "comfy"
-    assert payload["direct_worker"]["kind"] == "worker"
 
 
 def test_collect_runtime_capabilities_skips_comfy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

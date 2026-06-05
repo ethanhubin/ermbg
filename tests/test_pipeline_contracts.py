@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 
@@ -28,8 +28,8 @@ def _background_model() -> BackgroundModel:
 
 def _preprocess_decision() -> PreprocessDecision:
     return PreprocessDecision(
-        selected=["remove_checkerboard", "normalize_known_background"],
-        applied=["normalize_known_background"],
+        selected=["background_repair"],
+        applied=["background_repair"],
         metadata={"checkerboard": {"recommended": False}},
         background_model=_background_model(),
     )
@@ -81,7 +81,15 @@ def _analyze_result() -> AnalyzeResult:
                 regions=["ambiguous_enclosed_bg_0"],
             ),
         ],
-        preview_assets={"overlay_png": "/api/candidate-preview/analysis_abc/overlay.png"},
+        preview_assets={
+            "candidate:protect_near_bg_subject:overlay": {
+                "kind": "overlay",
+                "candidate_id": "protect_near_bg_subject",
+                "media_type": "image/png",
+                "encoding": "data_url",
+                "data_url": "data:image/png;base64,abc",
+            }
+        },
     )
 
 
@@ -90,12 +98,12 @@ def test_preprocess_analysis_json_roundtrip() -> None:
         preprocess_id="pre_abc",
         items=[
             PreprocessItem(
-                id="remove_checkerboard",
-                label="Remove checkerboard",
+                id="background_repair",
+                label="Background repair",
                 recommended=True,
                 enabled_by_default=True,
                 reason="detected_checkerboard_background",
-                preview_assets={"overlay_png": "/api/preprocess-preview/pre_abc/remove_checkerboard.png"},
+                preview_assets={"overlay_png": "/api/preprocess-preview/pre_abc/background_repair.png"},
             )
         ],
         background_model=_background_model(),
@@ -163,11 +171,15 @@ def test_semantic_manifest_summary_carries_stage1_fields() -> None:
         user_mask=mask,
     )
 
-    assert summary["preprocess"]["selected"] == ["remove_checkerboard", "normalize_known_background"]
-    assert summary["preprocess"]["applied"] == ["normalize_known_background"]
+    assert summary["preprocess"]["selected"] == ["background_repair"]
+    assert summary["preprocess"]["applied"] == ["background_repair"]
     assert summary["semantic"]["analysis_id"] == "analysis_abc"
     assert summary["semantic"]["analysis_status"] == "needs_decision"
     assert summary["semantic"]["default_candidate_id"] == "protect_near_bg_subject"
     assert summary["semantic"]["selected_candidate_id"] == "protect_near_bg_subject"
     assert summary["semantic"]["ambiguity_types"] == ["enclosed_near_background"]
+    assert summary["semantic"]["candidate_previews"]["protect_near_bg_subject"] == {"overlay_mask": "mask_0"}
+    assert summary["semantic"]["preview_assets"]["candidate:protect_near_bg_subject:overlay"]["kind"] == "overlay"
+    assert "data_url" not in summary["semantic"]["preview_assets"]["candidate:protect_near_bg_subject:overlay"]
     assert summary["semantic"]["user_mask_used"] is True
+

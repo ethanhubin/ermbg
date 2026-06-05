@@ -394,6 +394,23 @@ def semantic_manifest_summary(
     ambiguity_types = []
     if analyze is not None:
         ambiguity_types = sorted({region.type for region in analyze.ambiguity_regions if region.type})
+    preview_asset_refs: dict[str, Any] = {}
+    candidate_previews: dict[str, Any] = {}
+    if analyze is not None:
+        for key, value in analyze.preview_assets.items():
+            if isinstance(value, dict):
+                preview_asset_refs[str(key)] = {
+                    asset_key: asset_value
+                    for asset_key, asset_value in value.items()
+                    if asset_key != "data_url"
+                }
+            else:
+                preview_asset_refs[str(key)] = value
+        candidate_previews = {
+            candidate.id: candidate.preview
+            for candidate in analyze.candidates
+            if candidate.id and candidate.preview
+        }
     return {
         "preprocess": {
             "selected": preprocess_payload.selected if preprocess_payload else [],
@@ -408,6 +425,8 @@ def semantic_manifest_summary(
             or (semantic_decision.candidate_id if semantic_decision else None),
             "semantic_decision": semantic_decision.to_dict() if semantic_decision else None,
             "ambiguity_types": ambiguity_types,
+            "preview_assets": preview_asset_refs,
+            "candidate_previews": candidate_previews,
             "user_mask_used": bool(user_mask and user_mask.is_used()),
             "user_mask_summary": user_mask.summary if user_mask else {},
         },

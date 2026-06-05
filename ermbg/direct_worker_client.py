@@ -78,10 +78,12 @@ def matte_image_direct_worker(
     pymatting_unknown_grow_px: int | None = None,
     pymatting_input_preprocessed_known_b: bool | None = None,
     pymatting_background_normalization: dict[str, Any] | None = None,
+    pymatting_normalize_known_background: bool | None = None,
     route_decision: dict[str, Any] | None = None,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: Any | None = None,
     user_remove_mask: Any | None = None,
+    pymatting_explicit_trimap: Any | None = None,
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     timeout: float = 240.0,
 ) -> MatteResponse:
@@ -93,6 +95,12 @@ def matte_image_direct_worker(
         files["user_keep_mask"] = ("user_keep_mask.png", _to_png_bytes(user_keep_mask), "image/png")
     if user_remove_mask is not None:
         files["user_remove_mask"] = ("user_remove_mask.png", _to_png_bytes(user_remove_mask), "image/png")
+    if pymatting_explicit_trimap is not None:
+        files["pymatting_explicit_trimap"] = (
+            "pymatting_explicit_trimap.png",
+            _to_png_bytes(pymatting_explicit_trimap),
+            "image/png",
+        )
     data = {
         "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
@@ -150,6 +158,8 @@ def matte_image_direct_worker(
         data["pymatting_input_preprocessed_known_b"] = "true" if pymatting_input_preprocessed_known_b else "false"
     if pymatting_background_normalization is not None:
         data["pymatting_background_normalization"] = json.dumps(pymatting_background_normalization)
+    if pymatting_normalize_known_background is not None:
+        data["pymatting_normalize_known_background"] = "true" if pymatting_normalize_known_background else "false"
     if route_decision is not None:
         data["route_decision"] = json.dumps(route_decision)
     if semantic_decision:

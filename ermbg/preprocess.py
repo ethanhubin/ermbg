@@ -21,8 +21,7 @@ from .pipeline_contracts import (
 )
 from .slicer import analyze_checkerboard_background, normalize_checkerboard_background_to_light_square
 
-REMOVE_CHECKERBOARD = "remove_checkerboard"
-NORMALIZE_KNOWN_BACKGROUND = "normalize_known_background"
+BACKGROUND_REPAIR = "background_repair"
 
 
 @dataclass(frozen=True)
@@ -60,11 +59,11 @@ def analyze_input_preprocess(image_srgb: np.ndarray) -> PreprocessAnalysis:
     if checkerboard.get("accepted", False):
         items.append(
             PreprocessItem(
-                id=REMOVE_CHECKERBOARD,
-                label="Remove checkerboard",
+                id=BACKGROUND_REPAIR,
+                label="Background repair",
                 recommended=True,
                 enabled_by_default=True,
-                reason="detected_checkerboard_background",
+                reason="detected_checkerboard_background_or_known_background",
                 metadata=checkerboard,
             )
         )
@@ -84,18 +83,28 @@ def apply_input_preprocess(
     """Apply selected input preprocessing items and return the shared decision."""
 
     analysis = analyze_input_preprocess(image_srgb)
-    selected_ids = [str(item) for item in (selected or [])]
-    selected_set = set(selected_ids)
+    selected_set = {str(item) for item in (selected or [])}
+    repair_requested = BACKGROUND_REPAIR in selected_set
+    selected_ids = [BACKGROUND_REPAIR] if repair_requested else []
     output = image_srgb
     applied: list[str] = []
-    metadata: dict[str, Any] = {"checkerboard": checkerboard_info_from_analysis(analysis, requested=REMOVE_CHECKERBOARD in selected_set)}
+    metadata: dict[str, Any] = {
+        "background_repair": {"requested": repair_requested, "applied": False},
+        "checkerboard": checkerboard_info_from_analysis(analysis, requested=repair_requested),
+    }
 
-    if REMOVE_CHECKERBOARD in selected_set:
+    if repair_requested:
         normalized, info = normalize_checkerboard_background_to_light_square(output)
         metadata["checkerboard"] = {"requested": True, **info}
         if info.get("applied", False):
             output = normalized
-            applied.append(REMOVE_CHECKERBOARD)
+            applied.append(BACKGROUND_REPAIR)
+        metadata["background_repair"] = {
+            "requested": True,
+            "applied": bool(info.get("applied", False)),
+            "checkerboard_applied": bool(info.get("applied", False)),
+            "known_background_normalization": "deferred_to_analyze_for_known_b",
+        }
     elif not metadata["checkerboard"].get("requested"):
         metadata["checkerboard"] = {"enabled": True, "requested": False, "applied": False, **analysis.debug.get("checkerboard", {})}
 
@@ -108,7 +117,7 @@ def apply_input_preprocess(
     return PreprocessResult(image_srgb=output, analysis=analysis, decision=decision)
 
 
-def normalize_known_background_preprocess(
+def repair_known_background_preprocess(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int] | np.ndarray,
     *,
@@ -133,8 +142,8 @@ def normalize_known_background_preprocess(
     )
     bg = tuple(int(c) for c in np.asarray(background_color, dtype=np.uint8).reshape(3))
     decision = PreprocessDecision(
-        selected=[NORMALIZE_KNOWN_BACKGROUND],
-        applied=[NORMALIZE_KNOWN_BACKGROUND] if info.get("applied", False) else [],
+        selected=[BACKGROUND_REPAIR],
+        applied=[BACKGROUND_REPAIR] if info.get("applied", False) else [],
         metadata={"known_background_normalization": info},
         background_model=BackgroundModel(
             color=bg,
@@ -159,12 +168,11 @@ def checkerboard_info_from_decision(decision: PreprocessDecision) -> dict[str, A
 
 
 __all__ = [
-    "NORMALIZE_KNOWN_BACKGROUND",
-    "REMOVE_CHECKERBOARD",
+    "BACKGROUND_REPAIR",
     "PreprocessResult",
     "analyze_input_preprocess",
     "apply_input_preprocess",
     "checkerboard_info_from_analysis",
     "checkerboard_info_from_decision",
-    "normalize_known_background_preprocess",
+    "repair_known_background_preprocess",
 ]

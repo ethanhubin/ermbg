@@ -545,6 +545,16 @@ def analyze_known_bg_glow(
         and adaptive["outer_roughness_p90"] <= 0.055
         and adaptive["falloff_correlation"] >= 0.90
     )
+    adaptive_target_probe = tuple(int(c) for c in np.median(adaptive_foreground[adaptive["main_component"]], axis=0)) if adaptive["support_pixels"] else target_u8
+    chromatic_swap_core_glow = (
+        _is_chromatic_swap_target(background_color, adaptive_target_probe)
+        and adaptive["support_fraction"] <= 0.70
+        and adaptive["largest_component_fraction"] >= 0.985
+        and adaptive["soft_fraction"] >= 0.48
+        and adaptive["outer_fraction"] >= 0.34
+        and adaptive["outer_roughness_p90"] <= 0.045
+        and adaptive["falloff_correlation"] >= 0.90
+    )
     if adaptive["support_fraction"] < 0.08:
         adaptive_accepted = False
         adaptive_reason = "insufficient adaptive glow support"
@@ -560,17 +570,19 @@ def analyze_known_bg_glow(
     elif adaptive["outer_fraction"] < 0.25:
         adaptive_accepted = False
         adaptive_reason = "missing continuous low-alpha exterior glow"
-    elif adaptive["strong_fraction"] >= 0.60 and adaptive_strong_core_gradient_p90 >= 160.0:
+    elif adaptive["strong_fraction"] >= 0.60 and adaptive_strong_core_gradient_p90 >= 160.0 and not chromatic_swap_core_glow:
         # Complex hard-core effect icons can have a smooth exterior halo but
         # still need CorridorKey for the opaque/textured interior. A true glow
         # field has low-gradient high-alpha support; high p90 gradient over a
-        # large strong core means internal line art, particles, or hard material
-        # would be flattened by the known-B glow solver.
+        # large strong core usually means internal line art, particles, or hard
+        # material would be flattened by the known-B glow solver. The chromatic
+        # swap escape hatch above requires one continuous low-roughness halo
+        # with strong distance/alpha falloff, protecting the blue/green swap
+        # glow mode without accepting arbitrary textured cores.
         adaptive_accepted = False
         adaptive_reason = "strong glow core is too textured"
     elif adaptive["outer_roughness_p90"] > 0.06:
         long_side = max(image_srgb.shape[:2])
-        adaptive_target_probe = tuple(int(c) for c in np.median(adaptive_foreground[adaptive["main_component"]], axis=0)) if adaptive["support_pixels"] else target_u8
         chromatic_swap_coherent = (
             _is_chromatic_swap_target(background_color, adaptive_target_probe)
             and adaptive["outer_roughness_p90"] <= 0.09

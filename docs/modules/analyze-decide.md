@@ -40,7 +40,14 @@ analyze_candidates(
    - `corridorkey_analysis`。
 3. 对 PyMatting Known-B 路径,基于已知背景色运行 Known-B 背景归一化 preprocess helper。
 4. 检测 `enclosed_near_background` 争议区域。
-5. 输出 `ready` 或 `needs_decision`。
+5. 对 CorridorKey 的同幕布色/半透明材质风险,输出
+   `screen_material_or_translucency` 争议区域。
+6. 生成稳定 `analysis_id`。
+7. 为候选生成轻量服务端 preview assets。`overlay` 是通用预览;
+   PyMatting Known-B 候选输出 `trimap`;CorridorKey 候选输出 `hint`。
+   Known-B `trimap` 是三态 `0/128/255` PNG,标记
+   `execution_role=pymatting_explicit_trimap`,选中候选后可由 Execute 直接消费。
+8. 输出 `ready` 或 `needs_decision`。
 
 ## 当前语义候选
 
@@ -54,11 +61,22 @@ analyze_candidates(
 - `protect_near_bg_subject`;
 - `cut_enclosed_holes`。
 
+同幕布色/半透明材质争议:
+
+- `auto_default`;
+- `preserve_screen_material`;
+- `remove_screen_tint`。
+
 候选 `decision` 当前用于 Known-B trimap 语义约束:
 
 - `{"policy": "auto_default"}`;
 - `{"enclosed_near_bg_policy": "subject"}`;
 - `{"enclosed_near_bg_policy": "transparent_hole"}`。
+
+CorridorKey 风险候选当前表达为:
+
+- `{"screen_material_policy": "preserve"}`;
+- `{"screen_material_policy": "background"}`。
 
 ## Decide UI
 
@@ -67,8 +85,11 @@ Web 主线:
 1. 上传图片。
 2. 调用 `/api/analyze-candidates`。
 3. 渲染语义候选。
-4. 用户点击候选时只切换候选预览。
-5. 预览支持 `Overlay / Trimap / Hint`。
+4. 用户点击候选时只切换候选预览,不会执行 matte。
+5. 预览优先使用 Analyze payload 中的服务端 `preview_assets`,缺失时前端可退回
+   bbox 级绘制。UI 不再提供 `Overlay / Trimap / Hint` 手动切换;PyMatting
+   Known-B 候选默认显示原图加 trimap unknown 红色半透明蒙层,只有透明洞候选
+   会再叠加 overlay;CorridorKey 候选默认显示 hint。
 6. 用户点击“确定抠图”后调用 `/api/execute-candidate`。
 
 候选预览必须便宜,不能调用 PyMatting、CorridorKey 或远端重型模型。
@@ -86,7 +107,5 @@ mask 不代表最终 alpha。
 
 ## 当前缺口
 
-- Analyze 目前只实现了 `enclosed_near_background` 高争议类型。
-- `preview_assets` 仍为空,Web 现在用 bbox 在前端临时绘制 overlay/trimap/hint。
-- `analysis_id` 未稳定生成。
+- shadow 归属候选仍待继续扩展。
 - `ready` 样本目前也进入候选确认式 UI,后续可按产品取舍恢复一键自动执行默认候选。

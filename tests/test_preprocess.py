@@ -3,12 +3,11 @@ from __future__ import annotations
 import numpy as np
 
 from ermbg.preprocess import (
-    NORMALIZE_KNOWN_BACKGROUND,
-    REMOVE_CHECKERBOARD,
+    BACKGROUND_REPAIR,
     analyze_input_preprocess,
     apply_input_preprocess,
     checkerboard_info_from_decision,
-    normalize_known_background_preprocess,
+    repair_known_background_preprocess,
 )
 
 
@@ -30,7 +29,7 @@ def test_preprocess_analysis_recommends_checkerboard_removal() -> None:
     analysis = analyze_input_preprocess(image)
 
     assert analysis.preprocess_id.startswith("pre_")
-    assert [item.id for item in analysis.items] == [REMOVE_CHECKERBOARD]
+    assert [item.id for item in analysis.items] == [BACKGROUND_REPAIR]
     assert analysis.items[0].recommended is True
     assert analysis.background_model is not None
     assert analysis.background_model.color == (254, 254, 254)
@@ -40,7 +39,7 @@ def test_apply_preprocess_keeps_checkerboard_opt_in() -> None:
     image = _checker_image()
 
     skipped = apply_input_preprocess(image, selected=[])
-    applied = apply_input_preprocess(image, selected=[REMOVE_CHECKERBOARD])
+    applied = apply_input_preprocess(image, selected=[BACKGROUND_REPAIR])
 
     skipped_info = checkerboard_info_from_decision(skipped.decision)
     applied_info = checkerboard_info_from_decision(applied.decision)
@@ -51,8 +50,8 @@ def test_apply_preprocess_keeps_checkerboard_opt_in() -> None:
     assert skipped.image_srgb[0, 0].tolist() != skipped.image_srgb[0, 12].tolist()
     assert applied.image_srgb[0, 0].tolist() == [254, 254, 254]
     assert applied.image_srgb[0, 12].tolist() == [254, 254, 254]
-    assert applied.decision.selected == [REMOVE_CHECKERBOARD]
-    assert applied.decision.applied == [REMOVE_CHECKERBOARD]
+    assert applied.decision.selected == [BACKGROUND_REPAIR]
+    assert applied.decision.applied == [BACKGROUND_REPAIR]
 
 
 def test_known_background_normalization_is_preprocess_decision() -> None:
@@ -60,7 +59,7 @@ def test_known_background_normalization_is_preprocess_decision() -> None:
     image = np.full((64, 64, 3), bg, dtype=np.uint8)
     image[0, 0] = (0, 199, 0)
 
-    normalized, decision = normalize_known_background_preprocess(
+    normalized, decision = repair_known_background_preprocess(
         image,
         tuple(int(c) for c in bg),
         bg_threshold=3.5,
@@ -69,8 +68,8 @@ def test_known_background_normalization_is_preprocess_decision() -> None:
     )
 
     assert tuple(int(c) for c in normalized[0, 0]) == (0, 200, 0)
-    assert decision.selected == [NORMALIZE_KNOWN_BACKGROUND]
-    assert decision.applied == [NORMALIZE_KNOWN_BACKGROUND]
+    assert decision.selected == [BACKGROUND_REPAIR]
+    assert decision.applied == [BACKGROUND_REPAIR]
     assert decision.background_model is not None
     assert decision.background_model.color == (0, 200, 0)
     assert decision.metadata["known_background_normalization"]["applied"] is True

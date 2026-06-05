@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ermbg import settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_env(monkeypatch):
+    monkeypatch.delenv("COMFY_URL", raising=False)
+    monkeypatch.delenv("ERMBG_DIRECT_URL", raising=False)
+    monkeypatch.setattr(settings, "_dotenv_paths", lambda: ())
 
 
 def test_local_config_overrides_tracked_config(monkeypatch, tmp_path):

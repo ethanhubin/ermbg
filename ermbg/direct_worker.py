@@ -495,9 +495,11 @@ def direct_matte_from_decision(
             unknown_grow_px=_route_params(params, "pymatting_unknown_grow_px", 0),
             input_preprocessed_known_b=_route_params(params, "pymatting_input_preprocessed_known_b", False),
             input_background_normalization=_route_params(params, "pymatting_background_normalization", None),
+            normalize_known_background=_route_params(params, "pymatting_normalize_known_background", True),
             semantic_decision=_route_params(params, "semantic_decision", None),
             user_keep_mask=_route_params(params, "user_keep_mask", None),
             user_remove_mask=_route_params(params, "user_remove_mask", None),
+            explicit_trimap=_route_params(params, "pymatting_explicit_trimap", None),
             auto_route=auto_route,
         )
         response.strategy_name = "direct_pymatting_known_b"

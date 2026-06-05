@@ -388,6 +388,7 @@ def _known_b_form_params(
     pymatting_unknown_grow_px: int | None,
     pymatting_input_preprocessed_known_b: bool | None,
     pymatting_background_normalization: str | None,
+    pymatting_normalize_known_background: bool | None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if pymatting_method is not None:
@@ -423,6 +424,8 @@ def _known_b_form_params(
     )
     if normalization is not None:
         params["pymatting_background_normalization"] = normalization
+    if pymatting_normalize_known_background is not None:
+        params["pymatting_normalize_known_background"] = bool(pymatting_normalize_known_background)
     return params
 
 
@@ -467,12 +470,31 @@ def _with_user_mask_params(
     return replace(decision, params=params) if changed else decision
 
 
+def _with_explicit_trimap_param(decision: RouteDecision, trimap: np.ndarray | None) -> RouteDecision:
+    if trimap is None or decision.backend not in {"pymatting_known_b", "pymatting_fallback"}:
+        return decision
+    return replace(decision, params={**decision.params, "pymatting_explicit_trimap": trimap})
+
+
 async def _read_mask_upload(upload: UploadFile | None) -> np.ndarray | None:
     if upload is None:
         return None
     data = await upload.read()
     mask = np.asarray(Image.open(io.BytesIO(data)).convert("L"), dtype=np.float32) / 255.0
     return np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+
+async def _read_trimap_upload(upload: UploadFile | None) -> np.ndarray | None:
+    if upload is None:
+        return None
+    data = await upload.read()
+    trimap = np.asarray(Image.open(io.BytesIO(data)).convert("L"), dtype=np.uint8)
+    # Preserve the candidate's 3-state contract while tolerating PNG roundoff
+    # from UI previews or tests: dark=sure-bg, mid=unknown, light=sure-fg.
+    out = np.full(trimap.shape, 128, dtype=np.uint8)
+    out[trimap < 64] = 0
+    out[trimap > 191] = 255
+    return out
 
 
 def _corridorkey_form_params(
@@ -607,6 +629,7 @@ def health() -> dict[str, Any]:
         "capabilities": {
             "route_profile_contract": True,
             "direct_pymatting_known_b": True,
+            "direct_pymatting_explicit_trimap": True,
             "direct_corridorkey": True,
             "direct_known_bg_glow": True,
             "batch_matte": True,
@@ -629,6 +652,7 @@ async def matte_endpoint(
     corridorkey_hint_mask: UploadFile | None = File(None),
     user_keep_mask: UploadFile | None = File(None),
     user_remove_mask: UploadFile | None = File(None),
+    pymatting_explicit_trimap: UploadFile | None = File(None),
     execution_backend: str = Form("auto"),
     shadow_mode: str = Form("auto"),
     corridorkey_gamma_space: str | None = Form(None),
@@ -658,6 +682,7 @@ async def matte_endpoint(
     pymatting_unknown_grow_px: int | None = Form(None),
     pymatting_input_preprocessed_known_b: bool | None = Form(None),
     pymatting_background_normalization: str | None = Form(None),
+    pymatting_normalize_known_background: bool | None = Form(None),
     route_decision: str | None = Form(None),
     semantic_decision: str | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
@@ -696,6 +721,7 @@ async def matte_endpoint(
         pymatting_unknown_grow_px=pymatting_unknown_grow_px,
         pymatting_input_preprocessed_known_b=pymatting_input_preprocessed_known_b,
         pymatting_background_normalization=pymatting_background_normalization,
+        pymatting_normalize_known_background=pymatting_normalize_known_background,
     )
     data = await image.read()
     hint_mask = None
@@ -705,6 +731,7 @@ async def matte_endpoint(
         hint_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
     keep_mask = await _read_mask_upload(user_keep_mask)
     remove_mask = await _read_mask_upload(user_remove_mask)
+    explicit_trimap = await _read_trimap_upload(pymatting_explicit_trimap)
     try:
         if route_decision_payload is not None:
             prepared = _prepare_request_from_route_decision(
@@ -740,6 +767,7 @@ async def matte_endpoint(
             user_keep_mask=keep_mask,
             user_remove_mask=remove_mask,
         )
+        decision = _with_explicit_trimap_param(decision, explicit_trimap)
         prepared = replace(prepared, decision=_with_corridorkey_params(decision, ck_params))
         result = _run_prepared_main(
             prepared,

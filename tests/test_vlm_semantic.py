@@ -10,7 +10,6 @@ import numpy as np
 from ermbg import io
 from ermbg.planner import RiskRegion
 from ermbg.vlm_semantic import (
-    ComfyQwenVLMSemanticPriorClient,
     OpenAIVLMSemanticPriorClient,
     build_openai_semantic_payload,
     build_vlm_semantic_request,
@@ -218,66 +217,3 @@ def test_openai_semantic_client_posts_and_parses(monkeypatch):
 def test_parse_qwen_json_text_handles_previewany_wrapped_string():
     wrapped = json.dumps(['{"shadow_allowed": true, "regions": []}'])
     assert parse_qwen_json_text(wrapped) == {"shadow_allowed": True, "regions": []}
-
-
-def test_comfy_qwen_semantic_client_queues_and_parses(monkeypatch):
-    image, alpha, bg = _green_panel_case()
-    regions = extract_subject_material_candidate_regions(image, alpha, bg, min_area_ratio=0.001)
-    request = build_vlm_semantic_request(
-        image_srgb=image,
-        subject_alpha=alpha,
-        background_color=bg,
-        regions=regions[:1],
-        thumbnail_max_side=32,
-        crop_max_side=24,
-    )
-    payload = {
-        "shadow_allowed": True,
-        "regions": [
-            {
-                "region_id": regions[0].id,
-                "role": "subject_material",
-                "confidence": 0.9,
-                "reason": "mocked",
-            }
-        ],
-    }
-
-    class FakePost:
-        def __init__(self, data):
-            self._data = data
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._data
-
-    client = ComfyQwenVLMSemanticPriorClient(url="http://example.invalid", timeout=1.0)
-
-    def fake_post(path, **kwargs):
-        if path == "/upload/image":
-            return FakePost({"name": "uploaded.png"})
-        if path == "/prompt":
-            assert kwargs["json"]["prompt"]["20"]["class_type"] == "Qwen3_VQA"
-            return FakePost({"prompt_id": "pid"})
-        raise AssertionError(path)
-
-    def fake_get(path, **kwargs):
-        assert path == "/history/pid"
-        return FakePost(
-            {
-                "pid": {
-                    "status": {"completed": True, "status_str": "success"},
-                    "outputs": {"30": {"text": [json.dumps([json.dumps(payload)])]}},
-                }
-            }
-        )
-
-    monkeypatch.setattr(client, "_post", fake_post)
-    monkeypatch.setattr(client, "_get", fake_get)
-
-    prior = client.classify_request(request, regions[:1], alpha.shape)
-
-    assert prior.source.startswith("comfy-qwen:")
-    assert prior.subject_material_mask is not None

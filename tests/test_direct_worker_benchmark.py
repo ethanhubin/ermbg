@@ -49,27 +49,10 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
         encoding="utf-8",
     )
 
-    compare_path = tmp_path / "comfy_summary.json"
-    compare_path.write_text(
-        json.dumps(
-            {
-                "runs": [
-                    {
-                        "case": "B001_case_green_green",
-                        "backend": "comfy-pymatting-known-b",
-                        "elapsed_sec_client": 4.0,
-                        "timings": {"remote_total_sec": 3.5},
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
     fake_decision = SimpleNamespace(
         route="pymatting_known_b",
         asset_kind="button",
-        backend="comfy-pymatting-known-b",
+        backend="direct-pymatting-known-b",
         params={"execution_profile": "pymatting-hard-button"},
         confidence=0.9,
         reasons=["test"],
@@ -78,7 +61,7 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
             "requested_backend": "auto",
             "route": "pymatting_known_b",
             "asset_kind": "button",
-            "selected_backend": "comfy-pymatting-known-b",
+            "selected_backend": "direct-pymatting-known-b",
             "execution_profile": "pymatting-hard-button",
         },
     )
@@ -100,7 +83,7 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
             response=response,
             timings={"route_sec": 0.25, "backend_sec": 1.75},
             metadata={
-                "selected_backend": "comfy-pymatting-known-b",
+                "selected_backend": "direct-pymatting-known-b",
                 "execution_backend": "direct-pymatting-known-b",
                 "route": "pymatting_known_b",
                 "asset_kind": "button",
@@ -121,7 +104,7 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
         warmup_sample_id="",
         all=False,
         category="",
-        compare_summary=compare_path,
+        compare_summary=None,
         fixed_execution_backend="direct-pymatting-known-b",
         shadow_mode="on",
         corridorkey_screen_mode="auto",
@@ -138,19 +121,17 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
     assert summary["ok_count"] == 1
     assert summary["backend"] == "direct-pymatting-known-b"
     assert summary["fixed_execution_backend"] == "direct-pymatting-known-b"
-    assert summary["artifact_manifest"] == "out/direct/manifest.json"
+    assert summary["artifact_manifest"].replace("\\", "/") == "out/direct/manifest.json"
     assert summary["runtime"] == {"python": "test"}
     row = summary["runs"][0]
     assert row["status"] == "ok"
     assert row["backend"] == "direct-pymatting-known-b"
-    assert row["outputs"]["trimap"] == "out/direct/B001_case_green_green/trimap.png"
-    assert row["selected_backend"] == "comfy-pymatting-known-b"
+    assert row["outputs"]["trimap"].replace("\\", "/") == "out/direct/B001_case_green_green/trimap.png"
+    assert row["selected_backend"] == "direct-pymatting-known-b"
     assert row["execution_backend"] == "direct-pymatting-known-b"
     assert row["execution_profile"] == "pymatting-hard-button"
-    assert row["artifact_manifest"] == "out/direct/B001_case_green_green/manifest.json"
+    assert row["artifact_manifest"].replace("\\", "/") == "out/direct/B001_case_green_green/manifest.json"
     assert row["debug"] is None
-    assert row["compare"]["speedup_vs_comfy_client"] > 0.0
-    assert row["compare"]["saved_sec_vs_comfy_client"] > 0.0
     assert (out_dir / "summary.json").exists()
     assert (out_dir / "manifest.json").exists()
     assert (out_dir / "B001_case_green_green" / "summary.json").exists()
@@ -165,7 +146,6 @@ def test_direct_worker_benchmark_run_writes_summary_and_compare(monkeypatch, tmp
     assert manifest["runtime"]["backend"] == "direct-pymatting-known-b"
     case_manifest = json.loads((out_dir / "B001_case_green_green" / "manifest.json").read_text(encoding="utf-8"))
     assert case_manifest["outputs"]["trimap"] == "trimap.png"
-    assert "compare_speedup_vs_comfy_client" in summary["timing_summary"]["overall"]
 
 
 def test_direct_worker_benchmark_fixed_backend_records_mismatch(monkeypatch, tmp_path):
@@ -199,7 +179,7 @@ def test_direct_worker_benchmark_fixed_backend_records_mismatch(monkeypatch, tmp
     fake_decision = SimpleNamespace(
         route="corridorkey",
         asset_kind="button",
-        backend="comfy-corridorkey",
+        backend="direct-corridorkey",
         params={"execution_profile": "corridorkey-transparent-button"},
         confidence=0.9,
         reasons=["test"],
@@ -237,14 +217,3 @@ def test_direct_worker_benchmark_fixed_backend_records_mismatch(monkeypatch, tmp
     assert summary["runs"][0]["execution_backend"] == "direct-corridorkey"
 
 
-def test_load_comfy_compare_rejects_missing_runs(tmp_path):
-    module = _load_script_module()
-    path = tmp_path / "bad.json"
-    path.write_text(json.dumps({"rows": []}), encoding="utf-8")
-
-    try:
-        module._load_comfy_compare(path)
-    except ValueError as exc:
-        assert "runs list" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")

@@ -895,6 +895,13 @@ def build_known_background_trimap(
     semantic_info: dict[str, Any] = {
         "enclosed_near_bg_policy": semantic_policy,
         "forced_subject_pixels": 0,
+        "forced_internal_unknown_pixels": 0,
+        "internal_unknown": {
+            "components": 0,
+            "pixels": 0,
+            "largest_component_pixels": 0,
+            "method": "unknown_components_not_adjacent_to_exterior_sure_bg",
+        },
         "forced_background_pixels": 0,
         "applied": False,
     }
@@ -955,14 +962,20 @@ def build_known_background_trimap(
     unknown = ownership.unknown.copy()
     if semantic_policy in {"subject", "transparent_hole"} and bool(ownership.enclosed_bg.any()):
         if semantic_policy == "subject":
-            forced_subject = ownership.enclosed_bg
-            sure_fg[forced_subject] = True
-            sure_bg[forced_subject] = False
-            unknown[forced_subject] = False
+            semantic_trimap, subject_info = _known_background_subject_semantic_trimap(
+                ownership,
+                boundary_band_px=int(boundary_band_px),
+            )
+            sure_fg = semantic_trimap.sure_fg
+            sure_bg = semantic_trimap.sure_bg
+            unknown = semantic_trimap.unknown
             semantic_info = {
                 **semantic_info,
                 "applied": True,
-                "forced_subject_pixels": int(forced_subject.sum()),
+                "forced_subject_pixels": int(ownership.enclosed_bg.sum()),
+                "forced_internal_unknown_pixels": int(subject_info["internal_unknown"]["pixels"]),
+                "internal_unknown": subject_info["internal_unknown"],
+                "subject_domain": subject_info,
             }
         else:
             forced_background = ownership.enclosed_bg & ownership.bg_candidate
@@ -1012,6 +1025,88 @@ def build_known_background_trimap(
             "screen_dominant_overlap_pixels": 0,
             "protected_foreground_overlap_pixels": 0,
         },
+    }
+
+
+def _known_background_subject_semantic_trimap(
+    ownership: KnownBOwnership,
+    *,
+    boundary_band_px: int,
+) -> tuple[Trimap, dict[str, Any]]:
+    """Build a trimap after accepting enclosed near-B pixels as subject.
+
+    The subject semantic candidate changes the topology first: every pixel not
+    connected to the exterior known background becomes one subject domain. The
+    unknown band is then derived from that domain boundary, so opaque internal
+    light material cannot remain as disconnected PyMatting unknown islands.
+    """
+
+    bg_candidate = np.asarray(ownership.bg_candidate, dtype=bool)
+    exterior_bg = _flood_from_border(bg_candidate & ~np.asarray(ownership.enclosed_bg, dtype=bool))
+    subject_domain = ~exterior_bg
+    if bool(ownership.sure_fg.any()):
+        subject_domain |= ownership.sure_fg
+    subject_u8 = subject_domain.astype(np.uint8)
+    boundary_px = max(1, int(round(float(boundary_band_px))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (boundary_px * 2 + 1, boundary_px * 2 + 1))
+    eroded_subject = cv2.erode(subject_u8, kernel, iterations=1).astype(bool)
+    dilated_subject = cv2.dilate(subject_u8, kernel, iterations=1).astype(bool)
+    boundary_unknown = (dilated_subject & ~eroded_subject) & ~ownership.enclosed_bg
+    unknown = (boundary_unknown | ownership.shadow_unknown | ownership.protected_transition) & ~eroded_subject
+    sure_fg = subject_domain & ~unknown
+    sure_bg = ~(sure_fg | unknown)
+
+    internal_unknown, internal_unknown_info = _internal_unknown_components(unknown, sure_bg)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(subject_domain.astype(np.uint8), 8)
+    largest = int(stats[1:, cv2.CC_STAT_AREA].max()) if labels_count > 1 else 0
+    return Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown), {
+        "method": "subject_domain_then_boundary_unknown",
+        "pixels": int(subject_domain.sum()),
+        "components": max(0, int(labels_count) - 1),
+        "largest_component_pixels": largest,
+        "boundary_band_px": int(boundary_px),
+        "unknown_pixels": int(unknown.sum()),
+        "internal_unknown": internal_unknown_info,
+    }
+
+
+def _internal_unknown_components(
+    unknown: np.ndarray,
+    sure_bg: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return unknown components that are not part of the exterior boundary band."""
+
+    unknown_mask = np.asarray(unknown, dtype=bool)
+    if not bool(unknown_mask.any()):
+        return np.zeros_like(unknown_mask, dtype=bool), {
+            "components": 0,
+            "pixels": 0,
+            "largest_component_pixels": 0,
+            "method": "unknown_components_not_adjacent_to_exterior_sure_bg",
+        }
+    exterior_bg = _flood_exterior(np.asarray(sure_bg, dtype=bool))
+    exterior_contact = cv2.dilate(
+        exterior_bg.astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(unknown_mask.astype(np.uint8), 8)
+    internal = np.zeros_like(unknown_mask, dtype=bool)
+    largest = 0
+    components = 0
+    for label in range(1, labels_count):
+        comp = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if bool((comp & exterior_contact).any()):
+            continue
+        internal |= comp
+        components += 1
+        largest = max(largest, area)
+    return internal, {
+        "components": int(components),
+        "pixels": int(internal.sum()),
+        "largest_component_pixels": int(largest),
+        "method": "unknown_components_not_adjacent_to_exterior_sure_bg",
     }
 
 

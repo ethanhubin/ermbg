@@ -144,6 +144,45 @@ def test_known_background_trimap_consumes_enclosed_near_bg_semantic_policy():
     assert hole_info["semantic_decision"]["forced_background_pixels"] >= int(clean_center.sum())
 
 
+def test_known_background_subject_policy_forces_internal_unknown_to_fg():
+    bg = np.array([255, 255, 255], dtype=np.uint8)
+    image = np.full((96, 96, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:96, :96]
+    outer = (xx - 48) ** 2 + (yy - 48) ** 2 <= 34**2
+    internal_unknown = (xx - 48) ** 2 + (yy - 48) ** 2 <= 8**2
+    image[outer] = (230, 30, 30)
+    image[internal_unknown] = (244, 244, 244)
+
+    auto_trimap, _ = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+    )
+    subject_trimap, subject_info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        semantic_decision={"enclosed_near_bg_policy": "subject"},
+    )
+
+    assert auto_trimap.unknown[internal_unknown].mean() > 0.95
+    assert subject_trimap.sure_fg[internal_unknown].mean() > 0.95
+    assert subject_trimap.unknown[internal_unknown].mean() == 0.0
+    assert subject_info["semantic_decision"]["forced_internal_unknown_pixels"] == 0
+    assert subject_info["semantic_decision"]["internal_unknown"]["components"] == 0
+    assert subject_info["semantic_decision"]["subject_domain"]["method"] == "subject_domain_then_boundary_unknown"
+    labels_count, labels = cv2.connectedComponents(subject_trimap.sure_fg.astype(np.uint8), 8)
+    center_label = int(labels[48, 48])
+    assert center_label > 0
+    assert int(np.count_nonzero(labels == center_label)) >= int(internal_unknown.sum() + (outer & ~internal_unknown).sum() * 0.80)
+    assert labels_count == 2
+    assert subject_trimap.unknown.sum() > 0
+
+
 def test_known_background_trimap_consumes_user_keep_remove_masks():
     bg = np.array([255, 255, 255], dtype=np.uint8)
     image = np.full((96, 96, 3), bg, dtype=np.uint8)
