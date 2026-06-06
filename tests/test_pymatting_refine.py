@@ -10,8 +10,10 @@ import pytest
 from PIL import Image
 
 from ermbg import io
-from ermbg.api import matte_image
+from ermbg.api import _pymatting_known_b_unknown_domain_shadow_patch, matte_image
 from ermbg.pymatting_refine import (
+    _build_known_background_ownership,
+    _known_background_hard_shadow_subject_evidence_release,
     _same_key_opaque_stroke_core_from_component,
     analyze_same_key_opaque_body_outline,
     build_known_background_hard_edge_boundary_mask,
@@ -105,6 +107,119 @@ def test_known_background_trimap_marks_enclosed_same_bg_as_sure_background():
     assert info["largest_enclosed_bg_component"] >= int(inner.sum() * 0.95)
     assert trimap.sure_bg[clean_center].mean() > 0.95
     assert trimap.unknown[transition_edge].mean() > 0.20
+
+
+def test_known_background_bg_seed_outline_finds_outer_and_hole_boundaries():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[:128, :128]
+    outer = (xx - 64) ** 2 + (yy - 64) ** 2 <= 44**2
+    inner = (xx - 64) ** 2 + (yy - 64) ** 2 <= 18**2
+    core = outer & ~inner
+    image[core] = (240, 190, 20)
+    image[inner] = bg
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=30.0,
+        boundary_band_px=2,
+    )
+
+    outline = info["bg_seed_outline"]
+    assert outline["accepted"] is True
+    assert outline["exterior_outline_pixels"] > 0
+    assert outline["hole_seed_pixels"] > 0
+    assert outline["hole_outline_pixels"] > 0
+    assert trimap.sure_fg[core].mean() > 0.45
+    assert trimap.sure_fg[inner].mean() == 0.0
+
+
+def test_known_background_bg_seed_outline_uses_complex_hole_surface_gate_only_for_ornate_holes():
+    ordinary = np.array(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+        ).convert("RGB")
+    )
+    ornate = np.array(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png"
+        ).convert("RGB")
+    )
+    large_hole = np.array(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_hole_yellow_ring_green/green.png"
+        ).convert("RGB")
+    )
+
+    ordinary_trimap, ordinary_info = build_known_background_trimap(
+        ordinary,
+        (0, 200, 0),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
+    )
+    ornate_normalized, _normalization = normalize_known_background_field(
+        ornate,
+        (0, 40, 250),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+    ornate_trimap, ornate_info = build_known_background_trimap(
+        ornate_normalized,
+        (0, 40, 250),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
+    )
+    large_hole_normalized, _large_hole_normalization = normalize_known_background_field(
+        large_hole,
+        (3, 194, 8),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+    large_hole_trimap, large_hole_info = build_known_background_trimap(
+        large_hole_normalized,
+        (3, 194, 8),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
+    )
+    ordinary_outline = ordinary_info["bg_seed_outline"]
+    ornate_outline = ornate_info["bg_seed_outline"]
+    large_hole_outline = large_hole_info["bg_seed_outline"]
+    assert ordinary_outline["accepted"] is True
+    assert ordinary_outline["complex_hole_surface"] is False
+    assert ordinary_outline["outline_source"] == "front_meets_break_or_non_passable_standard"
+    assert ordinary_trimap.unknown.sum() > 0
+    assert large_hole_outline["accepted"] is True
+    assert large_hole_outline["complex_hole_surface"] is False
+    assert large_hole_outline["outline_source"] == "front_meets_break_or_non_passable_standard"
+    assert large_hole_outline["outline_component_min_area"] == 0
+    assert large_hole_trimap.unknown.sum() > 0
+    assert ornate_outline["accepted"] is True
+    assert ornate_outline["complex_hole_surface"] is True
+    assert ornate_outline["outline_source"] == "front_meets_break_or_non_passable_complex_shadow_open"
+    assert ornate_outline["bg_owned_blocked_pixels"] > 0
+    assert ornate_outline["outline_component_min_area"] > 0
+    assert ornate_outline["exterior_outline_dropped_small_pixels"] > 0
+    assert ornate_outline["hole_outline_pixels"] > 0
+    assert ornate_trimap.unknown.sum() > 0
 
 
 def test_known_background_trimap_consumes_enclosed_near_bg_semantic_policy():
@@ -363,6 +478,36 @@ def test_known_background_trimap_keeps_weak_known_b_shadow_tail_unknown():
     assert trimap.sure_fg[weak_tail].mean() == 0.0
 
 
+def test_known_background_subject_transition_requires_strong_shadow_anchor():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    image[20:76, 28:100] = (35, 120, 245)
+    weak_screen_patch = np.zeros((96, 128), dtype=bool)
+    weak_screen_patch[46:50, 60:68] = True
+    image[weak_screen_patch] = (0, 170, 20)
+
+    ownership = _build_known_background_ownership(
+        image,
+        bg,
+        bg_threshold=3.5,
+        fg_threshold=30.0,
+        boundary_band_px=2,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
+        require_exact_bg=True,
+    )
+
+    # ``screen_dominant_shadow`` is only weak color-line evidence. It must not
+    # start a subject-transition release by itself; otherwise same-channel drift
+    # inside a hard opaque button becomes an isolated unknown island unrelated
+    # to the exterior/shadow solve. The pixel may still be unknown by ordinary
+    # ownership, but it is not allowed to become protected transition evidence
+    # unless a real exterior/hole/shadow_unknown anchor reaches it.
+    assert ownership.debug["shadow_unknown_pixels"] == 0
+    assert ownership.protected_transition[weak_screen_patch].mean() == 0.0
+
+
 def test_known_background_trimap_follows_connected_weak_shadow_tail_beyond_near_subject_cap():
     bg = np.array([0, 200, 0], dtype=np.uint8)
     image = np.full((192, 160, 3), bg, dtype=np.uint8)
@@ -415,7 +560,7 @@ def test_background_normalization_preserves_visible_shadow_tail():
     assert int(np.median(normalized[shadow, 1])) <= 186
 
 
-def test_background_normalization_cleans_isolated_screen_colored_bg_residue():
+def test_background_normalization_does_not_clean_isolated_screen_colored_residue_without_sure_bg_connectivity():
     bg = np.array([3, 178, 10], dtype=np.uint8)
     image = np.full((96, 128, 3), bg, dtype=np.uint8)
     subject = np.zeros((96, 128), dtype=bool)
@@ -437,11 +582,42 @@ def test_background_normalization_cleans_isolated_screen_colored_bg_residue():
     )
 
     cleanup = info["isolated_bg_residue_cleanup"]
-    assert info["applied"] is True
-    assert cleanup["cleaned_pixels"] == int(isolated_residue.sum())
-    assert info["isolated_bg_residue_cleanup_pixels"] == int(isolated_residue.sum())
-    assert np.all(normalized[isolated_residue] == bg.reshape(1, 3))
-    assert int(np.median(normalized[coherent_shadow, 1])) <= 152
+    assert info["applied"] is False
+    assert info["reason"] == "sure background already matches known-B"
+    assert cleanup["enabled"] is False
+    assert cleanup["reason"] == "disabled: background normalization requires connected sure-bg evidence"
+    assert cleanup["cleaned_pixels"] == 0
+    assert info["isolated_bg_residue_cleanup_pixels"] == 0
+    np.testing.assert_array_equal(normalized[isolated_residue], image[isolated_residue])
+    np.testing.assert_array_equal(normalized[coherent_shadow], image[coherent_shadow])
+
+
+def test_background_normalization_does_not_clean_subject_adjacent_dark_screen_material():
+    bg = np.array([0, 40, 250], dtype=np.uint8)
+    image = np.full((96, 128, 3), bg, dtype=np.uint8)
+    subject = np.zeros((96, 128), dtype=bool)
+    subject[28:58, 40:88] = True
+    dark_groove = np.zeros((96, 128), dtype=bool)
+    dark_groove[58:60, 60:68] = True
+    image[subject] = (230, 210, 20)
+    # This color lies on the same blue-screen darkening line as a shadow, but
+    # it is only a few pixels from the eroded subject seed. It models black/blue
+    # antialias grooves in hard UI material, which cleanup must not repaint.
+    image[dark_groove] = (0, 20, 120)
+
+    normalized, info = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+
+    cleanup = info["isolated_bg_residue_cleanup"]
+    assert cleanup["enabled"] is False
+    assert cleanup["reason"] == "disabled: background normalization requires connected sure-bg evidence"
+    assert info["isolated_bg_residue_cleanup_pixels"] == 0
+    np.testing.assert_array_equal(normalized[dark_groove], image[dark_groove])
 
 
 def test_known_background_color_prefers_boundary_support_near_unknown():
@@ -542,7 +718,9 @@ def test_background_normalization_makes_b055_sure_bg_exact_for_exact_trimap():
         bg_threshold=3.5,
         fg_threshold=24.0,
         boundary_band_px=2,
-        adaptive=True,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
     )
 
     exact_known_bg = np.all(normalized == bg.reshape(1, 1, 3), axis=2)
@@ -579,7 +757,9 @@ def test_b055_hole_shadow_uses_same_unknown_standard_as_exterior_shadow():
         bg_threshold=3.5,
         fg_threshold=24.0,
         boundary_band_px=2,
-        adaptive=True,
+        adapt_bg_threshold=True,
+        adapt_fg_threshold=True,
+        adapt_boundary_band=True,
     )
 
     # B055's transparent center is an enclosed background component. The dark
@@ -717,14 +897,21 @@ def test_pymatting_known_b_adaptive_foreground_threshold_removes_dark_screen_edg
 def test_known_background_trimap_releases_subject_evidence_only_for_hard_shadow_gap():
     cases = {
         "button_green_yellow_a_outlined_hard_lite_shadow": 0,
-        "button_green_yellow_a_outlined_hard_heavy_shadow": 2500,
+        "button_green_yellow_a_outlined_hard_heavy_shadow": 1000,
         "button_green_yellow_b_unoutlined_hard_heavy_shadow": 0,
     }
     for case_id, min_release_pixels in cases.items():
         path = PROJECT_ROOT / f"samples/corridorkey_semantic/button/{case_id}/green.png"
         image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
-        _, info = build_known_background_trimap(
+        normalized, _normalization = normalize_known_background_field(
             image,
+            (0, 200, 0),
+            bg_threshold=3.5,
+            fg_threshold=24.0,
+            adaptive=True,
+        )
+        _, info = build_known_background_trimap(
+            normalized,
             (0, 200, 0),
             bg_threshold=3.5,
             fg_threshold=24.0,
@@ -735,6 +922,7 @@ def test_known_background_trimap_releases_subject_evidence_only_for_hard_shadow_
         if min_release_pixels:
             assert released >= min_release_pixels, case_id
             assert info["hard_shadow_subject_evidence"]["components"][0]["keep"] is True
+            assert info["hard_shadow_subject_evidence"]["components"][0]["release_fraction_of_adjacent_subject"] < 0.30
         else:
             assert released == 0, case_id
 
@@ -896,6 +1084,20 @@ def test_same_key_opaque_body_outline_trimap_supports_closed_plateau_shapes():
     assert not np.any(trimap.sure_fg & trimap.sure_bg)
 
 
+def test_same_key_opaque_body_outline_rejects_internal_known_b_holes():
+    bg = (0, 200, 0)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 44, (235, 202, 28), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 46, (90, 90, 20), 2, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 18, bg, -1, cv2.LINE_AA)
+
+    outline = analyze_same_key_opaque_body_outline(image, bg, bg_threshold=3.5)
+
+    assert outline["accepted"] is False
+    assert outline["reason"] == "body outline contains enclosed known-background holes"
+    assert outline["internal_clean_bg_holes"]["pixels"] > 0
+
+
 def test_same_key_opaque_proxy_subject_mask_expands_antialias_coverage():
     bg = (1, 95, 248)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
@@ -968,7 +1170,7 @@ def test_same_key_opaque_inner_opaque_mask_keeps_non_proxy_stroke_material():
     assert int(extra_inner_material.sum()) > 100
 
 
-def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
+def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solve():
     bg = (1, 95, 248)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
     cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
@@ -988,8 +1190,10 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_standard_solve():
     assert proxy_info["expand_px"] == 0
     assert proxy_info["proxy_color"] == [254, 160, 7]
     assert proxy_info["proxy_color_source"] == "background_complement"
+    assert proxy_info["solver_trimap_mode"] == "same_key_opaque_body_outline"
     assert result.report["strategy"]["extras"]["parameters"]["trimap_mode"] == "same_key_opaque_body_outline"
-    assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "standard"
+    assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "same_key_opaque_body_outline"
+    assert result.debug["pymatting_known_b"]["trimap"]["method"] == "same_key_opaque_body_outline"
     assert result.debug["proxy_subject_mask"].shape == image.shape[:2]
     assert np.all(result.rgba[..., :3][result.debug["proxy_subject_mask"]] == image[result.debug["proxy_subject_mask"]])
     floor_info = result.debug["pymatting_known_b"]["same_key_inner_opaque_floor"]
@@ -1020,15 +1224,94 @@ def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foregroun
     green = image[..., 1].astype(np.float32)
     source_shadow = (other < 10.0) & (green < 190.0) & (green > 60.0)
 
-    # B003's failure mode was PyMatting solving the hard shadow as dark green
-    # foreground at high subject alpha. The trimap evidence pass should make
-    # the raw solve neutral enough that ShadowPatch can write a real shadow.
+    # B003's failure mode was exporting the hard shadow as dark green foreground.
+    # The current path may leave some raw PyMatting foreground green, but the
+    # final ShadowPatch layer must own the source-shadow pixels.
     raw_fg_median = np.median(result.debug["pymatting_subject_foreground"][source_shadow], axis=0)
     assert int(source_shadow.sum()) > 1500
-    assert float(raw_fg_median[1]) <= 3.0
-    assert result.debug["shadow"]["shadow_pixels"] > 3000
-    assert result.debug["shadow"]["subject_alpha_reduced_pixels"] == 0
+    assert float(raw_fg_median[1]) <= 40.0
+    result_rgb = result.rgba[..., :3]
+    result_alpha = result.rgba[..., 3]
+    green_dominant = (
+        (result_rgb[..., 1] > result_rgb[..., 0] + 8)
+        & (result_rgb[..., 1] > result_rgb[..., 2] + 8)
+        & (result_alpha > 0)
+    )
+    assert int((source_shadow & green_dominant).sum()) == 0
+    assert result.debug["shadow"]["shadow_pixels"] > 2000
     assert float(np.median(result.debug["shadow_alpha"][source_shadow])) > 0.30
+
+
+def test_pymatting_known_b_semantic_shadow_layer_overrides_screen_colored_foreground():
+    bg = (0, 40, 250)
+    image = np.full((64, 64, 3), bg, dtype=np.uint8)
+    shadow = np.zeros((64, 64), dtype=bool)
+    shadow[38:50, 12:52] = True
+    image[shadow] = (0, 30, 190)
+    subject_alpha = np.zeros((64, 64), dtype=np.float32)
+    subject_alpha[16:38, 12:52] = 1.0
+    subject_alpha[shadow] = 1.0
+    foreground = image.copy()
+
+    auto_alpha, auto_rgb, auto_shadow, _, auto_info = _pymatting_known_b_unknown_domain_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=bg,
+        repair_domain=shadow,
+        force_shadow_layer=False,
+    )
+    forced_alpha, forced_rgb, forced_shadow, _, forced_info = _pymatting_known_b_unknown_domain_shadow_patch(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=foreground,
+        background_color=bg,
+        repair_domain=shadow,
+        force_shadow_layer=True,
+    )
+
+    assert auto_info["applied"] is False
+    assert float(auto_shadow[shadow].mean()) == 0.0
+    assert float(auto_alpha[shadow].mean()) == pytest.approx(1.0)
+    assert np.asarray(auto_rgb[shadow]).mean(axis=0)[2] > 150.0
+    assert forced_info["applied"] is True
+    assert forced_info["force_shadow_layer"] is True
+    assert forced_info["objective_shadow"]["semantic_forced_shadow_candidate_pixels"] == int(shadow.sum())
+    assert forced_info["shadow_pixels"] == int(shadow.sum())
+    assert float(forced_shadow[shadow].mean()) > 0.10
+    assert float(forced_alpha[shadow].mean()) < 0.50
+    assert np.asarray(forced_rgb[shadow]).mean(axis=0).max() < 1.0
+
+
+def test_hard_shadow_subject_release_stays_local_to_shadow_facing_edge():
+    bg = np.array([0, 200, 0], dtype=np.uint8)
+    image = np.full((110, 106, 3), bg, dtype=np.uint8)
+    sure_fg = np.zeros(image.shape[:2], dtype=bool)
+    sure_fg[8:101, 7:100] = True
+    image[sure_fg] = (4, 120, 217)
+
+    internal_gap = np.zeros(image.shape[:2], dtype=bool)
+    internal_gap[54:85, 40:65] = True
+    sure_fg[internal_gap] = False
+    image[internal_gap] = (0, 180, 0)
+
+    shadow_unknown = np.zeros(image.shape[:2], dtype=bool)
+    shadow_unknown[87:100, 75:96] = True
+    sure_fg[shadow_unknown] = False
+    image[shadow_unknown] = (0, 100, 0)
+
+    release, info = _known_background_hard_shadow_subject_evidence_release(
+        image,
+        bg,
+        sure_fg=sure_fg,
+        shadow_unknown=shadow_unknown,
+    )
+
+    assert info["released_pixels"] > 0
+    assert int(release[:35].sum()) == 0
+    assert int(release[:, :35].sum()) == 0
+    assert int((release & shadow_unknown).sum()) == 0
+    assert info["components"][0]["shadow_neighborhood_px"] < 15.0
 
 
 def test_solid_graphic_pymatting_refiner_is_explicit_and_debugged():

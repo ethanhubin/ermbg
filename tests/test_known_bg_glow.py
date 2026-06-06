@@ -7,7 +7,7 @@ from PIL import Image
 
 from ermbg.direct_worker import direct_matte_auto
 from ermbg.known_bg_glow import _chromatic_material_weight, analyze_known_bg_glow, matte_known_bg_glow
-from ermbg.router import classify_route
+from ermbg.router import build_route_candidates, classify_route
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +97,18 @@ def _wide_full_frame_continuous_glow() -> np.ndarray:
     return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
 
 
+def _neutral_background_continuous_glow() -> np.ndarray:
+    h = w = 128
+    bg = np.array([28, 28, 32], dtype=np.float32)
+    y, x = np.mgrid[:h, :w]
+    cx = cy = (h - 1) / 2.0
+    radius = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+    alpha = np.clip(1.0 - radius / 50.0, 0.0, 1.0) ** 1.6
+    foreground = np.broadcast_to(np.array([255, 160, 60], dtype=np.float32), (h, w, 3))
+    rgb = bg.reshape(1, 1, 3) * (1.0 - alpha[..., None]) + foreground * alpha[..., None]
+    return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
+
+
 def test_known_bg_glow_detects_i019_smooth_white_glow():
     image = _rgb("samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png")
 
@@ -171,6 +183,18 @@ def test_auto_route_sends_wide_glow_to_known_bg_glow_before_button_classificatio
     assert decision.asset_kind == "glow"
     assert decision.params["execution_profile"] == "known-bg-glow"
     assert decision.analysis["corridorkey_analysis"]["foreground_aspect_ratio"] >= 1.45
+
+
+def test_auto_route_sends_non_screen_stable_background_glow_to_known_bg_glow():
+    image = _neutral_background_continuous_glow()
+
+    decision = classify_route(image)
+
+    assert decision.route == "known_bg_glow"
+    assert decision.backend == "known_bg_glow"
+    assert decision.params["execution_profile"] == "known-bg-glow"
+    assert decision.analysis["stable_background"]["accepted"] is True
+    assert decision.analysis["known_bg_glow"]["accepted"] is True
 
 
 def test_adaptive_known_bg_glow_repairs_additive_screen_color_endpoints():
@@ -411,6 +435,19 @@ def test_auto_route_sends_i019_to_direct_known_bg_glow():
     assert decision.to_dict()["algorithm"] == "known_bg_glow"
     assert decision.params["execution_profile"] == "known-bg-glow"
     assert decision.reasons == ["known_bg_single_target_line_glow_uses_known_bg_glow"]
+
+
+def test_known_bg_glow_route_exposes_known_b_counter_candidate():
+    image = _rgb("samples/corridorkey_semantic/icon/icon_icon_d09_soft_alpha_smooth_white_glow_green/green.png")
+
+    candidates = build_route_candidates(image)
+    by_route = {candidate.decision.route: candidate for candidate in candidates}
+    default = next(candidate for candidate in candidates if candidate.default)
+
+    assert {"known_bg_glow", "pymatting_known_b"} <= set(by_route)
+    assert default.decision.route == "known_bg_glow"
+    assert by_route["known_bg_glow"].decision.params["parameter_profile"].startswith("known_bg_glow_")
+    assert by_route["pymatting_known_b"].decision.params["parameter_profile"] == "known_b_hard_button_standard"
 
 
 def test_direct_worker_known_bg_glow_outputs_soft_transparent_layer():

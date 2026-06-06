@@ -1,6 +1,6 @@
 # Route / Profile 模块
 
-本文对齐当前 `ermbg.router`、Web 和 Direct Worker 的 route/profile 契约。
+本文对齐当前 `ermbg.router`、Analyze、Web 和 Direct Worker 的 route/profile 契约。
 
 ## 文件
 
@@ -13,7 +13,7 @@
 
 ## RouteDecision
 
-route 决策描述算法和参数,不描述 server URL。
+Route 只描述算法、素材类型、参数和证据，不描述 server URL。
 
 核心字段:
 
@@ -25,31 +25,78 @@ route 决策描述算法和参数,不描述 server URL。
 - `reasons`;
 - `analysis`。
 
-`RouteDecision.to_dict()` 会派生:
+`RouteDecision.to_dict()` 派生:
 
 - `algorithm`;
 - `parameter_profile`;
 - `execution_profile`;
 - 可选 `corridorkey_analysis`。
 
-## 当前 algorithm / backend
+## RouteCandidate
 
-- `pymatting_known_b`: 已知背景图形和硬 UI 主路径。
-- `corridorkey`: 绿幕/蓝幕复杂 UI、软边、glow、透明材质等路径。
+`build_route_candidates()` 输出完整 route/model candidates。每个 candidate 包含一个可执行
+`RouteDecision`:
+
+- `id`;
+- `algorithm` / `route` / `backend`;
+- `asset_kind`;
+- `execution_profile`;
+- `parameter_profile`;
+- `params`;
+- `confidence`;
+- `evidence`;
+- `risks`;
+- `default`。
+
+`select_default_route_candidate()` 选择默认候选。`classify_route()` 是兼容 wrapper，
+等价于返回默认 route candidate 的 `RouteDecision`。
+
+## 当前 Algorithm
+
+- `pymatting_known_b`: 已知背景硬边图形/UI 主路径。
+- `corridorkey`: 绿幕/蓝幕复杂软边、透明材质、角色和细节边界路径。
 - `known_bg_glow`: 已知背景 glow 专用路径。
-- `rgba_passthrough`: 输入已有 alpha 且可直接复用。
-- fallback: 本地 PyMatting 等兼容路径。
+- `rgba_passthrough`: 输入已有 alpha 且可复用。
+- fallback: 本地兼容 PyMatting 路径。
 
-## 约束
+## 决策顺序
 
-- route 在 matting 执行前完成。
-- Direct Worker server URL 由配置选择,不是 route 决策的一部分。
-- profile 专属调参必须落在共享 router/执行代码中,不要在 Web JS 中重写。
-- Execute 阶段消费 `route_decision`,不得重新推断 asset kind。
+profile 是 route 的结果标签，不是模型选择输入。
 
-## 当前缺口
+顺序:
 
-- glow route 仍需持续回归验证。`test_direct_worker_manual_known_bg_glow_preserves_chromatic_swap_ray_mode`
-  覆盖 chromatic-swap 强 core glow:当可测信号显示连续低 roughness halo、强
-  distance/alpha falloff 和 chromatic endpoint 时,route 应为 `known_bg_glow`,
-  而不是退回 `pymatting_known_b`。
+1. clean alpha -> `rgba_passthrough`。
+2. 判断背景是否 known/measurable/stable；不可信则 fallback。
+3. 成像模型选择:
+   - 连续 emissive/falloff glow -> `known_bg_glow`;
+   - hard opaque + AA -> `pymatting_known_b`;
+   - complex linear mix、透明材质、fine-detail boundary -> `corridorkey`;
+   - unknown / unstable B -> fallback。
+4. 模型内参数 recipe:
+   - Known-B: BG-seed outline trimap、same-key body、hole decisions、unknown 分布；
+   - CorridorKey: detail/translucent/color-protection/despill/refiner 参数；
+   - Glow: single-target-line、adaptive-ray、chromatic-swap-ray 参数。
+5. Analyze 的局部语义候选只能生成 semantic decision 或参数 override，不能反向重选模型。
+
+宽高比、padding、bbox width/height fraction 只能用于阈值归一化、最小面积或异常防御，
+不能当作模型语义判断的核心证据。
+
+## Route 争议
+
+当 known screen + stable B 同时支持 Known-B hard opaque solver 和 CorridorKey
+composite/detail solver 时，Analyze 必须输出多个 route candidates，而不是在 Execute
+阶段重新猜。
+
+典型约束:
+
+- B056 ornate hole plate 应保留 Known-B hole candidate，不因内部暗纹误触 CorridorKey
+  或 shadow 语义候选。
+- B057 same-key hard shadow 由 opaque known-B guard 压回 Known-B。
+- C 类角色或透明细节素材可由 CorridorKey 成为默认 route。
+
+## 执行约束
+
+- route 在 matting 前完成。
+- Direct Worker URL 由配置选择，不属于 route。
+- profile 专属调参必须落在共享 router/执行代码中，不要在 Web JS 中重写。
+- Execute 消费显式 `route_decision`，不得重新推断 asset kind。

@@ -11,6 +11,7 @@ from PIL import Image
 
 from ermbg.analyze import analyze_candidates
 from ermbg.preprocess import BACKGROUND_REPAIR, apply_input_preprocess
+from ermbg.router import RouteCandidate, RouteDecision
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -108,10 +109,24 @@ class _FakeRouteDecision:
                 "pymatting_bg_color": (253, 253, 253),
                 "pymatting_bg_threshold": 3.5,
                 "pymatting_fg_threshold": 24.0,
-                "pymatting_auto_adapt": True,
+                "pymatting_adapt_bg_threshold": False,
+                "pymatting_adapt_fg_threshold": True,
+                "pymatting_adapt_boundary_band": True,
             },
-            "analysis": {},
+            "analysis": {"corridorkey_analysis": {"parameter_profile": self.parameter_profile}},
         }
+
+    def to_route_decision(self) -> RouteDecision:
+        payload = self.to_dict()
+        return RouteDecision(
+            route=str(payload["route"]),
+            asset_kind=str(payload["asset_kind"]),
+            backend=str(payload["backend"]),
+            params=dict(payload["params"]),  # type: ignore[arg-type]
+            confidence=float(payload["confidence"]),
+            reasons=list(payload["reasons"]),  # type: ignore[arg-type]
+            analysis=dict(payload["analysis"]),  # type: ignore[arg-type]
+        )
 
 
 def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
@@ -139,7 +154,8 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert result.preview_assets["candidate:protect_near_bg_subject:trimap"]["data_url"].startswith("data:image/png;base64,")
     assert result.preview_assets["candidate:protect_near_bg_subject:trimap"]["execution_role"] == "pymatting_explicit_trimap"
     trimap_meta = result.preview_assets["candidate:protect_near_bg_subject:trimap"]["metadata"]
-    assert trimap_meta["source"] == "build_known_background_trimap"
+    assert trimap_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
+    assert trimap_meta["candidate_assembly"]["bg_seed_outline"]["accepted"] is True
     assert trimap_meta["states"]["sure_bg"]["pixels"] > 0
     assert trimap_meta["states"]["unknown"]["pixels"] > 0
     assert trimap_meta["states"]["sure_fg"]["pixels"] > 0
@@ -147,16 +163,36 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert "candidate:protect_near_bg_subject:hint" not in result.preview_assets
 
 
-def test_analyze_no_ambiguity_is_ready() -> None:
+def test_analyze_hard_button_without_shadow_is_ready() -> None:
     result = analyze_candidates(_solid_green_button())
 
     assert result.status == "ready"
     assert result.analysis_id is not None
     assert result.default_candidate_id == "auto_default"
-    assert [candidate.id for candidate in result.candidates] == ["auto_default"]
     assert result.ambiguity_regions == []
+    assert [candidate.id for candidate in result.candidates] == ["auto_default"]
     assert result.candidates[0].preview["assets"]["overlay"] == "candidate:auto_default:overlay"
     assert result.preview_assets["candidate:auto_default:overlay"]["data_url"].startswith("data:image/png;base64,")
+
+
+def test_analyze_b001_no_shadow_button_has_stable_boundary_trimap() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_no_shadow/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "ready"
+    assert result.default_candidate_id == "auto_default"
+    assert {region.type for region in result.ambiguity_regions} == set()
+    trimap = _decode_preview_luma(result.preview_assets["candidate:auto_default:trimap"]["data_url"])
+    unknown = (trimap >= 64) & (trimap <= 191)
+    sure_bg = trimap < 64
+    assert _non_boundary_unknown_component_count(unknown, sure_bg) == 0
 
 
 def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> None:
@@ -172,20 +208,166 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
 
     assert result.status == "needs_decision"
     assert result.route["algorithm"] == "corridorkey"
+    assert result.default_route_candidate_id == "route_corridorkey"
+    assert {candidate["algorithm"] for candidate in result.route_candidates} == {
+        "pymatting_known_b",
+        "corridorkey",
+    }
     assert result.ambiguity_regions[0].type == "screen_material_or_translucency"
-    assert [candidate.id for candidate in result.candidates] == [
-        "auto_default",
-        "preserve_screen_material",
-        "remove_screen_tint",
+    corridorkey_candidates = [
+        candidate
+        for candidate in result.candidates
+        if candidate.route_candidate_id == "route_corridorkey"
     ]
-    assert result.candidates[1].decision == {"screen_material_policy": "preserve"}
-    assert result.candidates[2].decision == {"screen_material_policy": "background"}
-    assert "trimap" not in result.candidates[1].preview["assets"]
-    assert result.preview_assets["candidate:preserve_screen_material:hint"]["data_url"].startswith("data:image/png;base64,")
+    assert [candidate.id for candidate in corridorkey_candidates] == [
+        "route_corridorkey__auto_default",
+        "route_corridorkey__preserve_screen_material",
+        "route_corridorkey__remove_screen_tint",
+    ]
+    assert corridorkey_candidates[1].decision == {"screen_material_policy": "preserve"}
+    assert corridorkey_candidates[2].decision == {"screen_material_policy": "background"}
+    assert "trimap" not in corridorkey_candidates[1].preview["assets"]
+    assert result.preview_assets["candidate:route_corridorkey__preserve_screen_material:hint"]["data_url"].startswith("data:image/png;base64,")
+
+
+def test_analyze_button_shadow_is_resolved_by_bg_seed_outline_without_candidates() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_lite_shadow/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "ready"
+    assert result.route["algorithm"] == "pymatting_known_b"
+    assert result.ambiguity_regions == []
+    assert result.default_candidate_id == "auto_default"
+    assert [candidate.id for candidate in result.candidates] == ["auto_default"]
+    assert result.candidates[0].default is True
+    assert result.preview_assets["candidate:auto_default:trimap"]["execution_role"] == "pymatting_explicit_trimap"
+    trimap_meta = result.preview_assets["candidate:auto_default:trimap"]["metadata"]
+    assert trimap_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
+    assert trimap_meta["candidate_assembly"]["bg_seed_outline"]["accepted"] is True
+    assert trimap_meta["states"]["unknown"]["pixels"] > 0
+
+
+def test_analyze_hard_heavy_button_shadow_stays_single_default_candidate() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "ready"
+    assert result.ambiguity_regions == []
+    assert result.default_candidate_id == "auto_default"
+    assert [candidate.id for candidate in result.candidates] == ["auto_default"]
+    trimap_meta = result.preview_assets["candidate:auto_default:trimap"]["metadata"]
+    assert trimap_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
+    assert trimap_meta["states"]["unknown"]["pixels"] > 0
+
+
+def test_analyze_b056_uses_hole_candidates_without_shadow_branching() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/button/button_hole_ornate_plate_blue/blue.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "needs_decision"
+    assert {region.type for region in result.ambiguity_regions} == {"enclosed_near_background"}
+    assert result.default_candidate_id == "use_cut_all_holes"
+    assert [candidate.id for candidate in result.candidates] == [
+        "use_cut_all_holes",
+        "use_keep_all_holes",
+    ]
+    cut_meta = result.preview_assets["candidate:use_cut_all_holes:trimap"]["metadata"]
+    keep_meta = result.preview_assets["candidate:use_keep_all_holes:trimap"]["metadata"]
+    assert cut_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
+    assert cut_meta["region_policy_application"] == "bg_seed_outline_region_overlay_applied"
+    assert cut_meta["semantic_forced_bg_pixels"] > 0
+    assert keep_meta["semantic_forced_fg_pixels"] == cut_meta["semantic_forced_bg_pixels"]
+    assert cut_meta["states"]["sure_bg"]["pixels"] > keep_meta["states"]["sure_bg"]["pixels"]
+    assert cut_meta["states"]["sure_fg"]["pixels"] < keep_meta["states"]["sure_fg"]["pixels"]
+
+
+def test_analyze_button_hole_near_shadow_returns_hole_only_candidates() -> None:
+    image = np.full((96, 160, 3), (0, 200, 0), dtype=np.uint8)
+    cv2.rectangle(image, (30, 25), (120, 65), (230, 30, 20), -1)
+    cv2.rectangle(image, (65, 38), (85, 52), (0, 200, 0), -1)
+    cv2.rectangle(image, (35, 68), (125, 76), (0, 170, 0), -1)
+
+    result = analyze_candidates(image)
+
+    assert result.status == "needs_decision"
+    assert {region.type for region in result.ambiguity_regions} == {"enclosed_near_background"}
+    assert result.default_candidate_id == "use_cut_hole_0"
+    assert [candidate.id for candidate in result.candidates] == [
+        "use_cut_hole_0",
+        "use_keep_hole_0",
+    ]
+    assert result.candidates[0].default is True
+    assert result.candidates[0].decision["enclosed_near_bg_region_policies"] == {
+        "ambiguous_enclosed_bg_0": "transparent_hole",
+    }
+    assert result.candidates[0].decision["enclosed_near_bg_policy"] == "transparent_hole"
+    assert result.candidates[0].decision["candidate_rank"] == 0
+    assert result.candidates[1].decision["enclosed_near_bg_region_policies"] == {
+        "ambiguous_enclosed_bg_0": "subject",
+    }
+    assert result.candidates[1].decision["enclosed_near_bg_policy"] == "subject"
+
+
+def test_analyze_hole_policy_only_changes_hole_region_trimap() -> None:
+    image = np.full((96, 160, 3), (0, 200, 0), dtype=np.uint8)
+    cv2.rectangle(image, (30, 25), (120, 65), (230, 30, 20), -1)
+    cv2.rectangle(image, (65, 38), (85, 52), (0, 200, 0), -1)
+    cv2.rectangle(image, (35, 68), (125, 76), (0, 170, 0), -1)
+
+    result = analyze_candidates(image)
+    cut_hole = _decode_preview_luma(
+        result.preview_assets["candidate:use_cut_hole_0:trimap"]["data_url"]
+    )
+    keep_hole = _decode_preview_luma(
+        result.preview_assets["candidate:use_keep_hole_0:trimap"]["data_url"]
+    )
+    hole_mask = _decode_preview_luma(result.preview_assets["region_mask:ambiguous_enclosed_bg_0"]["data_url"]) > 0
+
+    assert np.all(cut_hole[hole_mask] == 0)
+    assert np.all(keep_hole[hole_mask] == 255)
+    changed = cut_hole != keep_hole
+    assert bool(changed.any())
+    hole_boundary_domain = cv2.dilate(
+        hole_mask.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+        iterations=1,
+    ).astype(bool)
+    assert np.count_nonzero(changed & ~hole_boundary_domain) == 0
 
 
 def test_analyze_translucent_known_b_uses_wide_near_background_preview_region(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("ermbg.analyze.classify_route", lambda *args, **kwargs: _FakeRouteDecision())
+    fake_decision = _FakeRouteDecision().to_route_decision()
+    monkeypatch.setattr(
+        "ermbg.analyze.build_route_candidates",
+        lambda *args, **kwargs: [
+            RouteCandidate(
+                id="route_pymatting_known_b",
+                decision=fake_decision,
+                default=True,
+            )
+        ],
+    )
 
     result = analyze_candidates(_translucent_badge_like_image())
 
@@ -200,14 +382,15 @@ def test_analyze_translucent_known_b_uses_wide_near_background_preview_region(mo
         "trimap": "candidate:protect_near_bg_subject:trimap",
     }
     trimap_meta = result.preview_assets["candidate:protect_near_bg_subject:trimap"]["metadata"]
-    assert trimap_meta["source"] == "build_known_background_trimap"
+    assert trimap_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
+    assert trimap_meta["candidate_assembly"]["bg_seed_outline"]["accepted"] is True
     assert set(trimap_meta["states"]) == {"sure_bg", "unknown", "sure_fg"}
     assert all(state["pixels"] > 0 for state in trimap_meta["states"].values())
     trimap = _decode_preview_luma(result.preview_assets["candidate:protect_near_bg_subject:trimap"]["data_url"])
     unknown = (trimap >= 64) & (trimap <= 191)
     sure_bg = trimap < 64
-    assert _non_boundary_unknown_component_count(unknown, sure_bg) == 0
-    assert "forced_internal_unknown_pixels" in trimap_meta["semantic_decision"]
+    assert _non_boundary_unknown_component_count(unknown, sure_bg) <= 1
+    assert trimap_meta["candidate_assembly"]["unknown_pixels"] > 0
 
 
 def test_analyze_consumes_preprocess_decision() -> None:

@@ -18,11 +18,14 @@ from .settings import get_direct_worker_url
 DEFAULT_DIRECT_WORKER_URL = get_direct_worker_url()
 
 
-def _to_png_bytes(image: ImageLike) -> bytes:
+def _to_png_bytes(image: ImageLike, *, preserve_alpha: bool = False) -> bytes:
     if isinstance(image, (str, Path)):
-        pil = Image.open(image).convert("RGB")
+        loaded = Image.open(image)
+        has_alpha = loaded.mode in ("RGBA", "LA") or (loaded.mode == "P" and "transparency" in loaded.info)
+        pil = loaded.convert("RGBA" if preserve_alpha and has_alpha else "RGB")
     elif isinstance(image, Image.Image):
-        pil = image.convert("RGB")
+        has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+        pil = image.convert("RGBA" if preserve_alpha and has_alpha else "RGB")
     else:
         arr = np.asarray(image)
         if arr.ndim == 2:
@@ -31,7 +34,10 @@ def _to_png_bytes(image: ImageLike) -> bytes:
                 mask = mask * 255.0
             pil = Image.fromarray(np.clip(mask + 0.5, 0, 255).astype(np.uint8), mode="L")
         elif arr.ndim == 3 and arr.shape[2] >= 3:
-            pil = Image.fromarray(arr[..., :3].astype(np.uint8), mode="RGB")
+            if preserve_alpha and arr.shape[2] >= 4:
+                pil = Image.fromarray(arr[..., :4].astype(np.uint8), mode="RGBA")
+            else:
+                pil = Image.fromarray(arr[..., :3].astype(np.uint8), mode="RGB")
         else:
             raise ValueError("direct worker image must be path, PIL image, or HxWx3/4 numpy array")
     buf = io.BytesIO()
@@ -71,7 +77,9 @@ def matte_image_direct_worker(
     pymatting_bg_threshold: float | None = None,
     pymatting_fg_threshold: float | None = None,
     pymatting_boundary_band_px: int | None = None,
-    pymatting_auto_adapt: bool | None = None,
+    pymatting_adapt_bg_threshold: bool | None = None,
+    pymatting_adapt_fg_threshold: bool | None = None,
+    pymatting_adapt_boundary_band: bool | None = None,
     pymatting_cg_maxiter: int | None = None,
     pymatting_cg_rtol: float | None = None,
     pymatting_trimap_mode: str | None = None,
@@ -88,7 +96,7 @@ def matte_image_direct_worker(
     timeout: float = 240.0,
 ) -> MatteResponse:
     """Run one image through the remote direct-worker HTTP backend."""
-    files = {"image": ("input.png", _to_png_bytes(image), "image/png")}
+    files = {"image": ("input.png", _to_png_bytes(image, preserve_alpha=True), "image/png")}
     if corridorkey_hint_mask is not None:
         files["corridorkey_hint_mask"] = ("hint_mask.png", _to_png_bytes(corridorkey_hint_mask), "image/png")
     if user_keep_mask is not None:
@@ -144,8 +152,12 @@ def matte_image_direct_worker(
         data["pymatting_fg_threshold"] = str(float(pymatting_fg_threshold))
     if pymatting_boundary_band_px is not None:
         data["pymatting_boundary_band_px"] = str(int(pymatting_boundary_band_px))
-    if pymatting_auto_adapt is not None:
-        data["pymatting_auto_adapt"] = "true" if pymatting_auto_adapt else "false"
+    if pymatting_adapt_bg_threshold is not None:
+        data["pymatting_adapt_bg_threshold"] = "true" if pymatting_adapt_bg_threshold else "false"
+    if pymatting_adapt_fg_threshold is not None:
+        data["pymatting_adapt_fg_threshold"] = "true" if pymatting_adapt_fg_threshold else "false"
+    if pymatting_adapt_boundary_band is not None:
+        data["pymatting_adapt_boundary_band"] = "true" if pymatting_adapt_boundary_band else "false"
     if pymatting_cg_maxiter is not None:
         data["pymatting_cg_maxiter"] = str(int(pymatting_cg_maxiter))
     if pymatting_cg_rtol is not None:

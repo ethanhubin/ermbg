@@ -84,9 +84,12 @@ class RouteDecision:
     def to_dict(self) -> dict[str, Any]:
         corridorkey_analysis = self.analysis.get("corridorkey_analysis")
         parameter_profile = (
-            corridorkey_analysis.get("parameter_profile")
-            if isinstance(corridorkey_analysis, dict)
-            else None
+            self.params.get("parameter_profile")
+            or (
+                corridorkey_analysis.get("parameter_profile")
+                if isinstance(corridorkey_analysis, dict)
+                else None
+            )
         )
         payload = {
             "requested_backend": "auto",
@@ -105,6 +108,38 @@ class RouteDecision:
         }
         if isinstance(corridorkey_analysis, dict):
             payload["corridorkey_analysis"] = corridorkey_analysis
+        return payload
+
+
+@dataclass(frozen=True)
+class RouteCandidate:
+    """Analyze-stage model candidate.
+
+    A candidate owns one complete executable route decision plus the model
+    evidence that made it plausible. ``classify_route()`` remains a compatibility
+    wrapper over the selected default candidate.
+    """
+
+    id: str
+    decision: RouteDecision
+    evidence: dict[str, Any] = field(default_factory=dict)
+    risks: list[str] = field(default_factory=list)
+    default: bool = False
+
+    def to_route_decision(self) -> RouteDecision:
+        return self.decision
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = self.decision.to_dict()
+        payload.update(
+            {
+                "id": self.id,
+                "default": self.default,
+                "evidence": self.evidence,
+                "risks": self.risks,
+                "route_candidate_id": self.id,
+            }
+        )
         return payload
 
 
@@ -548,12 +583,13 @@ def _pymatting_route_params(
     background_color: tuple[int, int, int],
     *,
     execution_profile: str = "pymatting-known-b",
+    parameter_profile: str = "known_b_standard",
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
-    auto_adapt: bool = True,
 ) -> dict[str, Any]:
     return {
         "execution_profile": execution_profile,
+        "parameter_profile": parameter_profile,
         "pymatting_method": "cf",
         "pymatting_image_space": "linear",
         "pymatting_bg_source": "custom",
@@ -561,7 +597,9 @@ def _pymatting_route_params(
         "pymatting_bg_threshold": 3.5,
         "pymatting_fg_threshold": 24.0,
         "pymatting_boundary_band_px": 2,
-        "pymatting_auto_adapt": bool(auto_adapt),
+        "pymatting_adapt_bg_threshold": False,
+        "pymatting_adapt_fg_threshold": True,
+        "pymatting_adapt_boundary_band": True,
         "pymatting_cg_maxiter": 1000,
         "pymatting_cg_rtol": 1e-6,
         "pymatting_trimap_mode": trimap_mode,
@@ -599,6 +637,7 @@ def _known_bg_glow_route_params(
 ) -> dict[str, Any]:
     return {
         "execution_profile": "known-bg-glow",
+        "parameter_profile": f"known_bg_glow_{mode}",
         "known_bg_glow_mode": mode,
         "known_bg_glow_bg_color": tuple(int(c) for c in background_color),
         "known_bg_glow_target_color": tuple(int(c) for c in target_color),
@@ -733,15 +772,233 @@ def _complex_boundary_score(
     }
 
 
-def classify_route(
+def _character_like_foreground(
+    image_srgb: np.ndarray,
+    ck_analysis: Any,
+    complex_boundary_info: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Detect fine-detail complex foregrounds for CorridorKey parameters.
+
+    This is intentionally topology/alpha evidence, not canvas geometry. Export
+    padding, atlas cells, and crop choices can change aspect ratio without
+    changing the matting model, so width/height ratio must not decide the route.
+    The gate asks whether the known-screen foreground has many small boundary
+    fragments plus a real soft/translucent population.
+    """
+
+    del image_srgb
+    bbox = getattr(ck_analysis, "foreground_bbox_xyxy", None)
+    small_component_risk = bool(getattr(ck_analysis, "small_component_risk", False))
+    if not bbox:
+        return False, {
+            "enabled": True,
+            "accepted": False,
+            "reason": "missing foreground geometry",
+        }
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    fine_detail_edges = int(complex_boundary_info.get("small_edge_components") or 0)
+    semi_alpha_fraction = float(complex_boundary_info.get("semi_alpha_fraction") or 0.0)
+    boundary_edge_fraction = float(complex_boundary_info.get("boundary_edge_fraction") or 0.0)
+    fine_detail_gate = (
+        bool(complex_boundary_info.get("fine_detail_translucent_gate"))
+        or fine_detail_edges >= 240
+    )
+    accepted = (
+        fine_detail_gate
+        and semi_alpha_fraction >= 0.05
+        and boundary_edge_fraction >= 0.20
+    )
+    return accepted, {
+        "enabled": True,
+        "accepted": bool(accepted),
+        "bbox_xyxy": [x1, y1, x2, y2],
+        "small_component_risk": small_component_risk,
+        "fine_detail_small_edge_components": fine_detail_edges,
+        "semi_alpha_fraction": semi_alpha_fraction,
+        "boundary_edge_fraction": boundary_edge_fraction,
+        "fine_detail_gate": bool(fine_detail_gate),
+        "min_semi_alpha_fraction": 0.05,
+        "min_boundary_edge_fraction": 0.20,
+        "reason": "" if accepted else "below fine-detail topology/alpha gates",
+    }
+
+
+def _opaque_known_b_model_evidence(ck_analysis: Any) -> tuple[bool, dict[str, Any]]:
+    """Return whether near-screen evidence is better modeled as hard opaque UI.
+
+    This guard separates same-key opaque material and hard shadow bands from
+    translucent ramps before CorridorKey can claim them. It uses measured
+    support/plateau evidence instead of profile labels.
+    """
+
+    same_key_plateau_confidence = float(getattr(ck_analysis, "same_key_opaque_plateau_confidence", 0.0) or 0.0)
+    key_color_solid_fraction = float(getattr(ck_analysis, "key_color_solid_fraction", 0.0) or 0.0)
+    key_color_hard_density = float(getattr(ck_analysis, "key_color_hard_density", 0.0) or 0.0)
+    key_color_compact_fraction = float(getattr(ck_analysis, "key_color_compact_fraction", 0.0) or 0.0)
+    solid_hard_band = (
+        key_color_solid_fraction >= 0.55
+        and key_color_hard_density >= 0.08
+        and key_color_compact_fraction >= 0.80
+    )
+    same_key_plateau = same_key_plateau_confidence >= 0.85
+    accepted = bool(same_key_plateau or solid_hard_band)
+    return accepted, {
+        "enabled": True,
+        "accepted": accepted,
+        "same_key_plateau": bool(same_key_plateau),
+        "solid_hard_band": bool(solid_hard_band),
+        "same_key_opaque_plateau_confidence": same_key_plateau_confidence,
+        "key_color_solid_fraction": key_color_solid_fraction,
+        "key_color_hard_density": key_color_hard_density,
+        "key_color_compact_fraction": key_color_compact_fraction,
+        "same_key_plateau_confidence_min": 0.85,
+        "solid_fraction_min": 0.55,
+        "hard_density_min": 0.08,
+        "compact_fraction_min": 0.80,
+        "reason": "" if accepted else "no coherent opaque known-B material support",
+    }
+
+
+def _fine_detail_composite_evidence(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    *,
+    ck_analysis: Any,
+    complex_boundary_info: dict[str, Any],
+    opaque_known_b_model: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Detect hard-body plus fine-detail/translucent composite foregrounds.
+
+    This evidence is deliberately model-level. It does not look at aspect ratio,
+    canvas padding, or foreground bbox fractions; size is used only to normalize
+    support and component thresholds.
+    """
+
+    key = chromatic_key_alpha(
+        image_srgb,
+        background_color,
+        KeyerThresholds(bg_max=5.5, fg_min=18.0),
+    )
+    support = key >= 0.16
+    support_pixels = int(support.sum())
+    support_fraction = float(support.mean())
+    hard_support = key >= 0.92
+    semi = (key > 0.16) & (key < 0.92)
+    if support_pixels < max(32, int(key.size * 0.04)):
+        return False, {
+            "enabled": True,
+            "accepted": False,
+            "support_pixels": support_pixels,
+            "support_fraction": support_fraction,
+            "reason": "insufficient foreground support",
+        }
+
+    hard_pixels = image_srgb[hard_support]
+    if hard_pixels.size:
+        q = (hard_pixels >> 3).astype(np.int32)
+        hard_color_bins = int(np.unique(q[:, 0] * 32 * 32 + q[:, 1] * 32 + q[:, 2]).size)
+    else:
+        hard_color_bins = 0
+
+    semi_labels, _semi_map, semi_stats, _ = cv2.connectedComponentsWithStats(
+        semi.astype(np.uint8),
+        connectivity=8,
+    )
+    semi_alpha_islands = int(
+        sum(1 for i in range(1, semi_labels) if 4 <= int(semi_stats[i, cv2.CC_STAT_AREA]) <= 5000)
+    )
+    interior_semi_largest = int(
+        max((int(semi_stats[i, cv2.CC_STAT_AREA]) for i in range(1, semi_labels)), default=0)
+    )
+    distance_to_exterior = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3)
+    thin_structure_fraction = float(np.count_nonzero(support & (distance_to_exterior <= 2.0)) / max(1, support_pixels))
+
+    fine_edge_components = int(complex_boundary_info.get("small_edge_components") or 0)
+    boundary_edge_fraction = float(complex_boundary_info.get("boundary_edge_fraction") or 0.0)
+    key_transition_fraction = float(getattr(ck_analysis, "key_transition_fraction", 0.0) or 0.0)
+    small_component_risk = bool(getattr(ck_analysis, "small_component_risk", False))
+    key_color_compact_fraction = float(getattr(ck_analysis, "key_color_compact_fraction", 0.0) or 0.0)
+    semi_alpha_fraction = float(complex_boundary_info.get("semi_alpha_fraction") or 0.0)
+    fine_boundary_gate = (
+        support_fraction <= 0.75
+        and fine_edge_components >= 240
+        and boundary_edge_fraction >= 0.23
+        and hard_color_bins >= 500
+        and not opaque_known_b_model
+    )
+    soft_effect_gate = (
+        support_fraction <= 0.45
+        and key_transition_fraction >= 0.12
+        and semi_alpha_fraction >= 0.14
+        and semi_alpha_islands >= 24
+        and hard_color_bins >= 350
+        and small_component_risk
+        and not opaque_known_b_model
+    )
+    soft_boundary_detail_gate = (
+        support_fraction <= 0.35
+        and boundary_edge_fraction >= 0.24
+        and semi_alpha_fraction >= 0.035
+        and hard_color_bins >= 700
+        and semi_alpha_islands >= 24
+        and interior_semi_largest <= 64
+        and key_color_compact_fraction <= 0.08
+        and not opaque_known_b_model
+    )
+    accessory_gate = semi_alpha_islands >= 8 or interior_semi_largest >= max(64, int(round(key.size * 0.001)))
+    accepted = bool((fine_boundary_gate or soft_effect_gate or soft_boundary_detail_gate) and accessory_gate)
+    return accepted, {
+        "enabled": True,
+        "accepted": accepted,
+        "fine_boundary_gate": bool(fine_boundary_gate),
+        "soft_effect_gate": bool(soft_effect_gate),
+        "soft_boundary_detail_gate": bool(soft_boundary_detail_gate),
+        "fine_edge_components": fine_edge_components,
+        "boundary_edge_fraction": boundary_edge_fraction,
+        "key_transition_fraction": key_transition_fraction,
+        "semi_alpha_fraction": semi_alpha_fraction,
+        "hard_color_bins": hard_color_bins,
+        "semi_alpha_islands": semi_alpha_islands,
+        "interior_semi_largest": interior_semi_largest,
+        "thin_structure_fraction": thin_structure_fraction,
+        "support_pixels": support_pixels,
+        "support_fraction": support_fraction,
+        "small_component_risk": small_component_risk,
+        "key_color_compact_fraction": key_color_compact_fraction,
+        "opaque_known_b_model_guard": bool(opaque_known_b_model),
+        "support_fraction_max": 0.75,
+        "fine_edge_components_min": 240,
+        "boundary_edge_fraction_min": 0.23,
+        "hard_color_bins_min": 500,
+        "semi_alpha_islands_min": 8,
+        "soft_effect_support_fraction_max": 0.45,
+        "soft_effect_key_transition_fraction_min": 0.12,
+        "soft_effect_semi_alpha_fraction_min": 0.14,
+        "soft_effect_semi_alpha_islands_min": 24,
+        "soft_effect_hard_color_bins_min": 350,
+        "soft_boundary_detail_support_fraction_max": 0.35,
+        "soft_boundary_detail_boundary_edge_fraction_min": 0.24,
+        "soft_boundary_detail_semi_alpha_fraction_min": 0.035,
+        "soft_boundary_detail_hard_color_bins_min": 700,
+        "soft_boundary_detail_semi_alpha_islands_min": 24,
+        "soft_boundary_detail_interior_semi_largest_max": 64,
+        "soft_boundary_detail_key_color_compact_fraction_max": 0.08,
+        "base_gate": bool(fine_boundary_gate),
+        "accessory_gate": bool(accessory_gate),
+        "reason": "" if accepted else "below fine-detail composite evidence gate",
+    }
+
+
+def build_route_candidates(
     image_srgb: np.ndarray,
     source_alpha: np.ndarray | None = None,
     *,
     screen_mode: str = "auto",
     preset: str = "auto",
     fallback_background_color: tuple[int, int, int] = (0, 200, 0),
-) -> RouteDecision:
-    """Select the concrete production route for ``backend='auto'``.
+) -> list[RouteCandidate]:
+    """Build executable model candidates for ``backend='auto'``.
 
     Broad policy:
     - clean source alpha passes through;
@@ -753,24 +1010,31 @@ def classify_route(
       fallback background color rather than invoking RMBG.
     """
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
-        raise ValueError("classify_route() expects HxWx3 sRGB uint8")
+        raise ValueError("build_route_candidates() expects HxWx3 sRGB uint8")
 
     legacy = classify_strategy(image_srgb, source_alpha=source_alpha)
     if legacy.passthrough:
-        return RouteDecision(
-            route="rgba_passthrough",
-            asset_kind="rgba",
-            backend="rgba_passthrough",
-            params={},
-            confidence=1.0,
-            reasons=["clean_source_alpha"],
-            analysis={"strategy": {
-                "name": legacy.name,
-                "bg_type": legacy.bg_type,
-                "image_type": legacy.image_type,
-                "extras": legacy.extras,
-            }},
-        )
+        return [
+            RouteCandidate(
+                id="route_rgba_passthrough",
+                default=True,
+                decision=RouteDecision(
+                    route="rgba_passthrough",
+                    asset_kind="rgba",
+                    backend="rgba_passthrough",
+                    params={},
+                    confidence=1.0,
+                    reasons=["clean_source_alpha"],
+                    analysis={"strategy": {
+                        "name": legacy.name,
+                        "bg_type": legacy.bg_type,
+                        "image_type": legacy.image_type,
+                        "extras": legacy.extras,
+                    }},
+                ),
+                evidence={"alpha_hygiene": legacy.extras.get("hygiene", {})},
+            )
+        ]
 
     from .corridorkey import corridorkey_analyze_asset
     from .pymatting_refine import estimate_stable_background_color
@@ -800,72 +1064,6 @@ def classify_route(
         "corridorkey_analysis": ck.to_dict(),
     }
 
-    if known_corridor_screen:
-        from .known_bg_glow import analyze_known_bg_glow
-
-        glow = analyze_known_bg_glow(image_srgb, ck.background_color)
-        analysis["known_bg_glow"] = glow.to_dict()
-        if glow.accepted:
-            reasons.append(f"known_bg_{glow.mode}_glow_uses_known_bg_glow")
-            return RouteDecision(
-                route="known_bg_glow",
-                asset_kind="glow",
-                backend="known_bg_glow",
-                params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
-                confidence=float(max(0.70, ck.background_confidence)),
-                reasons=reasons,
-                analysis=analysis,
-            )
-
-    asset_kind = _route_asset_kind(
-        image_srgb,
-        profile,
-        ck.screen_mode if known_corridor_screen else "unknown",
-    )
-    button_corridor_profiles = {"translucent_button"}
-    complex_button_boundary, complex_button_info = _complex_boundary_score(
-        image_srgb,
-        ck.background_color,
-    )
-    analysis["complex_button_boundary"] = complex_button_info
-    complex_button_can_use_corridorkey = (
-        complex_button_boundary
-        and not profile.startswith("opaque_hard_ui")
-        and profile != "key_color_material"
-    )
-    if known_corridor_screen and (
-        asset_kind in {"icon", "character"}
-        or (asset_kind == "button" and (profile in button_corridor_profiles or complex_button_can_use_corridorkey))
-    ):
-        if asset_kind == "character":
-            execution_profile = "corridorkey-character"
-        elif asset_kind == "button":
-            execution_profile = "corridorkey-transparent-button"
-        elif profile == "screen_tinted_translucency":
-            execution_profile = "corridorkey-effect-icon"
-        else:
-            execution_profile = "corridorkey-shaped-icon"
-
-        params = _corridorkey_route_params(ck, execution_profile=execution_profile)
-        if asset_kind == "button":
-            # The router owns the transparent/glass-button decision and sends
-            # the complete execution recipe. Downstream code should not infer
-            # button behavior from CorridorKey's generic semantic profile.
-            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
-        if complex_button_can_use_corridorkey and asset_kind == "button" and profile not in button_corridor_profiles:
-            reasons.append(f"button_{profile}_complex_boundary_uses_corridorkey")
-        else:
-            reasons.append(f"{asset_kind}_{profile}_uses_corridorkey")
-        return RouteDecision(
-            route="corridorkey",
-            asset_kind=asset_kind,
-            backend="corridorkey",
-            params=params,
-            confidence=float(max(0.50, ck.background_confidence)),
-            reasons=reasons,
-            analysis=analysis,
-        )
-
     stable_bg, stable_info = estimate_stable_background_color(
         image_srgb,
         seed_bg=ck.background_color if known_corridor_screen else None,
@@ -879,85 +1077,245 @@ def classify_route(
         else None,
     )
     analysis["stable_background"] = stable_info
+    model_background = ck.background_color if known_corridor_screen else stable_bg
+
+    candidates: list[RouteCandidate] = []
     if stable_info.get("accepted", False):
-        trimap_mode = "standard"
-        unknown_grow_px = 0
-        # Threshold intent: the semantic profile can be won by key_color_material
-        # even when a same-key opaque plateau exists. The outline trimap should
-        # depend on measured plateau+outline evidence instead of that winner.
-        # Keep the plateau gate below the semantic 0.85 cutoff so outlined
-        # icon/button shapes with white glyphs still qualify, but require the
-        # dominant same-key ownership gate and a successful outline extractor to
-        # avoid using this mode on weak spill/glow residue.
-        same_key_outline_candidate = (
-            asset_kind == "button"
-            and float(ck.subject_key_color_risk) >= 0.45
-            and float(ck.same_key_opaque_plateau_confidence) >= 0.65
-        )
-        if same_key_outline_candidate:
-            from .pymatting_refine import analyze_same_key_opaque_body_outline
+        from .known_bg_glow import analyze_known_bg_glow
 
-            body_outline = analyze_same_key_opaque_body_outline(
-                image_srgb,
-                stable_bg,
-                bg_threshold=3.5,
+        glow = analyze_known_bg_glow(image_srgb, model_background)
+        analysis["known_bg_glow"] = glow.to_dict()
+        if glow.accepted:
+            candidates.append(
+                RouteCandidate(
+                    id="route_known_bg_glow",
+                    default=True,
+                    decision=RouteDecision(
+                        route="known_bg_glow",
+                        asset_kind="glow",
+                        backend="known_bg_glow",
+                        params=_known_bg_glow_route_params(glow.background_color, glow.target_color, mode=glow.mode),
+                        confidence=float(max(0.70, ck.background_confidence)),
+                        reasons=[f"known_bg_{glow.mode}_glow_uses_known_bg_glow"],
+                        analysis=analysis,
+                    ),
+                    evidence={
+                        "background_solvability": stable_info,
+                        "glow_evidence": glow.to_dict(),
+                    },
+                )
             )
-            analysis["same_key_opaque_body_outline"] = body_outline
-            if body_outline.get("accepted", False):
-                trimap_mode = "same_key_opaque_body_outline"
-                unknown_grow_px = 2
+
+    complex_button_boundary, complex_button_info = _complex_boundary_score(
+        image_srgb,
+        model_background,
+    )
+    analysis["complex_button_boundary"] = complex_button_info
+    opaque_known_b_model, opaque_known_b_info = _opaque_known_b_model_evidence(ck)
+    analysis["opaque_known_b_model"] = opaque_known_b_info
+    character_like, character_like_info = _character_like_foreground(
+        image_srgb,
+        ck,
+        complex_button_info,
+    )
+    analysis["character_like_foreground"] = character_like_info
+    fine_detail_composite, fine_detail_info = _fine_detail_composite_evidence(
+        image_srgb,
+        model_background,
+        ck_analysis=ck,
+        complex_boundary_info=complex_button_info,
+        opaque_known_b_model=opaque_known_b_model,
+    )
+    analysis["fine_detail_composite_evidence"] = fine_detail_info
+    complex_translucent_model = (
+        (complex_button_boundary or fine_detail_composite)
+        and not opaque_known_b_model
+    )
+    asset_kind = _route_asset_kind(
+        image_srgb,
+        profile,
+        ck.screen_mode if known_corridor_screen else "unknown",
+    )
+    if stable_info.get("accepted", False):
+        known_b_reasons: list[str] = []
         if asset_kind == "button":
-            reasons.append(f"button_{profile}_uses_known_b_pymatting")
+            known_b_reasons.append(f"button_{profile}_uses_known_b_pymatting")
         elif not known_corridor_screen:
-            reasons.append("non_green_blue_stable_background_uses_known_b_pymatting")
+            known_b_reasons.append("non_green_blue_stable_background_uses_known_b_pymatting")
         else:
-            reasons.append(f"deterministic_{profile}_uses_known_b_pymatting")
-        return RouteDecision(
-            route="pymatting_known_b",
-            asset_kind=asset_kind if asset_kind != "unknown" else "known_bg_graphic",
-            backend="pymatting_known_b",
-            params=_pymatting_route_params(
-                stable_bg,
-                execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
-                trimap_mode=trimap_mode,
-                unknown_grow_px=unknown_grow_px,
-                auto_adapt=not known_corridor_screen,
-            ),
-            confidence=float(max(0.45, ck.background_confidence, 0.80)),
-            reasons=reasons,
-            analysis=analysis,
+            known_b_reasons.append(f"deterministic_{profile}_uses_known_b_pymatting")
+        known_b_confidence = 0.78 if known_corridor_screen and complex_translucent_model else float(max(0.45, ck.background_confidence, 0.80))
+        candidates.append(
+            RouteCandidate(
+                id="route_pymatting_known_b",
+                decision=RouteDecision(
+                    route="pymatting_known_b",
+                    asset_kind=asset_kind if asset_kind != "unknown" else "known_bg_graphic",
+                    backend="pymatting_known_b",
+                    params=_pymatting_route_params(
+                        stable_bg,
+                        execution_profile="pymatting-hard-button" if asset_kind == "button" else "pymatting-known-bg",
+                        parameter_profile="known_b_hard_button_standard"
+                        if asset_kind == "button"
+                        else "known_b_background_standard",
+                    ),
+                    confidence=float(known_b_confidence),
+                    reasons=known_b_reasons,
+                    analysis=analysis,
+                ),
+                evidence={
+                    "background_solvability": stable_info,
+                    "opaque_known_b_evidence": {
+                        "accepted": True,
+                        "stable_known_background": True,
+                        "route_profile_after_model": profile,
+                    },
+                },
+                risks=["fine_detail_composite_model_ambiguity"] if known_corridor_screen and fine_detail_composite else [],
+            )
         )
 
-    reasons.append("unknown_or_unstable_background_uses_pymatting_fallback")
+    if known_corridor_screen and stable_info.get("accepted", False) and complex_translucent_model:
+        fine_detail_character_composite = bool(
+            fine_detail_info.get("fine_boundary_gate") or fine_detail_info.get("soft_effect_gate")
+        )
+        soft_boundary_detail = bool(fine_detail_info.get("soft_boundary_detail_gate"))
+        if character_like or fine_detail_character_composite:
+            asset_kind = "character"
+            execution_profile = "corridorkey-character"
+        elif soft_boundary_detail:
+            asset_kind = "button"
+            execution_profile = "corridorkey-shaped-icon"
+        else:
+            asset_kind = "button"
+            execution_profile = "corridorkey-transparent-button"
+
+        params = _corridorkey_route_params(ck, execution_profile=execution_profile)
+        if execution_profile == "corridorkey-transparent-button":
+            # The router owns the transparent/glass-button decision and sends
+            # the complete execution recipe. Downstream code should not infer
+            # button behavior from CorridorKey's generic semantic profile.
+            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
+        if soft_boundary_detail and not fine_detail_character_composite:
+            ck_reasons = ["soft_boundary_detail_foreground_uses_corridorkey"]
+        elif fine_detail_composite:
+            ck_reasons = ["fine_detail_composite_foreground_uses_corridorkey"]
+        elif character_like:
+            ck_reasons = ["fine_detail_complex_foreground_uses_corridorkey"]
+        else:
+            ck_reasons = ["complex_translucent_known_screen_uses_corridorkey"]
+        ck_confidence = float(max(0.86, ck.background_confidence)) if (complex_button_boundary or fine_detail_composite) else 0.72
+        candidates.append(
+            RouteCandidate(
+                id="route_corridorkey",
+                decision=RouteDecision(
+                    route="corridorkey",
+                    asset_kind=asset_kind,
+                    backend="corridorkey",
+                    params=params,
+                    confidence=ck_confidence,
+                    reasons=ck_reasons,
+                    analysis=analysis,
+                ),
+                evidence={
+                    "background_solvability": stable_info,
+                    "translucent_mix_evidence": complex_button_info,
+                    "fine_detail_composite_evidence": fine_detail_info,
+                    "opaque_known_b_model_guard": opaque_known_b_info,
+                },
+                risks=["known_b_hard_opaque_counter_candidate"] if candidates else [],
+            )
+        )
+
+    if candidates:
+        default = select_default_route_candidate(candidates)
+        return [
+            RouteCandidate(
+                id=candidate.id,
+                decision=candidate.decision,
+                evidence=candidate.evidence,
+                risks=candidate.risks,
+                default=candidate.id == default.id,
+            )
+            for candidate in candidates
+        ]
+
     fallback_params = _pymatting_route_params(
         fallback_background_color,
         execution_profile="pymatting-fallback",
+        parameter_profile="pymatting_fallback",
     )
-    # Unknown fallback is not a true measured known-B screen. The normal
-    # adaptive thresholding treats noisy/colorful borders as background noise
-    # and can raise the foreground threshold until the trimap has no foreground
-    # seeds. Use fixed thresholds so PyMatting receives a valid, bounded trimap.
-    fallback_params["pymatting_auto_adapt"] = False
-    return RouteDecision(
-        route="pymatting_fallback",
-        asset_kind=asset_kind if asset_kind != "unknown" else "unknown_fallback",
-        backend="pymatting_fallback",
-        # Fallback is intentionally deterministic and bounded: unknown inputs
-        # may not have a true known-B screen, but the production auto path must
-        # stay on the PyMatting/CorridorKey family and never trigger the slow
-        # RMBG model path from the RouteMatte node.
-        params=fallback_params,
-        confidence=float(max(0.10, ck.background_confidence)),
-        reasons=reasons,
-        analysis=analysis,
-    )
+    # Unknown fallback is not a true measured known-B screen. Keep every adaptive
+    # inference off so PyMatting receives a valid, bounded trimap.
+    fallback_params["pymatting_adapt_bg_threshold"] = False
+    fallback_params["pymatting_adapt_fg_threshold"] = False
+    fallback_params["pymatting_adapt_boundary_band"] = False
+    return [
+        RouteCandidate(
+            id="route_pymatting_fallback",
+            default=True,
+            decision=RouteDecision(
+                route="pymatting_fallback",
+                asset_kind=asset_kind if asset_kind != "unknown" else "unknown_fallback",
+                backend="pymatting_fallback",
+                # Fallback is intentionally deterministic and bounded: unknown inputs
+                # may not have a true known-B screen, but the production auto path must
+                # stay on the PyMatting/CorridorKey family and never trigger the slow
+                # RMBG model path from the RouteMatte node.
+                params=fallback_params,
+                confidence=float(max(0.10, ck.background_confidence)),
+                reasons=["unknown_or_unstable_background_uses_pymatting_fallback"],
+                analysis=analysis,
+            ),
+            evidence={
+                "background_solvability": stable_info,
+                "fallback_risk": {"unstable_or_unknown_background": True},
+            },
+            risks=["background_not_stably_solved"],
+        )
+    ]
+
+
+def select_default_route_candidate(candidates: list[RouteCandidate]) -> RouteCandidate:
+    """Select the default executable candidate from Analyze model candidates."""
+
+    if not candidates:
+        raise ValueError("select_default_route_candidate() requires at least one candidate")
+    explicit = [candidate for candidate in candidates if candidate.default]
+    if explicit:
+        return explicit[0]
+    return max(candidates, key=lambda candidate: float(candidate.decision.confidence))
+
+
+def classify_route(
+    image_srgb: np.ndarray,
+    source_alpha: np.ndarray | None = None,
+    *,
+    screen_mode: str = "auto",
+    preset: str = "auto",
+    fallback_background_color: tuple[int, int, int] = (0, 200, 0),
+) -> RouteDecision:
+    """Compatibility wrapper returning the selected default route candidate."""
+
+    return select_default_route_candidate(
+        build_route_candidates(
+            image_srgb,
+            source_alpha=source_alpha,
+            screen_mode=screen_mode,
+            preset=preset,
+            fallback_background_color=fallback_background_color,
+        )
+    ).to_route_decision()
 
 
 __all__ = [
     "Strategy",
     "RouteDecision",
+    "RouteCandidate",
     "AlphaHygiene",
     "classify_strategy",
+    "build_route_candidates",
+    "select_default_route_candidate",
     "classify_route",
     "assess_source_alpha",
 ]

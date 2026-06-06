@@ -34,6 +34,21 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
+def test_web_upload_decode_preserves_indexed_transparency():
+    palette = Image.new("P", (3, 2))
+    palette.putpalette([220, 30, 30, 0, 0, 0] + [0, 0, 0] * 254)
+    palette.putdata([0, 1, 0, 1, 0, 1])
+    palette.info["transparency"] = 1
+    buf = BytesIO()
+    palette.save(buf, format="PNG")
+
+    decoded = web._image_from_upload_bytes(buf.getvalue())
+
+    assert decoded.mode == "RGBA"
+    alpha = np.asarray(decoded, dtype=np.uint8)[..., 3]
+    assert alpha.tolist() == [[255, 0, 255], [0, 255, 0]]
+
+
 def _box_mask_png_bytes(box: tuple[slice, slice]) -> bytes:
     mask = np.zeros((16, 16), dtype=np.uint8)
     mask[box] = 255
@@ -148,7 +163,7 @@ def test_index_serves_upload_ui():
     assert '<option value="comfy-rmbg">comfy-rmbg</option>' not in response.text
     assert 'id="corridorkey-settings" open' in response.text
     assert 'id="pymatting-settings" open' in response.text
-    assert '<span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked>' in response.text
+    assert 'name="pymatting_auto_adapt"' not in response.text
     assert 'id="background-repair" name="background_repair" type="checkbox"' in response.text
     assert 'fetch("/api/checkerboard-background"' not in response.text
     assert 'const legacyMatteCandidatesCompatEndpoint = "/api/matte-candidates";' not in response.text
@@ -163,6 +178,10 @@ def test_index_serves_upload_ui():
     assert "function serverSemanticPreviewAsset(candidate, mode)" in response.text
     assert "function semanticPreviewKind(candidate)" in response.text
     assert "function semanticCandidateDisplayLabel(candidate, fallback)" in response.text
+    assert "function executionAnalysisPayload(payload, selectedCandidate)" in response.text
+    assert "selectedTrimapAsset ? { [selectedTrimapRef]: selectedTrimapAsset } : {}" in response.text
+    assert "copy.preview = { assets: { trimap: selectedTrimapRef } };" in response.text
+    assert "delete copy.preview;" in response.text
     assert 'raw === "Auto default" || raw === "auto_default" ? "默认" : raw' in response.text
     assert "function routeAssetKindLabel(payload)" in response.text
     assert 'return raw ? labels[raw] || raw : ""' in response.text
@@ -181,7 +200,7 @@ def test_index_serves_upload_ui():
     assert "await executeSemanticCandidate(selected)" not in response.text
     assert 'statusEl.textContent = selectedSemanticCandidate ? "候选已就绪，点击抠图执行" : "请选择候选后抠图"' in response.text
     assert 'executeFormData.append("selected_candidate_id"' in response.text
-    assert 'executeFormData.append("analysis_payload", JSON.stringify(pendingAnalyzePayload))' in response.text
+    assert 'executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(pendingAnalyzePayload, candidate)))' in response.text
     assert 'formData.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
     assert 'id="pymatting-advanced"' in response.text
     assert 'name="pymatting_method"' in response.text
@@ -435,6 +454,8 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'id="preview-button"' in response.text
     assert '<button id="preview-button" type="button" disabled>预览</button>' in response.text
     assert '<button id="confirm" type="button" disabled>切图</button>' in response.text
+    assert '<label>边距<input id="padding" type="number" min="0" step="1" value="4"></label>' in response.text
+    assert 'data.append("padding", padding.value || "4")' in response.text
     assert ".background-repair-field { grid-column: 1; }" in response.text
     assert ".slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }" in response.text
     assert ".slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }" in response.text
@@ -504,7 +525,7 @@ def test_batch_page_serves_batch_queue_entry():
     assert 'fetch("/api/analyze-candidates"' in response.text
     assert 'fetch("/api/execute-candidate"' in response.text
     assert 'executeFormData.append("selected_candidate_id"' in response.text
-    assert 'executeFormData.append("analysis_payload", JSON.stringify(analysisPayload))' in response.text
+    assert 'executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(analysisPayload, semanticCandidate)))' in response.text
     assert '"/api/batch-results.zip"' in response.text
     assert 'sessionStorage.getItem("ermbgBatchQueue")' in response.text
     assert '<option value="auto" selected>Auto Route</option>' in response.text
@@ -1664,6 +1685,85 @@ def test_execute_candidate_endpoint_passes_semantic_decision_to_direct_worker(mo
     assert response.json()["execution_server_url"] == web.DEFAULT_DIRECT_WORKER_URL
 
 
+def test_execute_candidate_endpoint_applies_shadow_candidate_mode(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "shadow_mode": "auto",
+            "selected_candidate_id": "use_opaque_body",
+            "semantic_decision": json.dumps(
+                {
+                    "button_body_policy": "opaque_subject",
+                    "pymatting_trimap_mode": "same_key_opaque_body_outline",
+                    "pymatting_unknown_grow_px": 2,
+                }
+            ),
+            "analysis_payload": json.dumps(
+                {
+                    "status": "needs_decision",
+                    "route": {
+                        "route": "pymatting_known_b",
+                        "algorithm": "pymatting_known_b",
+                        "params": {"pymatting_trimap_mode": "standard", "pymatting_unknown_grow_px": 0},
+                    },
+                    "candidates": [
+                        {
+                            "id": "use_opaque_body",
+                            "decision": {
+                                "button_body_policy": "opaque_subject",
+                                "pymatting_trimap_mode": "same_key_opaque_body_outline",
+                                "pymatting_unknown_grow_px": 2,
+                            },
+                        }
+                    ],
+                }
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["shadow_mode"] == "auto"
+    assert captured["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert captured["pymatting_unknown_grow_px"] == 2
+    assert captured["semantic_decision"] == {
+        "button_body_policy": "opaque_subject",
+        "pymatting_trimap_mode": "same_key_opaque_body_outline",
+        "pymatting_unknown_grow_px": 2,
+    }
+
+
 def test_execute_candidate_endpoint_passes_selected_candidate_trimap_to_direct_worker(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -1811,6 +1911,95 @@ def test_execute_candidate_endpoint_passes_analysis_route_decision_to_direct_wor
     assert payload["execution_backend"] == "direct-corridorkey"
 
 
+def test_execute_candidate_endpoint_uses_selected_route_candidate(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_corridorkey",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-corridorkey"},
+                "auto_route": {
+                    "requested_backend": "direct-corridorkey",
+                    "route": "corridorkey",
+                    "execution_backend": "direct-corridorkey",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    analysis = {
+        "status": "needs_decision",
+        "analysis_id": "analysis_route_candidates",
+        "default_route_candidate_id": "route_pymatting_known_b",
+        "default_candidate_id": "route_pymatting_known_b__auto_default",
+        "route": {
+            "id": "route_pymatting_known_b",
+            "route": "pymatting_known_b",
+            "algorithm": "pymatting_known_b",
+            "backend": "pymatting_known_b",
+            "params": {"pymatting_bg_color": [0, 200, 0]},
+        },
+        "route_candidates": [
+            {
+                "id": "route_pymatting_known_b",
+                "route": "pymatting_known_b",
+                "algorithm": "pymatting_known_b",
+                "backend": "pymatting_known_b",
+                "params": {"pymatting_bg_color": [0, 200, 0]},
+            },
+            {
+                "id": "route_corridorkey",
+                "route": "corridorkey",
+                "algorithm": "corridorkey",
+                "backend": "corridorkey",
+                "execution_profile": "corridorkey-character",
+                "params": {"corridorkey_gamma_space": "Linear"},
+            },
+        ],
+        "candidates": [
+            {
+                "id": "route_corridorkey__auto_default",
+                "route_candidate_id": "route_corridorkey",
+                "decision": {"policy": "auto_default"},
+            }
+        ],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "route_corridorkey__auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    route_decision = captured["route_decision"]
+    assert isinstance(route_decision, dict)
+    assert route_decision["route"] == "corridorkey"
+    assert route_decision["execution_profile"] == "corridorkey-character"
+    assert route_decision["params"]["corridorkey_gamma_space"] == "Linear"
+    assert response.json()["execution_request"]["route"]["id"] == "route_corridorkey"
+
+
 def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -1856,7 +2045,9 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
                 "pymatting_bg_color": [255, 255, 255],
                 "pymatting_bg_threshold": 4.5,
                 "pymatting_fg_threshold": 28.0,
-                "pymatting_auto_adapt": False,
+                "pymatting_adapt_bg_threshold": False,
+                "pymatting_adapt_fg_threshold": False,
+                "pymatting_adapt_boundary_band": False,
                 "pymatting_boundary_band_px": 3,
             },
         },
@@ -1882,7 +2073,9 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
     assert captured["pymatting_bg_color"] == (255, 255, 255)
     assert captured["pymatting_bg_threshold"] == 4.5
     assert captured["pymatting_fg_threshold"] == 28.0
-    assert captured["pymatting_auto_adapt"] is False
+    assert captured["pymatting_adapt_bg_threshold"] is False
+    assert captured["pymatting_adapt_fg_threshold"] is False
+    assert captured["pymatting_adapt_boundary_band"] is False
     assert captured["pymatting_boundary_band_px"] == 3
     route_decision = captured["route_decision"]
     assert isinstance(route_decision, dict)
@@ -2509,7 +2702,6 @@ def test_matte_candidates_endpoint_accepts_pymatting_known_b_backend(monkeypatch
             "pymatting_bg_threshold": "4.5",
             "pymatting_fg_threshold": "28",
             "pymatting_boundary_band_px": "3",
-            "pymatting_auto_adapt": "false",
             "pymatting_cg_maxiter": "1500",
             "pymatting_cg_rtol": "0.00001",
         },
@@ -2523,7 +2715,9 @@ def test_matte_candidates_endpoint_accepts_pymatting_known_b_backend(monkeypatch
     assert captured["pymatting_bg_threshold"] == 4.5
     assert captured["pymatting_fg_threshold"] == 28.0
     assert captured["pymatting_boundary_band_px"] == 3
-    assert captured["pymatting_auto_adapt"] is False
+    assert captured["pymatting_adapt_bg_threshold"] is False
+    assert captured["pymatting_adapt_fg_threshold"] is True
+    assert captured["pymatting_adapt_boundary_band"] is True
     assert captured["pymatting_cg_maxiter"] == 1500
     assert captured["pymatting_cg_rtol"] == 0.00001
     payload = response.json()

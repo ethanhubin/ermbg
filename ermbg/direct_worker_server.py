@@ -41,6 +41,7 @@ class PreparedRequest:
     index: int
     filename: str
     rgb: np.ndarray
+    source_alpha: np.ndarray | None
     decision: RouteDecision
     route_sec: float
     decode_sec: float
@@ -61,9 +62,14 @@ def _executor() -> ProcessPoolExecutor | None:
     return _CPU_EXECUTOR
 
 
-def _decode_image_bytes(data: bytes) -> np.ndarray:
+def _decode_image_bytes(data: bytes) -> tuple[np.ndarray, np.ndarray | None]:
     try:
-        return np.asarray(Image.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
+        image = Image.open(io.BytesIO(data))
+        has_alpha = image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info)
+        if has_alpha:
+            rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8)
+            return rgba[..., :3].copy(), rgba[..., 3].astype(np.float32) / 255.0
+        return np.asarray(image.convert("RGB"), dtype=np.uint8), None
     except Exception as exc:
         raise ValueError(f"invalid image upload: {exc}") from exc
 
@@ -177,12 +183,12 @@ def _prepare_request(
     fallback_bg_color: tuple[int, int, int],
 ) -> PreparedRequest:
     t = time.perf_counter()
-    rgb = _decode_image_bytes(data)
+    rgb, source_alpha = _decode_image_bytes(data)
     decode_sec = time.perf_counter() - t
     t = time.perf_counter()
     decision = classify_route(
         rgb,
-        source_alpha=None,
+        source_alpha=source_alpha,
         screen_mode=corridorkey_screen_mode,  # type: ignore[arg-type]
         preset=corridorkey_preset,  # type: ignore[arg-type]
         fallback_background_color=fallback_bg_color,
@@ -192,6 +198,7 @@ def _prepare_request(
         index=index,
         filename=filename,
         rgb=rgb,
+        source_alpha=source_alpha,
         decision=decision,
         route_sec=route_sec,
         decode_sec=decode_sec,
@@ -233,12 +240,13 @@ def _prepare_request_from_route_decision(
     route_decision_payload: dict[str, Any],
 ) -> PreparedRequest:
     t = time.perf_counter()
-    rgb = _decode_image_bytes(data)
+    rgb, source_alpha = _decode_image_bytes(data)
     decode_sec = time.perf_counter() - t
     return PreparedRequest(
         index=index,
         filename=filename,
         rgb=rgb,
+        source_alpha=source_alpha,
         decision=_route_decision_from_payload(route_decision_payload),
         route_sec=0.0,
         decode_sec=decode_sec,
@@ -271,6 +279,7 @@ def _apply_execution_backend_override(
         bg_color = stable_bg if stable_info.get("accepted", False) else fallback_bg_color
         params = {
             "execution_profile": "pymatting-known-bg",
+            "parameter_profile": "known_b_manual_background_standard",
             "pymatting_method": "cf",
             "pymatting_image_space": "linear",
             "pymatting_bg_source": "custom",
@@ -278,7 +287,9 @@ def _apply_execution_backend_override(
             "pymatting_bg_threshold": 3.5,
             "pymatting_fg_threshold": 24.0,
             "pymatting_boundary_band_px": 2,
-            "pymatting_auto_adapt": True,
+            "pymatting_adapt_bg_threshold": False,
+            "pymatting_adapt_fg_threshold": True,
+            "pymatting_adapt_boundary_band": True,
             "pymatting_cg_maxiter": 1000,
             "pymatting_cg_rtol": 1e-6,
         }
@@ -304,6 +315,7 @@ def _apply_execution_backend_override(
         )
         params = {
             "execution_profile": "known-bg-glow",
+            "parameter_profile": f"known_bg_glow_{mode}",
             "known_bg_glow_mode": mode,
             "known_bg_glow_bg_color": glow.background_color,
             "known_bg_glow_target_color": glow.target_color,
@@ -325,7 +337,11 @@ def _apply_execution_backend_override(
         )
     if not isinstance(decision.analysis.get("corridorkey_analysis"), dict):
         raise HTTPException(status_code=400, detail="direct-corridorkey requires corridorkey analysis metadata")
-    params = {key: value for key, value in decision.params.items() if not key.startswith("pymatting_")}
+    params = {
+        key: value
+        for key, value in decision.params.items()
+        if not key.startswith("pymatting_") and key != "parameter_profile"
+    }
     params["execution_profile"] = "auto"
     params["corridorkey_execution_profile"] = "auto"
     return replace(
@@ -381,7 +397,9 @@ def _known_b_form_params(
     pymatting_bg_threshold: float | None,
     pymatting_fg_threshold: float | None,
     pymatting_boundary_band_px: int | None,
-    pymatting_auto_adapt: bool | None,
+    pymatting_adapt_bg_threshold: bool | None,
+    pymatting_adapt_fg_threshold: bool | None,
+    pymatting_adapt_boundary_band: bool | None,
     pymatting_cg_maxiter: int | None,
     pymatting_cg_rtol: float | None,
     pymatting_trimap_mode: str | None,
@@ -406,8 +424,12 @@ def _known_b_form_params(
         params["pymatting_fg_threshold"] = float(pymatting_fg_threshold)
     if pymatting_boundary_band_px is not None:
         params["pymatting_boundary_band_px"] = int(pymatting_boundary_band_px)
-    if pymatting_auto_adapt is not None:
-        params["pymatting_auto_adapt"] = bool(pymatting_auto_adapt)
+    if pymatting_adapt_bg_threshold is not None:
+        params["pymatting_adapt_bg_threshold"] = bool(pymatting_adapt_bg_threshold)
+    if pymatting_adapt_fg_threshold is not None:
+        params["pymatting_adapt_fg_threshold"] = bool(pymatting_adapt_fg_threshold)
+    if pymatting_adapt_boundary_band is not None:
+        params["pymatting_adapt_boundary_band"] = bool(pymatting_adapt_boundary_band)
     if pymatting_cg_maxiter is not None:
         params["pymatting_cg_maxiter"] = int(pymatting_cg_maxiter)
     if pymatting_cg_rtol is not None:
@@ -556,6 +578,7 @@ def _run_prepared_main(
             return direct_matte_from_decision(
                 prepared.rgb,
                 decision=prepared.decision,
+                source_alpha=prepared.source_alpha,
                 shadow_mode=shadow_mode,
                 corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
                 corridorkey_hint_mask=corridorkey_hint_mask,
@@ -566,17 +589,19 @@ def _run_prepared_main(
     return direct_matte_from_decision(
         prepared.rgb,
         decision=prepared.decision,
-            shadow_mode=shadow_mode,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-            corridorkey_hint_mask=corridorkey_hint_mask,
-            fallback_bg_color=fallback_bg_color,
-            ck_factory=_CK_FACTORY,
+        source_alpha=prepared.source_alpha,
+        shadow_mode=shadow_mode,
+        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+        corridorkey_hint_mask=corridorkey_hint_mask,
+        fallback_bg_color=fallback_bg_color,
+        ck_factory=_CK_FACTORY,
         route_sec=prepared.route_sec,
     )
 
 
 def _cpu_worker(
     rgb: np.ndarray,
+    source_alpha: np.ndarray | None,
     decision: RouteDecision,
     *,
     shadow_mode: str,
@@ -589,6 +614,7 @@ def _cpu_worker(
     result = direct_matte_from_decision(
         rgb,
         decision=decision,
+        source_alpha=source_alpha,
         shadow_mode=shadow_mode,
         corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         fallback_bg_color=fallback_bg_color,
@@ -675,7 +701,9 @@ async def matte_endpoint(
     pymatting_bg_threshold: float | None = Form(None),
     pymatting_fg_threshold: float | None = Form(None),
     pymatting_boundary_band_px: int | None = Form(None),
-    pymatting_auto_adapt: bool | None = Form(None),
+    pymatting_adapt_bg_threshold: bool | None = Form(None),
+    pymatting_adapt_fg_threshold: bool | None = Form(None),
+    pymatting_adapt_boundary_band: bool | None = Form(None),
     pymatting_cg_maxiter: int | None = Form(None),
     pymatting_cg_rtol: float | None = Form(None),
     pymatting_trimap_mode: str | None = Form(None),
@@ -714,7 +742,9 @@ async def matte_endpoint(
         pymatting_bg_threshold=pymatting_bg_threshold,
         pymatting_fg_threshold=pymatting_fg_threshold,
         pymatting_boundary_band_px=pymatting_boundary_band_px,
-        pymatting_auto_adapt=pymatting_auto_adapt,
+        pymatting_adapt_bg_threshold=pymatting_adapt_bg_threshold,
+        pymatting_adapt_fg_threshold=pymatting_adapt_fg_threshold,
+        pymatting_adapt_boundary_band=pymatting_adapt_boundary_band,
         pymatting_cg_maxiter=pymatting_cg_maxiter,
         pymatting_cg_rtol=pymatting_cg_rtol,
         pymatting_trimap_mode=pymatting_trimap_mode,
@@ -750,12 +780,13 @@ async def matte_endpoint(
                 corridorkey_preset=corridorkey_preset,
                 fallback_bg_color=bg,
             )
-            decision = _apply_execution_backend_override(
-                prepared.decision,
-                execution_backend,
-                rgb=prepared.rgb,
-                fallback_bg_color=bg,
-            )
+            decision = prepared.decision
+        decision = _apply_execution_backend_override(
+            decision,
+            execution_backend,
+            rgb=prepared.rgb,
+            fallback_bg_color=bg,
+        )
         decision = _with_known_bg_glow_params(
             decision,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
@@ -866,6 +897,7 @@ async def batch_matte_endpoint(
                 executor.submit(
                     _cpu_worker,
                     item.rgb,
+                    item.source_alpha,
                     item.decision,
                     shadow_mode=shadow_mode,
                     corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,

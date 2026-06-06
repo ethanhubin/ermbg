@@ -354,7 +354,9 @@ def matte_image(
     pymatting_bg_threshold: float = 3.5,
     pymatting_fg_threshold: float = 24.0,
     pymatting_boundary_band_px: int = 2,
-    pymatting_auto_adapt: bool = True,
+    pymatting_adapt_bg_threshold: bool = False,
+    pymatting_adapt_fg_threshold: bool = True,
+    pymatting_adapt_boundary_band: bool = True,
     pymatting_cg_maxiter: int = 1000,
     pymatting_cg_rtol: float = 1e-6,
     pymatting_trimap_mode: str = "standard",
@@ -504,13 +506,12 @@ def matte_image(
     if backend in {"pymatting_known_b", "pymatting_fallback"}:
         if vlm_prior:
             raise ValueError("PyMatting Known-B does not support local vlm_prior")
-        return _matte_image_comfy_pymatting_known_b(
+        return _matte_image_pymatting_known_b(
             rgb,
             src_path=src_path,
             output_dir=output_dir,
             qa=qa,
             shadow_mode=shadow_mode,
-            comfy_url=comfy_url,
             method=auto_params.get("pymatting_method", pymatting_method),
             image_space=auto_params.get("pymatting_image_space", pymatting_image_space),
             bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
@@ -518,9 +519,28 @@ def matte_image(
             bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
             fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
             boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
-            auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
+            adapt_bg_threshold=auto_params.get("pymatting_adapt_bg_threshold", pymatting_adapt_bg_threshold),
+            adapt_fg_threshold=auto_params.get("pymatting_adapt_fg_threshold", pymatting_adapt_fg_threshold),
+            adapt_boundary_band=auto_params.get("pymatting_adapt_boundary_band", pymatting_adapt_boundary_band),
             cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
+            trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
+            unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", pymatting_unknown_grow_px),
+            input_preprocessed_known_b=auto_params.get(
+                "pymatting_input_preprocessed_known_b",
+                pymatting_input_preprocessed_known_b,
+            ),
+            input_background_normalization=auto_params.get(
+                "pymatting_background_normalization",
+                pymatting_background_normalization,
+            ),
+            normalize_known_background=auto_params.get(
+                "pymatting_normalize_known_background",
+                pymatting_normalize_known_background,
+            ),
+            semantic_decision=semantic_decision,
+            user_keep_mask=user_keep_alpha,
+            user_remove_mask=user_remove_alpha,
             auto_route=auto_route,
         )
 
@@ -552,7 +572,9 @@ def matte_image(
             bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
             fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
             boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
-            auto_adapt=auto_params.get("pymatting_auto_adapt", pymatting_auto_adapt),
+            adapt_bg_threshold=auto_params.get("pymatting_adapt_bg_threshold", pymatting_adapt_bg_threshold),
+            adapt_fg_threshold=auto_params.get("pymatting_adapt_fg_threshold", pymatting_adapt_fg_threshold),
+            adapt_boundary_band=auto_params.get("pymatting_adapt_boundary_band", pymatting_adapt_boundary_band),
             cg_maxiter=auto_params.get("pymatting_cg_maxiter", pymatting_cg_maxiter),
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
             trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
@@ -807,80 +829,6 @@ def _write_common_outputs(
     return out_dir
 
 
-def _matte_image_comfy_route_matte(
-    rgb: np.ndarray,
-    *,
-    source_alpha: np.ndarray | None,
-    src_path: str | None,
-    output_dir: str | Path | None,
-    qa: bool,
-    bg_color: tuple[int, int, int],
-    shadow_mode: str,
-    comfy_url: str,
-    corridorkey_screen_mode: str,
-    corridorkey_preset: str,
-    corridorkey_hard_ui_hint_mode: str,
-    pymatting_method: str,
-    pymatting_image_space: str,
-    pymatting_bg_source: str,
-    pymatting_bg_color: tuple[int, int, int] | None,
-    pymatting_bg_threshold: float,
-    pymatting_fg_threshold: float,
-    pymatting_boundary_band_px: int,
-    pymatting_auto_adapt: bool,
-    pymatting_cg_maxiter: int,
-    pymatting_cg_rtol: float,
-) -> MatteResponse:
-    from .probe.comfyui_route_matte import ComfyUIRouteMatteClient
-
-    client = ComfyUIRouteMatteClient(url=comfy_url, poll_interval=0.05)
-    remote = client.matte(
-        rgb,
-        source_alpha=source_alpha,
-        fallback_bg_color=bg_color,
-        shadow_mode=shadow_mode,
-        corridorkey_screen_mode=corridorkey_screen_mode,
-        corridorkey_preset=corridorkey_preset,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
-        pymatting_method=pymatting_method,
-        pymatting_image_space=pymatting_image_space,
-        pymatting_bg_source=pymatting_bg_source,
-        pymatting_bg_color=pymatting_bg_color,
-        pymatting_bg_threshold=pymatting_bg_threshold,
-        pymatting_fg_threshold=pymatting_fg_threshold,
-        pymatting_boundary_band_px=pymatting_boundary_band_px,
-        pymatting_auto_adapt=pymatting_auto_adapt,
-        pymatting_cg_maxiter=pymatting_cg_maxiter,
-        pymatting_cg_rtol=pymatting_cg_rtol,
-    )
-    report = dict(remote.report)
-    out_dir = _write_common_outputs(
-        rgb=rgb,
-        rgba=remote.rgba,
-        alpha=remote.alpha,
-        foreground=remote.foreground_srgb,
-        report=report,
-        src_path=src_path,
-        output_dir=output_dir,
-        qa=qa,
-        background_color=remote.background_color,
-        requested_backend="auto",
-    )
-    debug = dict(remote.debug)
-    debug.setdefault("soft_mask", remote.alpha)
-    debug.setdefault("shadow_alpha", np.zeros(remote.alpha.shape, dtype=np.float32))
-    return MatteResponse(
-        rgba=remote.rgba,
-        alpha=remote.alpha,
-        foreground_srgb=remote.foreground_srgb,
-        strategy_name=remote.strategy_name,
-        background_color=remote.background_color,
-        report=report,
-        output_dir=out_dir,
-        debug=debug,
-    )
-
-
 def _matte_image_pymatting_known_b(
     rgb: np.ndarray,
     *,
@@ -895,7 +843,9 @@ def _matte_image_pymatting_known_b(
     bg_threshold: float,
     fg_threshold: float,
     boundary_band_px: int,
-    auto_adapt: bool,
+    adapt_bg_threshold: bool,
+    adapt_fg_threshold: bool,
+    adapt_boundary_band: bool,
     cg_maxiter: int,
     cg_rtol: float,
     trimap_mode: str = "standard",
@@ -938,7 +888,9 @@ def _matte_image_pymatting_known_b(
 
     bg_info: dict[str, Any]
     effective_bg_source = bg_source
-    effective_auto_adapt = bool(auto_adapt)
+    effective_adapt_bg_threshold = bool(adapt_bg_threshold)
+    effective_adapt_fg_threshold = bool(adapt_fg_threshold)
+    effective_adapt_boundary_band = bool(adapt_boundary_band)
     if bg_source == "auto":
         selected_bg, bg_info = estimate_stable_background_color(rgb)
         if not bg_info.get("accepted", False):
@@ -947,10 +899,7 @@ def _matte_image_pymatting_known_b(
                 auto_bg_info=bg_info,
             )
             effective_bg_source = "custom"
-            # Unknown-background fallback is deliberately bounded. Adaptive
-            # thresholds can turn noisy/photo borders into over-broad background
-            # evidence, which is the failure mode this fallback is avoiding.
-            effective_auto_adapt = False
+            effective_adapt_bg_threshold = False
     elif bg_source == "green":
         selected_bg = (0, 200, 0)
         bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
@@ -986,9 +935,9 @@ def _matte_image_pymatting_known_b(
             bg_threshold=float(bg_threshold),
             outer_guard_px=1.0,
         )
-        # Same-key opaque UI needs a non-screen subject color so the standard
-        # trimap and PyMatting solve see clear foreground evidence. Use the
-        # measured known-B complement instead of a fixed color so green, blue,
+        # Same-key opaque UI needs a non-screen subject color so PyMatting sees
+        # clear foreground evidence inside the measured body-outline trimap.
+        # Use the known-B complement instead of a fixed color so green, blue,
         # and other saturated screen colors all get a high-contrast proxy.
         proxy_color = (255 - np.asarray(selected_bg, dtype=np.uint8)).astype(np.uint8)
         solver_rgb = rgb.copy()
@@ -999,9 +948,8 @@ def _matte_image_pymatting_known_b(
             "proxy_color": [int(c) for c in proxy_color],
             "proxy_color_source": "background_complement",
             "restore_uses_same_mask": True,
-            "solver_trimap_mode": "standard",
+            "solver_trimap_mode": requested_trimap_mode,
         }
-        effective_trimap_mode = "standard"
 
     if input_preprocessed_known_b:
         processing_rgb = solver_rgb
@@ -1025,7 +973,7 @@ def _matte_image_pymatting_known_b(
             selected_bg,
             bg_threshold=float(bg_threshold),
             fg_threshold=float(fg_threshold),
-            adaptive=effective_auto_adapt,
+            adaptive=effective_adapt_bg_threshold,
         )
 
     if explicit_trimap is not None:
@@ -1037,13 +985,23 @@ def _matte_image_pymatting_known_b(
             user_remove_mask=user_remove_mask,
         )
     else:
+        # Body-outline tracing is geometry evidence from the original asset.
+        # Proxy painting is color evidence for PyMatting; using it for tracing
+        # can erase the measured ridge that accepted this route.
+        trimap_source_rgb = (
+            rgb
+            if effective_trimap_mode == "same_key_opaque_body_outline"
+            else processing_rgb
+        )
         trimap, trimap_info = build_known_background_trimap(
-            processing_rgb,
+            trimap_source_rgb,
             selected_bg,
             bg_threshold=float(bg_threshold),
             fg_threshold=float(fg_threshold),
             boundary_band_px=int(boundary_band_px),
-            adaptive=effective_auto_adapt,
+            adapt_bg_threshold=effective_adapt_bg_threshold,
+            adapt_fg_threshold=effective_adapt_fg_threshold,
+            adapt_boundary_band=effective_adapt_boundary_band,
             trimap_mode=effective_trimap_mode,
             unknown_grow_px=int(unknown_grow_px),
             semantic_decision=semantic_decision_payload,
@@ -1184,8 +1142,9 @@ def _matte_image_pymatting_known_b(
                     "bg_threshold": float(bg_threshold),
                     "fg_threshold": float(fg_threshold),
                     "boundary_band_px": int(boundary_band_px),
-                    "auto_adapt": effective_auto_adapt,
-                    "requested_auto_adapt": bool(auto_adapt),
+                    "adapt_bg_threshold": effective_adapt_bg_threshold,
+                    "adapt_fg_threshold": effective_adapt_fg_threshold,
+                    "adapt_boundary_band": effective_adapt_boundary_band,
                     "cg_maxiter": int(cg_maxiter),
                     "cg_rtol": float(cg_rtol),
                     "trimap_mode": requested_trimap_mode,
@@ -1327,253 +1286,6 @@ def _matte_image_pymatting_known_b(
         alpha=alpha,
         foreground_srgb=subject_foreground_srgb,
         strategy_name="pymatting_known_b",
-        background_color=selected_bg,
-        report=report,
-        output_dir=out_dir,
-        debug=debug,
-    )
-
-
-def _matte_image_comfy_pymatting_known_b(
-    rgb: np.ndarray,
-    *,
-    src_path: str | None,
-    output_dir: str | Path | None,
-    qa: bool,
-    shadow_mode: str,
-    comfy_url: str,
-    method: str,
-    image_space: str,
-    bg_source: str,
-    bg_color: tuple[int, int, int] | None,
-    bg_threshold: float,
-    fg_threshold: float,
-    boundary_band_px: int,
-    auto_adapt: bool,
-    cg_maxiter: int,
-    cg_rtol: float,
-    auto_route: dict[str, Any] | None = None,
-) -> MatteResponse:
-    from .probe.comfyui_pymatting_known_b import ComfyUIPyMattingKnownBClient
-    from .pymatting_refine import (
-        build_known_background_trimap,
-        estimate_stable_background_color,
-        normalize_known_background_field,
-    )
-    from .trimap import trimap_to_uint8
-
-    method = method.removeprefix("pymatting-").lower().replace("_", "-")
-    if method not in {"cf", "knn", "lbdm", "lkm", "rw", "sm"}:
-        raise ValueError(f"Unsupported pymatting method: {method!r}")
-    if image_space not in {"linear", "sRGB"}:
-        raise ValueError("pymatting_image_space must be 'linear' or 'sRGB'")
-    bg_source = bg_source.strip().lower()
-    if bg_source not in {"auto", "green", "blue", "custom"}:
-        raise ValueError("pymatting_bg_source must be auto, green, blue, or custom")
-    if not 0.0 <= float(bg_threshold) < float(fg_threshold):
-        raise ValueError("pymatting_bg_threshold must be non-negative and less than pymatting_fg_threshold")
-    if int(boundary_band_px) < 0:
-        raise ValueError("pymatting_boundary_band_px must be >= 0")
-    if int(cg_maxiter) <= 0:
-        raise ValueError("pymatting_cg_maxiter must be > 0")
-    if float(cg_rtol) <= 0.0:
-        raise ValueError("pymatting_cg_rtol must be > 0")
-
-    bg_info: dict[str, Any]
-    effective_bg_source = bg_source
-    effective_auto_adapt = bool(auto_adapt)
-    if bg_source == "auto":
-        selected_bg, bg_info = estimate_stable_background_color(rgb)
-        if not bg_info.get("accepted", False):
-            bg_info = _pymatting_known_b_auto_background_fallback_info(
-                selected_bg=selected_bg,
-                auto_bg_info=bg_info,
-            )
-            effective_bg_source = "custom"
-            effective_auto_adapt = False
-    elif bg_source == "green":
-        selected_bg = (0, 200, 0)
-        bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
-    elif bg_source == "blue":
-        selected_bg = (0, 0, 200)
-        bg_info = {"accepted": True, "source": "preset_blue", "reason": "preset"}
-    else:
-        if bg_color is None:
-            raise ValueError("pymatting_bg_color is required when pymatting_bg_source='custom'")
-        selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
-        bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
-
-    processing_rgb, background_normalization = normalize_known_background_field(
-        rgb,
-        selected_bg,
-        bg_threshold=float(bg_threshold),
-        fg_threshold=float(fg_threshold),
-        adaptive=effective_auto_adapt,
-    )
-
-    # Build the same trimap locally for report/debug symmetry. The remote node
-    # uses the synced helper, so this is metadata parity rather than a second
-    # alpha solve.
-    trimap, trimap_info = build_known_background_trimap(
-        processing_rgb,
-        selected_bg,
-        bg_threshold=float(bg_threshold),
-        fg_threshold=float(fg_threshold),
-        boundary_band_px=int(boundary_band_px),
-        adaptive=effective_auto_adapt,
-    )
-    client = ComfyUIPyMattingKnownBClient(url=comfy_url)
-    remote = client.matte(
-        processing_rgb,
-        method=method,
-        image_space=image_space,
-        bg_source=effective_bg_source,
-        bg_color=selected_bg,
-        bg_threshold=float(bg_threshold),
-        fg_threshold=float(fg_threshold),
-        boundary_band_px=int(boundary_band_px),
-        auto_adapt=effective_auto_adapt,
-        cg_maxiter=int(cg_maxiter),
-        cg_rtol=float(cg_rtol),
-    )
-    subject_alpha = remote.alpha
-    subject_foreground_srgb = remote.foreground_srgb
-    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
-        processing_rgb,
-        subject_alpha=subject_alpha,
-        subject_foreground_srgb=subject_foreground_srgb,
-        background_color=selected_bg,
-        shadow_mode=shadow_mode,
-        repair_domain=trimap.unknown,
-    )
-    rgba = np.dstack(
-        [
-            rgba_rgb_srgb,
-            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-        ]
-    )
-    parameters = {
-        "method": method,
-        "image_space": image_space,
-        "bg_source": effective_bg_source,
-        "requested_bg_source": bg_source,
-        "bg_threshold": float(bg_threshold),
-        "fg_threshold": float(fg_threshold),
-        "boundary_band_px": int(boundary_band_px),
-        "auto_adapt": effective_auto_adapt,
-        "requested_auto_adapt": bool(auto_adapt),
-        "cg_maxiter": int(cg_maxiter),
-        "cg_rtol": float(cg_rtol),
-    }
-    report: dict[str, Any] = {
-        "diagnosis": None,
-        "background_color": list(selected_bg),
-        "despill_method": "remote_pymatting_known_background_unmix",
-        "matting_model": "pymatting",
-        "keyer": {},
-        "shadow": shadow_info,
-        "semantic_prior": {},
-        "strategy": {
-            "name": "comfy_pymatting_known_b",
-            "bg_type": "known",
-            "image_type": "graphic",
-            "keyer_mode": None,
-            "despill": "remote_known_background_unmix",
-            "passthrough": False,
-            "notes": "PyMatting alpha executed by remote ERMBG ComfyUI node.",
-            "extras": {
-                "background": bg_info,
-                "background_normalization": background_normalization,
-                "trimap": trimap_info,
-                "parameters": parameters,
-                "remote": remote.debug,
-            },
-        },
-    }
-    if auto_route is not None:
-        report["auto_route"] = auto_route
-
-    out_dir: Path | None = None
-    if output_dir is not None:
-        out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(src_path).stem if src_path else "matte"
-        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
-        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
-        ermbg_io.save_rgb(out_dir / f"{stem}_rgba_rgb.png", rgba_rgb_srgb)
-        ermbg_io.save_mask(out_dir / f"{stem}_pymatting_subject_alpha.png", subject_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
-        ermbg_io.save_mask(out_dir / f"{stem}_trimap.png", trimap_to_uint8(trimap))
-        if background_normalization.get("applied", False):
-            ermbg_io.save_rgb(out_dir / f"{stem}_normalized_input.png", processing_rgb)
-        if qa:
-            qa_dir = out_dir / f"{stem}_qa"
-            qa_metrics = run_qa(
-                image_srgb=processing_rgb,
-                rgba=rgba,
-                soft_mask=alpha,
-                background_color=selected_bg,
-                out_dir=qa_dir,
-            )
-            report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
-        report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        _write_output_manifest(
-            out_dir=out_dir,
-            stem=stem,
-            src_path=src_path,
-            report=report,
-            outputs={
-                "rgba": out_dir / f"{stem}_rgba.png",
-                "alpha": out_dir / f"{stem}_alpha.png",
-                "foreground": out_dir / f"{stem}_foreground.png",
-                "rgba_rgb": out_dir / f"{stem}_rgba_rgb.png",
-                "trimap": out_dir / f"{stem}_trimap.png",
-                "shadow": out_dir / f"{stem}_shadow.png",
-            },
-            report_path=report_path,
-            requested_backend="pymatting_known_b",
-        )
-    elif qa:
-        qa_metrics = run_qa(
-            image_srgb=processing_rgb,
-            rgba=rgba,
-            soft_mask=alpha,
-            background_color=selected_bg,
-            out_dir=Path("/tmp/_ermbg_qa_discard"),
-        )
-        report["qa"] = qa_metrics
-
-    debug = {
-        **remote.debug,
-        "strategy": report["strategy"],
-        "soft_mask": alpha,
-        "subject_alpha": subject_alpha,
-        "pymatting_subject_alpha": subject_alpha,
-        "pymatting_subject_foreground": subject_foreground_srgb,
-        "rgba_rgb": rgba_rgb_srgb,
-        "shadow_alpha": shadow_alpha,
-        "shadow_alpha_physical": shadow_alpha_physical,
-        "trimap_u8": remote.trimap_u8,
-        "pymatting_known_b": {
-            "background": bg_info,
-            "background_normalization": background_normalization,
-            "trimap": trimap_info,
-            "parameters": parameters,
-            "remote": remote.debug,
-        },
-        "shadow": shadow_info,
-    }
-    if auto_route is not None:
-        debug["auto_route"] = auto_route
-    return MatteResponse(
-        rgba=rgba,
-        alpha=alpha,
-        foreground_srgb=subject_foreground_srgb,
-        strategy_name="comfy_pymatting_known_b",
         background_color=selected_bg,
         report=report,
         output_dir=out_dir,
@@ -1842,6 +1554,7 @@ def _pymatting_known_b_shadow_patch(
     background_color: tuple[int, int, int],
     shadow_mode: str,
     repair_domain: np.ndarray,
+    force_shadow_layer: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Recover a black shadow layer only inside the trimap unknown domain."""
     subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
@@ -1863,6 +1576,7 @@ def _pymatting_known_b_shadow_patch(
         subject_foreground_srgb=subject_foreground_srgb,
         background_color=background_color,
         repair_domain=repair_domain,
+        force_shadow_layer=force_shadow_layer,
     )
 
 
@@ -1873,6 +1587,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     subject_foreground_srgb: np.ndarray,
     background_color: tuple[int, int, int],
     repair_domain: np.ndarray,
+    force_shadow_layer: bool = False,
     trusted_alpha_threshold: float = 0.98,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Reconstruct only the shadow layer in trimap unknown.
@@ -1922,6 +1637,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         )
     )
     foreground_other_max = np.max(np.delete(foreground, dominant, axis=2), axis=2)
+    repair_for_shadow = domain if force_shadow_layer else repair
     foreground_screen_like = (
         screen_dominant_bg
         & (foreground[..., dominant] > foreground_other_max + max(8.0, float(bg3[dominant]) * 0.04))
@@ -1932,13 +1648,30 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     # shadow layer over "green/blue foreground + lower subject alpha". This is
     # the enclosed-hole counterpart of the B003 hard-shadow failure mode.
     source_shadow_candidate = (
-        repair
+        repair_for_shadow
         & ~edge_subject_aa
         & foreground_screen_like
         & (subject > 0.05)
         & (source_shadow > 0.035)
         & (source_shadow_error < 8.0)
     )
+    relaxed_screen_residue = (
+        screen_dominant_bg
+        & (foreground[..., dominant] > foreground_other_max + max(4.0, float(bg3[dominant]) * 0.02))
+        & (foreground[..., dominant] < float(bg3[dominant]) * 0.85)
+    )
+    semantic_shadow_candidate = (
+        force_shadow_layer
+        & repair_for_shadow
+        & ~edge_subject_aa
+        & screen_dominant_bg
+        & (foreground[..., dominant] > foreground_other_max + max(3.0, float(bg3[dominant]) * 0.012))
+        & (foreground[..., dominant] < float(bg3[dominant]) * 0.98)
+        & (subject > 0.05)
+        & (source_shadow > 0.015)
+        & (source_shadow_error < 10.0)
+    )
+    source_shadow_candidate |= semantic_shadow_candidate
 
     direction = foreground - bg
     direction_denom = np.sum(direction * direction, axis=2)
@@ -1978,13 +1711,15 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
     )
     after_subject = np.where(reduce_subject, after_reduce_candidate, before)
     force_shadow_write = source_shadow_candidate & (after_forced_shadow + 0.02 < after_subject)
-    relaxed_screen_residue = (
-        screen_dominant_bg
-        & (foreground[..., dominant] > foreground_other_max + max(4.0, float(bg3[dominant]) * 0.02))
-        & (foreground[..., dominant] < float(bg3[dominant]) * 0.85)
-    )
+    # A user/Analyze semantic ``Solve shadow`` choice is an ownership decision,
+    # not a pure reconstruction contest. Screen-colored opaque foreground and a
+    # black shadow layer can replay the source equally well against the known B;
+    # when the candidate region has already been put into explicit trimap
+    # unknown and matches the source-shadow model, honor that decomposition.
+    if force_shadow_layer:
+        force_shadow_write |= semantic_shadow_candidate
     clean_source_shadow = (
-        repair
+        repair_for_shadow
         & ~edge_subject_aa
         & relaxed_screen_residue
         & (subject > 0.05)
@@ -2077,9 +1812,10 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
         "subject_alpha_reduce_p95": float(np.percentile(alpha_reduce, 95.0)) if alpha_reduce.size else 0.0,
         "subject_alpha_reduce_max": float(alpha_reduce.max()) if alpha_reduce.size else 0.0,
         "repair_domain_pixels": int(domain.sum()),
-        "trusted_alpha_threshold": float(trusted_alpha_threshold),
-        "trusted_domain_pixels": int((domain & trusted).sum()),
-        "mean_alpha": float(shadow_display[write].mean()) if shadow_written else 0.0,
+            "trusted_alpha_threshold": float(trusted_alpha_threshold),
+            "trusted_domain_pixels": int((domain & trusted).sum()),
+            "force_shadow_layer": bool(force_shadow_layer),
+            "mean_alpha": float(shadow_display[write].mean()) if shadow_written else 0.0,
         "p95_alpha": float(np.percentile(shadow_display[write], 95.0)) if shadow_written else 0.0,
         "max_alpha": float(shadow_display[write].max()) if shadow_written else 0.0,
         "objective_shadow": {
@@ -2089,6 +1825,7 @@ def _pymatting_known_b_unknown_domain_shadow_patch(
             "candidate_pixels": int((repair & (solved_shadow > 0.0)).sum()),
             "written_pixels": int(write.sum()),
             "source_shadow_candidate_pixels": int(source_shadow_candidate.sum()),
+            "semantic_forced_shadow_candidate_pixels": int(semantic_shadow_candidate.sum()),
             "source_shadow_seed_written_pixels": int(force_shadow_write.sum()),
             "source_shadow_connected_written_pixels": int(source_shadow_connected_write.sum()),
             "source_shadow_written_pixels": int(source_shadow_write.sum()),

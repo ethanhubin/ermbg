@@ -43,6 +43,32 @@ def test_direct_worker_client_omits_unspecified_corridorkey_overrides(monkeypatc
     assert "corridorkey_gamma_space" not in captured["data"]
 
 
+def test_direct_worker_client_preserves_main_image_alpha(monkeypatch):
+    captured = {}
+
+    def fake_post(url, *, files, data, timeout):
+        del url, data, timeout
+        captured["image_bytes"] = files["image"][1]
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "rgba_png_base64": _rgba_png_base64(),
+                "background": [0, 200, 0],
+                "execution_backend": "direct-passthrough",
+            },
+        )
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    rgba = np.zeros((2, 3, 4), dtype=np.uint8)
+    rgba[..., :3] = (220, 30, 30)
+    rgba[..., 3] = [[0, 64, 255], [0, 128, 255]]
+
+    client_mod.matte_image_direct_worker(rgba, direct_worker_url="http://worker.test")
+
+    uploaded = np.asarray(Image.open(io.BytesIO(captured["image_bytes"])).convert("RGBA"), dtype=np.uint8)
+    assert np.array_equal(uploaded[..., 3], rgba[..., 3])
+
+
 def test_direct_worker_client_sends_explicit_corridorkey_overrides(monkeypatch):
     captured = {}
 

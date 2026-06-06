@@ -310,10 +310,6 @@ def _cpu_parallel_backend(decision: Any) -> bool:
 
 def _execution_backend_from_decision(decision: Any) -> str:
     selected_backend = str(getattr(decision, "backend", "") or "")
-    if selected_backend == "comfy-pymatting-known-b":
-        return "direct-pymatting-known-b"
-    if selected_backend == "comfy-corridorkey":
-        return "direct-corridorkey"
     if selected_backend == "passthrough":
         return "direct-passthrough"
     return selected_backend

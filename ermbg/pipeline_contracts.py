@@ -189,6 +189,7 @@ class SemanticCandidate:
     id: str
     label: str
     decision: dict[str, Any]
+    route_candidate_id: str | None = None
     default: bool = False
     confidence: float | None = None
     intent: str | None = None
@@ -205,6 +206,7 @@ class SemanticCandidate:
             "default": self.default,
             "confidence": self.confidence,
             "risk_level": self.risk_level,
+            "route_candidate_id": self.route_candidate_id,
             "decision": self.decision,
             "regions": self.regions,
             "preview": self.preview,
@@ -223,6 +225,7 @@ class SemanticCandidate:
             intent=str(payload["intent"]) if payload.get("intent") is not None else None,
             default=bool(payload.get("default", False)),
             confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+            route_candidate_id=str(payload["route_candidate_id"]) if payload.get("route_candidate_id") is not None else None,
             risk_level=risk,  # type: ignore[arg-type]
             decision=_dict(payload.get("decision")),
             regions=_str_list(payload.get("regions")),
@@ -235,6 +238,8 @@ class SemanticCandidate:
 class AnalyzeResult:
     status: AnalysisStatus
     route: dict[str, Any]
+    route_candidates: list[dict[str, Any]] = field(default_factory=list)
+    default_route_candidate_id: str | None = None
     ambiguity_regions: list[AmbiguityRegion] = field(default_factory=list)
     candidates: list[SemanticCandidate] = field(default_factory=list)
     default_candidate_id: str | None = None
@@ -249,7 +254,9 @@ class AnalyzeResult:
             "analysis_id": self.analysis_id,
             "preprocess": self.preprocess.to_dict() if self.preprocess else None,
             "default_candidate_id": self.default_candidate_id,
+            "default_route_candidate_id": self.default_route_candidate_id,
             "route": self.route,
+            "route_candidates": self.route_candidates,
             "ambiguity_regions": [region.to_dict() for region in self.ambiguity_regions],
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "preview_assets": self.preview_assets,
@@ -267,7 +274,13 @@ class AnalyzeResult:
             analysis_id=str(payload["analysis_id"]) if payload.get("analysis_id") is not None else None,
             preprocess=PreprocessDecision.from_dict(preprocess_payload) if isinstance(preprocess_payload, dict) else None,
             default_candidate_id=str(payload["default_candidate_id"]) if payload.get("default_candidate_id") is not None else None,
+            default_route_candidate_id=str(payload["default_route_candidate_id"]) if payload.get("default_route_candidate_id") is not None else None,
             route=_dict(payload.get("route")),
+            route_candidates=[
+                dict(candidate)
+                for candidate in _list(payload.get("route_candidates"))
+                if isinstance(candidate, dict)
+            ],
             ambiguity_regions=[
                 AmbiguityRegion.from_dict(region)
                 for region in _list(payload.get("ambiguity_regions"))

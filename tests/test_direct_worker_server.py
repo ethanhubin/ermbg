@@ -24,6 +24,14 @@ def _png_bytes(rgb: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
+def _rgba_png_bytes(rgba: np.ndarray) -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    Image.fromarray(rgba.astype(np.uint8), mode="RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _gray_png_bytes(gray: np.ndarray) -> bytes:
     import io
 
@@ -103,6 +111,66 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert payload["server_elapsed_sec"] >= 0.0
 
 
+def test_direct_worker_server_routes_with_uploaded_source_alpha(monkeypatch):
+    rgba = np.zeros((4, 5, 4), dtype=np.uint8)
+    rgba[..., :3] = (220, 30, 30)
+    rgba[..., 3] = 255
+    rgba[:2, :2, 3] = 0
+    captured: dict[str, object] = {}
+
+    def fake_classify_route(rgb, *, source_alpha, **kwargs):
+        del kwargs
+        captured["source_alpha"] = source_alpha
+        return RouteDecision(
+            route="rgba_passthrough",
+            asset_kind="rgba",
+            backend="rgba_passthrough",
+            params={},
+            confidence=1.0,
+            reasons=["clean_source_alpha"],
+        )
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        captured["prepared_alpha"] = prepared.source_alpha
+        return DirectWorkerResult(
+            response=MatteResponse(
+                rgba=rgba,
+                alpha=rgba[..., 3].astype(np.float32) / 255.0,
+                foreground_srgb=rgba[..., :3],
+                strategy_name="direct_passthrough",
+                background_color=(0, 200, 0),
+                debug={},
+            ),
+            timings={"route_sec": 0.01, "backend_sec": 0.02},
+            metadata={
+                "algorithm": "rgba_passthrough",
+                "execution_backend": "direct-passthrough",
+                "route": "rgba_passthrough",
+                "asset_kind": "rgba",
+                "parameter_profile": None,
+                "execution_profile": None,
+            },
+        )
+
+    monkeypatch.setattr(server, "classify_route", fake_classify_route)
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _rgba_png_bytes(rgba), "image/png")},
+        data={"include_image": "false"},
+    )
+
+    assert response.status_code == 200
+    alpha = captured["source_alpha"]
+    assert isinstance(alpha, np.ndarray)
+    assert np.array_equal((alpha * 255.0 + 0.5).astype(np.uint8), rgba[..., 3])
+    assert captured["prepared_alpha"] is alpha
+    assert response.json()["execution_backend"] == "direct-passthrough"
+
+
 def test_direct_worker_server_matte_endpoint_consumes_explicit_route_decision(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     captured: dict[str, object] = {}
@@ -150,6 +218,58 @@ def test_direct_worker_server_matte_endpoint_consumes_explicit_route_decision(mo
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["execution_backend"] == "direct-pymatting-known-b"
+
+
+def test_direct_worker_server_explicit_route_decision_can_still_force_backend(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    def fail_classify(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("execute stage must not classify when route_decision is provided")
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        captured["decision"] = prepared.decision
+        result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
+        result.metadata["algorithm"] = prepared.decision.backend
+        result.metadata["execution_backend"] = "direct-corridorkey"
+        result.metadata["route"] = prepared.decision.route
+        return result
+
+    monkeypatch.setattr(server, "classify_route", fail_classify)
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    route_decision = {
+        "route": "pymatting_known_b",
+        "algorithm": "pymatting_known_b",
+        "backend": "pymatting_known_b",
+        "asset_kind": "button",
+        "execution_profile": "pymatting-hard-button",
+        "confidence": 0.93,
+        "reasons": ["analyze_contract"],
+        "params": {"pymatting_bg_source": "custom", "pymatting_bg_color": [0, 200, 0]},
+        "analysis": {"corridorkey_analysis": {"parameter_profile": "opaque_hard_ui_no_shadow"}},
+    }
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={
+            "include_image": "false",
+            "route_decision": json.dumps(route_decision),
+            "execution_backend": "direct-corridorkey",
+        },
+    )
+
+    assert response.status_code == 200
+    decision = captured["decision"]
+    assert isinstance(decision, RouteDecision)
+    assert decision.route == "corridorkey"
+    assert decision.backend == "corridorkey"
+    assert "manual_direct_corridorkey_backend" in decision.reasons
+    assert response.json()["execution_backend"] == "direct-corridorkey"
 
 
 def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):

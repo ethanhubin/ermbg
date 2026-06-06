@@ -161,7 +161,9 @@ class WebExecutionRequest:
     pymatting_bg_threshold: float = 3.5
     pymatting_fg_threshold: float = 24.0
     pymatting_boundary_band_px: int = 2
-    pymatting_auto_adapt: bool = True
+    pymatting_adapt_bg_threshold: bool = False
+    pymatting_adapt_fg_threshold: bool = True
+    pymatting_adapt_boundary_band: bool = True
     pymatting_cg_maxiter: int = 1000
     pymatting_cg_rtol: float = 1e-6
     known_bg_glow_material_strength: float = 1.0
@@ -359,7 +361,8 @@ def _image_from_upload_bytes(data: bytes) -> Image.Image:
     except Exception as e:
         raise HTTPException(status_code=400, detail="Uploaded file is not a readable image.") from e
 
-    return image.convert("RGBA" if image.mode == "RGBA" else "RGB")
+    has_alpha = image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info)
+    return image.convert("RGBA" if has_alpha else "RGB")
 
 
 def _load_upload_image(upload: UploadFile) -> Image.Image:
@@ -556,14 +559,45 @@ def _semantic_candidate_payload(
     analysis_payload: dict[str, Any],
     selected_candidate_id: str,
 ) -> tuple[dict[str, Any], float | None]:
+    candidate = _semantic_candidate_record(analysis_payload, selected_candidate_id)
+    if candidate is not None:
+        confidence = candidate.get("confidence")
+        return (
+            dict(candidate.get("decision") or {}),
+            float(confidence) if isinstance(confidence, (int, float)) else None,
+        )
+    return ({"policy": "auto_default"}, None)
+
+
+def _semantic_candidate_record(
+    analysis_payload: dict[str, Any],
+    selected_candidate_id: str,
+) -> dict[str, Any] | None:
     for candidate in analysis_payload.get("candidates", []):
         if isinstance(candidate, dict) and candidate.get("id") == selected_candidate_id:
-            confidence = candidate.get("confidence")
-            return (
-                dict(candidate.get("decision") or {}),
-                float(confidence) if isinstance(confidence, (int, float)) else None,
-            )
-    return ({"policy": "auto_default"}, None)
+            return candidate
+    return None
+
+
+def _selected_route_payload_from_analysis(
+    analysis_payload: dict[str, Any],
+    selected_candidate_id: str,
+) -> dict[str, Any]:
+    route_candidates = analysis_payload.get("route_candidates")
+    candidate = _semantic_candidate_record(analysis_payload, selected_candidate_id)
+    route_candidate_id = None
+    if isinstance(candidate, dict):
+        route_candidate_id = candidate.get("route_candidate_id")
+        decision = candidate.get("decision")
+        if route_candidate_id is None and isinstance(decision, dict):
+            route_candidate_id = decision.get("route_candidate_id")
+    if route_candidate_id is None:
+        route_candidate_id = analysis_payload.get("default_route_candidate_id")
+    if isinstance(route_candidates, list) and route_candidate_id is not None:
+        for route_candidate in route_candidates:
+            if isinstance(route_candidate, dict) and route_candidate.get("id") == route_candidate_id:
+                return dict(route_candidate)
+    return _route_payload_from_contract(analysis_payload)
 
 
 def _selected_preprocess_ids_from_analysis(analysis_payload: dict[str, Any]) -> list[str]:
@@ -677,7 +711,7 @@ def _known_b_preprocess_from_contract(
         background,
         bg_threshold=float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
         fg_threshold=float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
-        adaptive=bool(route_params.get("pymatting_auto_adapt", pymatting_params.get("pymatting_auto_adapt", True))),
+        adaptive=False,
     )
     normalization = dict(decision.metadata.get("known_background_normalization") or {})
     execution_params = {
@@ -687,7 +721,9 @@ def _known_b_preprocess_from_contract(
         "pymatting_bg_color": background,
         "pymatting_bg_threshold": float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
         "pymatting_fg_threshold": float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
-        "pymatting_auto_adapt": bool(route_params.get("pymatting_auto_adapt", pymatting_params.get("pymatting_auto_adapt", True))),
+        "pymatting_adapt_bg_threshold": bool(route_params.get("pymatting_adapt_bg_threshold", pymatting_params.get("pymatting_adapt_bg_threshold", False))),
+        "pymatting_adapt_fg_threshold": bool(route_params.get("pymatting_adapt_fg_threshold", pymatting_params.get("pymatting_adapt_fg_threshold", True))),
+        "pymatting_adapt_boundary_band": bool(route_params.get("pymatting_adapt_boundary_band", pymatting_params.get("pymatting_adapt_boundary_band", True))),
     }
     for key in (
         "pymatting_method",
@@ -735,6 +771,7 @@ def _semantic_execution_summary(
     ) or "auto_default"
     candidate_decision, candidate_confidence = _semantic_candidate_payload(analysis_payload, selected)
     decision_payload = semantic_decision_payload or candidate_decision
+    selected_route = _selected_route_payload_from_analysis(analysis_payload, selected)
     source = "web_user" if analyze is not None and analyze.status == "needs_decision" else "auto_default"
     semantic_decision = SemanticDecision(
         candidate_id=selected,
@@ -746,13 +783,14 @@ def _semantic_execution_summary(
     execution_request = ExecutionRequest(
         analysis_id=analyze.analysis_id if analyze is not None else None,
         preprocess=preprocess,
-        route=analyze.route if analyze is not None else {},
+        route=selected_route,
         selected_candidate_id=selected,
         semantic_decision=semantic_decision,
         user_mask=user_mask,
         metadata={
             "schema": "ermbg.execution_request.summary.v1",
             "source": "web_execute_candidate",
+            "selected_route_candidate_id": selected_route.get("id") or selected_route.get("route_candidate_id"),
         },
     )
     summary = semantic_manifest_summary(
@@ -1254,7 +1292,6 @@ def _matte_page_html() -> str:
       <details class="settings" id="pymatting-settings" open>
         <summary>[PyMatting]</summary>
         <div class="settings-grid">
-          <label class="check-label"><span>自动适配</span><input id="pm-auto-adapt" name="pymatting_auto_adapt" type="checkbox" checked></label>
           <div class="settings-row">
             <label>算法<select id="pm-method" name="pymatting_method"><option value="cf" selected>closed form</option><option value="knn">KNN</option><option value="lbdm">learning based</option><option value="lkm">large kernel</option><option value="rw">random walk</option><option value="sm">shared matting</option></select></label>
             <label>色彩空间<select id="pm-image-space" name="pymatting_image_space"><option value="linear" selected>linear</option><option value="sRGB">sRGB</option></select></label>
@@ -1493,6 +1530,31 @@ def _matte_page_html() -> str:
     function serverSemanticPreviewAsset(candidate, mode) { const assets = pendingAnalyzePayload && pendingAnalyzePayload.preview_assets; const refs = candidate && candidate.preview && candidate.preview.assets; const key = refs && refs[mode]; const asset = assets && key ? assets[key] : null; return asset && asset.data_url ? asset.data_url : null; }
     function semanticPreviewKind(candidate) { const refs = candidate && candidate.preview && candidate.preview.assets ? candidate.preview.assets : {}; if (refs.trimap) return "trimap"; if (refs.hint) return "hint"; if (refs.overlay) return "overlay"; return "regions"; }
     function semanticCandidateDisplayLabel(candidate, fallback) { const raw = (candidate && (candidate.label || candidate.id) ? String(candidate.label || candidate.id) : fallback).trim(); return raw === "Auto default" || raw === "auto_default" ? "默认" : raw; }
+    function executionAnalysisPayload(payload, selectedCandidate) {
+      if (!payload || typeof payload !== "object") return {};
+      const slim = { ...payload };
+      const selectedId = selectedCandidate && selectedCandidate.id ? String(selectedCandidate.id) : String(payload.default_candidate_id || "auto_default");
+      const selectedRefs = selectedCandidate && selectedCandidate.preview && selectedCandidate.preview.assets ? selectedCandidate.preview.assets : {};
+      const selectedTrimapRef = selectedRefs && selectedRefs.trimap ? String(selectedRefs.trimap) : "";
+      const selectedTrimapAsset = selectedTrimapRef && payload.preview_assets ? payload.preview_assets[selectedTrimapRef] : null;
+      // Analyze includes full-size PNG data URLs for UI previews. Execute only
+      // needs the selected candidate trimap so local semantic assembly survives
+      // without exceeding Starlette's 1MB text-part parser limit.
+      slim.preview_assets = selectedTrimapAsset ? { [selectedTrimapRef]: selectedTrimapAsset } : {};
+      if (Array.isArray(slim.candidates)) {
+        slim.candidates = slim.candidates.map((candidate) => {
+          if (!candidate || typeof candidate !== "object") return candidate;
+          const copy = { ...candidate };
+          if (String(copy.id || "") === selectedId && selectedTrimapRef) {
+            copy.preview = { assets: { trimap: selectedTrimapRef } };
+          } else {
+            delete copy.preview;
+          }
+          return copy;
+        });
+      }
+      return slim;
+    }
     function routeAssetKindLabel(payload) { const route = payload && payload.route ? payload.route : {}; const raw = route.asset_kind || route.asset_type || ""; const labels = { asset: "资产", button: "按钮", character: "角色", game_ui: "游戏 UI", icon: "图标" }; return raw ? labels[raw] || raw : ""; }
     function loadPreviewImage(src) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("候选预览载入失败")); img.src = src; }); }
     function regionBox(region, width, height) { const raw = Array.isArray(region && region.bbox_xyxy) ? region.bbox_xyxy : [0, 0, 0, 0]; const x1 = Math.max(0, Math.min(width, Number(raw[0]) || 0)); const y1 = Math.max(0, Math.min(height, Number(raw[1]) || 0)); const x2 = Math.max(x1, Math.min(width, Number(raw[2]) || 0)); const y2 = Math.max(y1, Math.min(height, Number(raw[3]) || 0)); return { x: x1, y: y1, w: Math.max(1, x2 - x1), h: Math.max(1, y2 - y1) }; }
@@ -1575,7 +1637,7 @@ def _matte_page_html() -> str:
       for (const [key, value] of pendingExecuteFormData.entries()) executeFormData.append(key, value);
       executeFormData.append("selected_candidate_id", candidate.id || pendingAnalyzePayload.default_candidate_id || "auto_default");
       executeFormData.append("semantic_decision", JSON.stringify(candidate.decision || {}));
-      executeFormData.append("analysis_payload", JSON.stringify(pendingAnalyzePayload));
+      executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(pendingAnalyzePayload, candidate)));
       setBusy(true);
       statusEl.textContent = "正在执行决策";
       const startedAt = performance.now();
@@ -2153,7 +2215,7 @@ def _matte_page_html() -> str:
         </label>
         <label>
           边距
-          <input id="slice-padding" name="padding" type="number" min="0" step="1" value="2">
+          <input id="slice-padding" name="padding" type="number" min="0" step="1" value="4">
         </label>
       </div>
       <button id="submit" type="submit">抠图</button>
@@ -2448,6 +2510,32 @@ def _matte_page_html() -> str:
       return candidates.find((candidate) => candidate.id === payload.default_candidate_id) || candidates[0] || { id: "auto_default", decision: { policy: "auto_default" } };
     }
 
+    function executionAnalysisPayload(payload, selectedCandidate) {
+      if (!payload || typeof payload !== "object") return {};
+      const slim = { ...payload };
+      const selectedId = selectedCandidate && selectedCandidate.id ? String(selectedCandidate.id) : String(payload.default_candidate_id || "auto_default");
+      const selectedRefs = selectedCandidate && selectedCandidate.preview && selectedCandidate.preview.assets ? selectedCandidate.preview.assets : {};
+      const selectedTrimapRef = selectedRefs && selectedRefs.trimap ? String(selectedRefs.trimap) : "";
+      const selectedTrimapAsset = selectedTrimapRef && payload.preview_assets ? payload.preview_assets[selectedTrimapRef] : null;
+      // Preview assets are base64 PNGs for UI display. Keep only the selected
+      // candidate trimap because Execute consumes it as the explicit Known-B
+      // trimap contract for local semantic decisions such as keep-hole.
+      slim.preview_assets = selectedTrimapAsset ? { [selectedTrimapRef]: selectedTrimapAsset } : {};
+      if (Array.isArray(slim.candidates)) {
+        slim.candidates = slim.candidates.map((candidate) => {
+          if (!candidate || typeof candidate !== "object") return candidate;
+          const copy = { ...candidate };
+          if (String(copy.id || "") === selectedId && selectedTrimapRef) {
+            copy.preview = { assets: { trimap: selectedTrimapRef } };
+          } else {
+            delete copy.preview;
+          }
+          return copy;
+        });
+      }
+      return slim;
+    }
+
     async function executeDefaultDecision(fileObj, filename, fields) {
       const analyzeFormData = new FormData();
       analyzeFormData.append("file", fileObj, filename);
@@ -2468,7 +2556,7 @@ def _matte_page_html() -> str:
       Object.entries(fields).forEach(([key, value]) => executeFormData.append(key, value));
       executeFormData.append("selected_candidate_id", semanticCandidate.id || analysisPayload.default_candidate_id || "auto_default");
       executeFormData.append("semantic_decision", JSON.stringify(semanticCandidate.decision || {}));
-      executeFormData.append("analysis_payload", JSON.stringify(analysisPayload));
+      executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(analysisPayload, semanticCandidate)));
       const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
       if (!response.ok) {
         let message = "处理失败";
@@ -2665,7 +2753,7 @@ def _matte_page_html() -> str:
       formData.append("file", file.files[0]);
       formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       formData.append("min_area", sliceMinArea.value || "64");
-      formData.append("padding", slicePadding.value || "2");
+      formData.append("padding", slicePadding.value || "4");
       setBusy(true);
       statusEl.textContent = "正在生成切图";
       try {
@@ -2694,7 +2782,7 @@ def _matte_page_html() -> str:
       formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       if (task.value === "slice") {
         formData.append("min_area", sliceMinArea.value || "64");
-        formData.append("padding", slicePadding.value || "2");
+        formData.append("padding", slicePadding.value || "4");
       } else {
         formData.append("backend", backend.value);
       }
@@ -3068,7 +3156,7 @@ def _batch_page_html() -> str:
       executeFormData.append("parameter_source", "auto");
       executeFormData.append("selected_candidate_id", semanticCandidate.id || analysisPayload.default_candidate_id || "auto_default");
       executeFormData.append("semantic_decision", JSON.stringify(semanticCandidate.decision || {}));
-      executeFormData.append("analysis_payload", JSON.stringify(analysisPayload));
+      executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(analysisPayload, semanticCandidate)));
       const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
       if (!response.ok) {
         let message = "处理失败";
@@ -3255,7 +3343,7 @@ def _slice_page_html() -> str:
       <label>图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" required></label>
       <div class="settings">
         <label>最小面积<input id="min-area" type="number" min="1" step="1" value="64"></label>
-        <label>边距<input id="padding" type="number" min="0" step="1" value="2"></label>
+        <label>边距<input id="padding" type="number" min="0" step="1" value="4"></label>
         <label class="checkbox-field background-repair-field"><input id="background-repair" name="background_repair" type="checkbox" checked><span>背景修复</span></label>
       </div>
       <div class="slice-actions-main">
@@ -3312,7 +3400,7 @@ def _slice_page_html() -> str:
       const data = new FormData();
       data.append("file", file.files[0]);
       data.append("min_area", minArea.value || "64");
-      data.append("padding", padding.value || "2");
+      data.append("padding", padding.value || "4");
       data.append("background_repair", backgroundRepair.checked ? "true" : "false");
       return data;
     }
@@ -3320,7 +3408,7 @@ def _slice_page_html() -> str:
     function currentSettings() {
       return {
         minArea: minArea.value || "64",
-        padding: padding.value || "2",
+        padding: padding.value || "4",
       };
     }
 
@@ -4252,7 +4340,9 @@ def _run_web_backend(
             "pymatting_bg_threshold",
             "pymatting_fg_threshold",
             "pymatting_boundary_band_px",
-            "pymatting_auto_adapt",
+            "pymatting_adapt_bg_threshold",
+            "pymatting_adapt_fg_threshold",
+            "pymatting_adapt_boundary_band",
             "pymatting_cg_maxiter",
             "pymatting_cg_rtol",
             "pymatting_trimap_mode",
@@ -4349,7 +4439,6 @@ def _pymatting_kwargs(
     pymatting_bg_threshold: float,
     pymatting_fg_threshold: float,
     pymatting_boundary_band_px: int,
-    pymatting_auto_adapt: bool,
     pymatting_cg_maxiter: int,
     pymatting_cg_rtol: float,
 ) -> dict[str, object]:
@@ -4377,7 +4466,9 @@ def _pymatting_kwargs(
         "pymatting_bg_threshold": pymatting_bg_threshold,
         "pymatting_fg_threshold": pymatting_fg_threshold,
         "pymatting_boundary_band_px": pymatting_boundary_band_px,
-        "pymatting_auto_adapt": bool(pymatting_auto_adapt),
+        "pymatting_adapt_bg_threshold": False,
+        "pymatting_adapt_fg_threshold": True,
+        "pymatting_adapt_boundary_band": True,
         "pymatting_cg_maxiter": pymatting_cg_maxiter,
         "pymatting_cg_rtol": pymatting_cg_rtol,
     }
@@ -4394,6 +4485,44 @@ def _shadow_mode_from_form(shadow_mode: str | None, shadow_enabled: bool | None)
     return "on" if shadow_enabled else "off"
 
 
+def _shadow_mode_from_semantic_decision(
+    current_shadow_mode: str | None,
+    semantic_decision: dict[str, Any],
+) -> str | None:
+    """Let semantic candidates override only explicit execution knobs.
+
+    Shadow ownership used to be a candidate dimension. In the BG-seed outline
+    flow it is only boundary evidence inside the trimap builder, so semantic
+    decisions may pass a literal shadow_mode but no longer infer one from a
+    shadow ownership policy.
+    """
+
+    mode = semantic_decision.get("shadow_mode")
+    if isinstance(mode, str) and mode.strip():
+        normalized = mode.strip().lower()
+        if normalized not in {"auto", "on", "off"}:
+            raise HTTPException(status_code=400, detail="semantic shadow_mode must be auto, on, or off")
+        return normalized
+    return current_shadow_mode
+
+
+def _known_b_execution_overrides_from_semantic_decision(semantic_decision: dict[str, Any]) -> dict[str, object]:
+    overrides: dict[str, object] = {}
+    trimap_mode = semantic_decision.get("pymatting_trimap_mode")
+    if isinstance(trimap_mode, str) and trimap_mode.strip():
+        normalized = trimap_mode.strip()
+        if normalized not in {"standard", "same_key_opaque_body_outline"}:
+            raise HTTPException(status_code=400, detail="semantic pymatting_trimap_mode is not supported")
+        overrides["pymatting_trimap_mode"] = normalized
+    unknown_grow = semantic_decision.get("pymatting_unknown_grow_px")
+    if isinstance(unknown_grow, (int, float)):
+        value = int(unknown_grow)
+        if not 0 <= value <= 16:
+            raise HTTPException(status_code=400, detail="semantic pymatting_unknown_grow_px must be between 0 and 16")
+        overrides["pymatting_unknown_grow_px"] = value
+    return overrides
+
+
 @app.post("/api/matte")
 def matte_endpoint(
     file: Annotated[UploadFile, File()],
@@ -4408,7 +4537,6 @@ def matte_endpoint(
     pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
     pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
     pymatting_boundary_band_px: Annotated[int, Form()] = 2,
-    pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     background_repair: Annotated[bool, Form()] = False,
@@ -4429,7 +4557,6 @@ def matte_endpoint(
         pymatting_bg_threshold=pymatting_bg_threshold,
         pymatting_fg_threshold=pymatting_fg_threshold,
         pymatting_boundary_band_px=pymatting_boundary_band_px,
-        pymatting_auto_adapt=pymatting_auto_adapt,
         pymatting_cg_maxiter=pymatting_cg_maxiter,
         pymatting_cg_rtol=pymatting_cg_rtol,
     )
@@ -4531,12 +4658,12 @@ def _execute_matte_candidates_payload(
         pymatting_bg_threshold=request.pymatting_bg_threshold,
         pymatting_fg_threshold=request.pymatting_fg_threshold,
         pymatting_boundary_band_px=request.pymatting_boundary_band_px,
-        pymatting_auto_adapt=request.pymatting_auto_adapt,
         pymatting_cg_maxiter=request.pymatting_cg_maxiter,
         pymatting_cg_rtol=request.pymatting_cg_rtol,
     )
     pymatting_params["pymatting_normalize_known_background"] = bool(request.background_repair)
     semantic_decision_payload = _json_form_object(request.semantic_decision, "semantic_decision")
+    semantic_known_b_overrides = _known_b_execution_overrides_from_semantic_decision(semantic_decision_payload)
     execution_contract = request.execution_request_payload or request.analysis_payload
 
     image = _load_upload_image(request.file)
@@ -4548,6 +4675,7 @@ def _execute_matte_candidates_payload(
     )
     if known_b_execution_params:
         pymatting_params = {**pymatting_params, **known_b_execution_params}
+    pymatting_params.update(semantic_known_b_overrides)
     explicit_route_decision = _analysis_route_decision_payload(execution_contract)
     hint_mask = (
         _load_upload_image(request.corridorkey_hint_mask)
@@ -4706,7 +4834,6 @@ def matte_candidates_endpoint(
     pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
     pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
     pymatting_boundary_band_px: Annotated[int, Form()] = 2,
-    pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
@@ -4742,7 +4869,6 @@ def matte_candidates_endpoint(
             pymatting_bg_threshold=pymatting_bg_threshold,
             pymatting_fg_threshold=pymatting_fg_threshold,
             pymatting_boundary_band_px=pymatting_boundary_band_px,
-            pymatting_auto_adapt=pymatting_auto_adapt,
             pymatting_cg_maxiter=pymatting_cg_maxiter,
             pymatting_cg_rtol=pymatting_cg_rtol,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
@@ -4785,7 +4911,6 @@ def execute_candidate_endpoint(
     pymatting_bg_threshold: Annotated[float, Form()] = 3.5,
     pymatting_fg_threshold: Annotated[float, Form()] = 24.0,
     pymatting_boundary_band_px: Annotated[int, Form()] = 2,
-    pymatting_auto_adapt: Annotated[bool, Form()] = True,
     pymatting_cg_maxiter: Annotated[int, Form()] = 1000,
     pymatting_cg_rtol: Annotated[float, Form()] = 1e-6,
     known_bg_glow_material_strength: Annotated[float, Form()] = 1.0,
@@ -4793,6 +4918,9 @@ def execute_candidate_endpoint(
 ) -> dict[str, object]:
     analysis = _json_form_object(analysis_payload, "analysis_payload")
     decision = _json_form_object(semantic_decision, "semantic_decision")
+    if not decision:
+        decision, _candidate_confidence = _semantic_candidate_payload(analysis, selected_candidate_id)
+    shadow_mode = _shadow_mode_from_semantic_decision(shadow_mode, decision)
     user_mask_summary = _user_mask_upload_summary(
         keep_mask=user_keep_mask,
         remove_mask=user_remove_mask,
@@ -4838,7 +4966,6 @@ def execute_candidate_endpoint(
             pymatting_bg_threshold=pymatting_bg_threshold,
             pymatting_fg_threshold=pymatting_fg_threshold,
             pymatting_boundary_band_px=pymatting_boundary_band_px,
-            pymatting_auto_adapt=pymatting_auto_adapt,
             pymatting_cg_maxiter=pymatting_cg_maxiter,
             pymatting_cg_rtol=pymatting_cg_rtol,
             known_bg_glow_material_strength=known_bg_glow_material_strength,
@@ -4862,7 +4989,7 @@ def execute_candidate_endpoint(
 def slice_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
-    padding: Annotated[int, Form()] = 2,
+    padding: Annotated[int, Form()] = 4,
     transparent: Annotated[bool, Form()] = False,
     background_repair: Annotated[bool, Form()] = False,
 ) -> Response:
@@ -4903,7 +5030,7 @@ def slice_endpoint(
 def slice_preview_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
-    padding: Annotated[int, Form()] = 2,
+    padding: Annotated[int, Form()] = 4,
     background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
@@ -4925,7 +5052,7 @@ def slice_preview_endpoint(
 def slice_crops_endpoint(
     file: Annotated[UploadFile, File()],
     min_area: Annotated[int, Form()] = 64,
-    padding: Annotated[int, Form()] = 2,
+    padding: Annotated[int, Form()] = 4,
     background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image, image_digest = _load_upload_image_with_digest(file)
@@ -5304,6 +5431,18 @@ def _remote_backend_summary_path(root: Path) -> Path | None:
     return None
 
 
+def _route_analyze_summary_path(root: Path) -> Path | None:
+    path = root / "summary.json"
+    if not path.is_file():
+        return None
+    payload = _load_optional_game_eval_summary(path)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema") == "ermbg.route_analyze.batch.v1" and isinstance(payload.get("runs"), list):
+        return path
+    return None
+
+
 def _game_eval_root_has_data(root: Path) -> bool:
     if _game_report_path(root) is not None:
         return True
@@ -5312,6 +5451,8 @@ def _game_eval_root_has_data(root: Path) -> bool:
     if _solid_graphic_summary_path(root) is not None:
         return True
     if _remote_backend_summary_path(root) is not None:
+        return True
+    if _route_analyze_summary_path(root) is not None:
         return True
     return _game_matte_summary_path(root) is not None
 
@@ -5482,6 +5623,7 @@ def _game_eval_status_report_path(root: Path) -> Path | None:
         _game_report_path(root)
         or _solid_graphic_summary_path(root)
         or _remote_backend_summary_path(root)
+        or _route_analyze_summary_path(root)
         or _game_matte_summary_path(root)
     )
 
@@ -5925,9 +6067,6 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
                 "expectedAnyHit": bool(row.get("expected_role_hit")) if is_ok else False,
                 "harmfulToolSelected": False,
                 "harmfulTools": [],
-                "shadowPolicyRequired": False,
-                "shadowPolicyHit": None,
-                "shadowCandidateCount": 0,
                 "regionCount": row.get("region_count", 0) if is_ok else 0,
                 "counts": row.get("role_mask_pixels", {}) if is_ok else {},
                 "selectedTools": top_roles if is_ok else [],
@@ -5951,7 +6090,6 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
         "expectedHit": f"{expected_role_hit_count}/{expected_role_required_count}",
         "expectedAnyHit": f"{expected_role_hit_count}/{expected_role_required_count}",
         "harmfulTools": f"0/{len(cases)}",
-        "shadowPolicyHit": "0/0",
         "sampleRows": len(cases),
         "reportPath": None,
         "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
@@ -6122,9 +6260,6 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
                 "expectedAnyHit": is_ok,
                 "harmfulToolSelected": False,
                 "harmfulTools": [],
-                "shadowPolicyRequired": False,
-                "shadowPolicyHit": None,
-                "shadowCandidateCount": 0,
                 "regionCount": sum(int(value) for value in ownership_counts.values() if isinstance(value, int)),
                 "counts": ownership_counts,
                 "selectedTools": [new_strategy] if is_ok else [],
@@ -6149,7 +6284,6 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
         "expectedHit": "n/a",
         "expectedAnyHit": "n/a",
         "harmfulTools": "0/0",
-        "shadowPolicyHit": "0/0",
         "sampleRows": len(cases),
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str(root.relative_to(PROJECT_ROOT)),
@@ -6254,9 +6388,6 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
                 "expectedAnyHit": is_ok,
                 "harmfulToolSelected": False,
                 "harmfulTools": [],
-                "shadowPolicyRequired": False,
-                "shadowPolicyHit": None,
-                "shadowCandidateCount": 0,
                 "regionCount": int(alpha_pixels) if isinstance(alpha_pixels, int) else 0,
                 "counts": {"alpha_nonzero_pixels": alpha_pixels, "alpha_mean": alpha_mean},
                 "selectedTools": [strategy] if is_ok else [],
@@ -6281,7 +6412,123 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
         "expectedHit": f"{ok_count}/{len(runs)}",
         "expectedAnyHit": f"{ok_count}/{len(runs)}",
         "harmfulTools": f"0/{len(runs)}",
-        "shadowPolicyHit": "0/0",
+        "sampleRows": len(cases),
+        "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
+        "matteRoot": str(root.relative_to(PROJECT_ROOT)),
+        "vlmRoot": GAME_SAMPLE_REL.as_posix(),
+        "runs": _game_eval_runs(root),
+        "selectedRun": root.name,
+        "progress": progress,
+        "samples": _game_eval_samples(),
+        "cases": cases,
+    }
+
+
+def _game_eval_data_from_route_analyze_summary(root: Path, summary_path: Path) -> dict[str, object]:
+    payload = _load_json(summary_path)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Route analyze summary must be a JSON object.")
+    runs = payload.get("runs")
+    if not isinstance(runs, list):
+        raise HTTPException(status_code=500, detail="Route analyze summary is missing runs.")
+
+    cases: list[dict[str, object]] = []
+    ok_count = 0
+    for index, item in enumerate((run for run in runs if isinstance(run, dict)), start=1):
+        status = str(item.get("status", "ok"))
+        is_ok = status != "error"
+        ok_count += 1 if is_ok else 0
+        sample_id = str(item.get("sample_id") or f"S{index:03d}")
+        case_id = str(item.get("id") or item.get("case") or f"case_{index:03d}")
+        input_value = item.get("input")
+        sample_screen = _sample_screen_from_path(input_value) or str(item.get("screen") or "green")
+        default_algorithm = str(item.get("default_algorithm") or "")
+        parameter_profile = str(item.get("parameter_profile") or "")
+        route_candidates = [str(value) for value in item.get("route_candidate_algorithms", []) if isinstance(value, str)]
+        semantic_candidates = [
+            str(value)
+            for value in item.get("semantic_candidate_ids", [])
+            if isinstance(value, str)
+        ]
+        ambiguity_types = [
+            str(value)
+            for value in item.get("ambiguity_types", [])
+            if isinstance(value, str)
+        ]
+        verdict_parts = [default_algorithm]
+        if parameter_profile:
+            verdict_parts.append(parameter_profile)
+        if status == "mismatch":
+            verdict_parts.append("mismatch")
+        reason_parts = []
+        if route_candidates:
+            reason_parts.append("routes=" + ",".join(route_candidates))
+        if ambiguity_types:
+            reason_parts.append("ambiguity=" + ",".join(ambiguity_types))
+        if item.get("default_candidate_id"):
+            reason_parts.append(f"default={item.get('default_candidate_id')}")
+        candidates = [
+            {
+                "id": "route_analyze_default",
+                "label": default_algorithm or "route analyze",
+                "selected": True,
+                "tools": route_candidates or [default_algorithm],
+                "reason": "; ".join(reason_parts),
+                "url": None,
+            }
+        ]
+        if semantic_candidates:
+            candidates.append(
+                {
+                    "id": "semantic_candidates",
+                    "label": f"{len(semantic_candidates)} semantic candidates",
+                    "selected": False,
+                    "tools": semantic_candidates[:8],
+                    "reason": ", ".join(semantic_candidates[:12]),
+                    "url": None,
+                }
+            )
+        cases.append(
+            {
+                "caseId": case_id,
+                "sampleId": sample_id,
+                "sampleCode": f"{sample_id}-{sample_screen[:1].upper()}",
+                "sampleScreen": sample_screen,
+                "runStatus": "ran" if is_ok else "error",
+                "category": item.get("category", "route-analyze"),
+                "verdict": " / ".join(part for part in verdict_parts if part),
+                "expectedHit": bool(item.get("expected_present", is_ok)),
+                "expectedAnyHit": bool(item.get("expected_present", is_ok)),
+                "harmfulToolSelected": False,
+                "harmfulTools": [],
+                "regionCount": int(item.get("ambiguity_region_count") or 0),
+                "counts": {
+                    "route_candidates": len(route_candidates),
+                    "semantic_candidates": len(semantic_candidates),
+                    "ambiguity_regions": int(item.get("ambiguity_region_count") or 0),
+                },
+                "selectedTools": route_candidates or [default_algorithm],
+                "primaryAmbiguity": ", ".join(ambiguity_types) or str(item.get("target_route") or ""),
+                "originalUrl": _image_url(input_value),
+                "regionsUrl": None,
+                "alphaUrl": None,
+                "matteUrl": None,
+                "maskHintUrl": None,
+                "corridorkeyRawAlphaUrl": None,
+                "corridorkeyForegroundUrl": None,
+                "candidates": candidates,
+            }
+        )
+
+    progress = _game_eval_batch_progress(root, summary_path, prefer_report_total=True)
+    case_count = int(payload.get("case_count", len(runs)) or len(runs))
+    return {
+        "runId": root.name,
+        "model": "route/analyze strategy",
+        "success": f"{ok_count}/{case_count}",
+        "expectedHit": f"{payload.get('ok_count', ok_count)}/{case_count}",
+        "expectedAnyHit": f"{payload.get('ok_count', ok_count)}/{case_count}",
+        "harmfulTools": f"0/{case_count}",
         "sampleRows": len(cases),
         "reportPath": str(summary_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str(root.relative_to(PROJECT_ROOT)),
@@ -6305,6 +6552,9 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         comfy_path = _remote_backend_summary_path(root)
         if comfy_path is not None:
             return _game_eval_data_from_comfy_ermbg_summary(root, comfy_path)
+        route_analyze_path = _route_analyze_summary_path(root)
+        if route_analyze_path is not None:
+            return _game_eval_data_from_route_analyze_summary(root, route_analyze_path)
         data = _game_eval_data_from_matte_summary(root)
         data["runs"] = _game_eval_runs(root)
         data["selectedRun"] = root.name
@@ -6415,9 +6665,6 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "expectedAnyHit": bool(row.get("expected_any_hit", row.get("expected_hit", row.get("expected_role_hit")))) if is_active_run else False,
                     "harmfulToolSelected": bool(row.get("harmful_tool_selected")) if is_active_run else False,
                     "harmfulTools": row.get("harmful_tools", []) if is_active_run else [],
-                    "shadowPolicyRequired": bool(row.get("shadow_policy_required")) if is_active_run else False,
-                    "shadowPolicyHit": row.get("shadow_policy_hit") if is_active_run else None,
-                    "shadowCandidateCount": row.get("shadow_candidate_count", 0) if is_active_run else 0,
                     "regionCount": row.get("region_count", 0) if is_active_run else 0,
                     "counts": row.get("counts", {}) if is_active_run else {},
                     "selectedTools": fallback_tools if is_active_run else [],
@@ -6440,7 +6687,6 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
         "expectedHit": f"{report.get('expected_tool_hit_count', report.get('expected_role_hit_count', 0))}/{report.get('case_count', len(cases))}",
         "expectedAnyHit": f"{report.get('expected_any_tool_hit_count', report.get('expected_tool_hit_count', report.get('expected_role_hit_count', 0)))}/{report.get('case_count', len(cases))}",
         "harmfulTools": f"{report.get('harmful_tool_selected_count', 0)}/{report.get('case_count', len(cases))}",
-        "shadowPolicyHit": f"{report.get('shadow_policy_hit_count', 0)}/{report.get('shadow_policy_required_count', 0)}",
         "sampleRows": len(cases),
         "reportPath": str(report_path.relative_to(PROJECT_ROOT)),
         "matteRoot": str((root / "matte").relative_to(PROJECT_ROOT)),
@@ -6476,9 +6722,6 @@ def _empty_game_eval_data() -> dict[str, object]:
                     "expectedAnyHit": False,
                     "harmfulToolSelected": False,
                     "harmfulTools": [],
-                    "shadowPolicyRequired": False,
-                    "shadowPolicyHit": None,
-                    "shadowCandidateCount": 0,
                     "regionCount": 0,
                     "counts": {},
                     "selectedTools": [],
@@ -6500,7 +6743,6 @@ def _empty_game_eval_data() -> dict[str, object]:
         "expectedHit": "0/0",
         "expectedAnyHit": "0/0",
         "harmfulTools": "0/0",
-        "shadowPolicyHit": "0/0",
         "sampleRows": len(cases),
         "reportPath": None,
         "matteRoot": "",
@@ -7663,7 +7905,6 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         `expected hit: ${{text(data.expectedHit)}}`,
         `any hit: ${{text(data.expectedAnyHit)}}`,
         `harmful tools: ${{text(data.harmfulTools)}}`,
-        `shadow policy: ${{text(data.shadowPolicyHit)}}`,
         `sample rows: ${{text(data.sampleRows)}}`,
         `report: ${{text(data.reportPath)}}`,
         `samples: ${{text(data.vlmRoot)}}`,

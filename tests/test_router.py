@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from ermbg.router import assess_source_alpha, classify_route, classify_strategy
+from ermbg.router import assess_source_alpha, build_route_candidates, classify_route, classify_strategy
 
 pytestmark = pytest.mark.core
 
@@ -163,6 +163,7 @@ def test_route_hard_button_uses_pymatting_known_b():
     assert decision.backend == "pymatting_known_b"
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.params["pymatting_trimap_mode"] == "standard"
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
 
 
@@ -178,7 +179,9 @@ def test_route_hard_button_uses_known_corridor_screen_color_when_subject_dominat
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
     assert decision.params["pymatting_bg_color"] == (5, 132, 250)
-    assert decision.params["pymatting_auto_adapt"] is False
+    assert decision.params["pymatting_adapt_bg_threshold"] is False
+    assert decision.params["pymatting_adapt_fg_threshold"] is True
+    assert decision.params["pymatting_adapt_boundary_band"] is True
     assert decision.analysis["stable_background"]["source"] == "sure_bg_mode"
     assert decision.analysis["stable_background"]["seed"]["source"] == "route_screen_analysis"
     assert decision.analysis["stable_background"]["bg_threshold_source"] == "external_seed_cap"
@@ -278,9 +281,11 @@ def test_route_square_known_b_hole_buttons_stay_pymatting_not_character():
         assert decision.route == "pymatting_known_b", rel
         assert decision.backend == "pymatting_known_b", rel
         assert decision.asset_kind == "button", rel
+        assert decision.params["pymatting_trimap_mode"] == "standard", rel
+        assert decision.analysis["character_like_foreground"]["accepted"] is False, rel
 
 
-def test_route_hard_icon_uses_known_b_and_soft_character_uses_corridorkey_without_geometry_gate():
+def test_route_hard_icon_uses_known_b_and_soft_character_uses_character_corridorkey_profile():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
     icon = np.asarray(
         Image.open(root / "icon/icon_icon_a01_hard_boundary_strong_outline/green.png").convert("RGB"),
@@ -296,8 +301,150 @@ def test_route_hard_icon_uses_known_b_and_soft_character_uses_corridorkey_withou
     assert icon_decision.asset_kind == "button"
     assert icon_decision.params["execution_profile"] == "pymatting-hard-button"
     assert character_decision.route == "corridorkey"
-    assert character_decision.params["execution_profile"] == "corridorkey-transparent-button"
+    assert character_decision.asset_kind == "character"
+    assert character_decision.params["execution_profile"] == "corridorkey-character"
+    assert character_decision.analysis["character_like_foreground"]["accepted"] is True
     assert character_decision.analysis["complex_button_boundary"]["semi_alpha_gate"] is True
+
+
+def test_route_candidates_c001_c005_expose_known_b_and_corridorkey_models():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "character"
+    rels = [
+        "character_char_a01_hair_hard_edge_glass_pendant_green/green.png",
+        "character_char_a02_hair_armor_glass_visor_blue/blue.png",
+        "character_char_a03_hair_fur_hard_blade_translucent_scarf_green/green.png",
+        "character_char_a04_hair_transparent_wings_soft_glow_blue/blue.png",
+        "character_char_a05_hard_armor_hair_glass_shield_green/green.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        by_route = {candidate.decision.route: candidate for candidate in candidates}
+        default = next(candidate for candidate in candidates if candidate.default)
+        assert {"pymatting_known_b", "corridorkey"} <= set(by_route), rel
+        assert default.decision.route == "corridorkey", rel
+        assert by_route["corridorkey"].decision.asset_kind == "character", rel
+        assert by_route["corridorkey"].decision.params["execution_profile"] == "corridorkey-character", rel
+        evidence = by_route["corridorkey"].evidence["fine_detail_composite_evidence"]
+        assert evidence["accepted"] is True, rel
+        assert evidence["fine_boundary_gate"] is True, rel
+        assert evidence["fine_edge_components"] >= 240, rel
+        assert evidence["boundary_edge_fraction"] >= 0.23, rel
+        assert evidence["hard_color_bins"] >= 500, rel
+
+
+def test_route_candidates_i012_i017_use_corridorkey_soft_effect_composite_default():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "icon"
+    rels = [
+        "icon_icon_d02_soft_alpha_particle_mist/green.png",
+        "icon_icon_d03_soft_alpha_particle_fire_orange/blue.png",
+        "icon_icon_d04_soft_alpha_particle_poison_green/blue.png",
+        "icon_icon_d05_soft_alpha_particle_arcane_purple/green.png",
+        "icon_icon_d06_soft_alpha_particle_golden_stardust/green.png",
+        "icon_icon_d07_soft_alpha_particle_ice_white_blue/green.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        by_route = {candidate.decision.route: candidate for candidate in candidates}
+        default = next(candidate for candidate in candidates if candidate.default)
+        assert {"pymatting_known_b", "corridorkey"} <= set(by_route), rel
+        assert default.decision.route == "corridorkey", rel
+        assert by_route["corridorkey"].decision.params["execution_profile"] == "corridorkey-character", rel
+        evidence = by_route["corridorkey"].evidence["fine_detail_composite_evidence"]
+        assert evidence["accepted"] is True, rel
+        assert evidence["soft_effect_gate"] or evidence["fine_boundary_gate"], rel
+
+
+def test_route_candidates_i006_i007_use_corridorkey_soft_boundary_detail_default():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "icon"
+    rels = [
+        "icon_icon_b02_soft_boundary_feathered/blue.png",
+        "icon_icon_b03_soft_boundary_fragmented_edge/blue.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        by_route = {candidate.decision.route: candidate for candidate in candidates}
+        default = next(candidate for candidate in candidates if candidate.default)
+        assert {"pymatting_known_b", "corridorkey"} <= set(by_route), rel
+        assert default.decision.route == "corridorkey", rel
+        assert by_route["corridorkey"].decision.asset_kind == "button", rel
+        assert by_route["corridorkey"].decision.params["execution_profile"] == "corridorkey-shaped-icon", rel
+        evidence = by_route["corridorkey"].evidence["fine_detail_composite_evidence"]
+        assert evidence["accepted"] is True, rel
+        assert evidence["soft_boundary_detail_gate"] is True, rel
+        assert evidence["semi_alpha_fraction"] >= 0.035, rel
+        assert evidence["boundary_edge_fraction"] >= 0.24, rel
+        assert evidence["interior_semi_largest"] <= 64, rel
+
+
+def test_route_candidates_hard_or_opaque_icons_do_not_hit_soft_boundary_detail():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "icon"
+    rels = [
+        "icon_icon_b01_soft_boundary_antialias/green.png",
+        "icon_icon_c01_translucent_glass_crystal/green.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        assert [candidate.decision.route for candidate in candidates] == ["pymatting_known_b"], rel
+        evidence = candidates[0].decision.analysis["fine_detail_composite_evidence"]
+        assert evidence["soft_boundary_detail_gate"] is False, rel
+
+
+def test_route_candidates_c006_c009_keep_corridorkey_high_confidence_default():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "character"
+    rels = [
+        "character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png",
+        "character_char_a07_fur_hair_hard_bow_translucent_cloak_green/green.png",
+        "character_char_a08_spiky_hair_hard_mech_translucent_raincoat_blue/blue.png",
+        "character_char_a09_hair_hard_costume_translucent_silk_ribbons_green/green.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        default = next(candidate for candidate in candidates if candidate.default)
+        assert default.decision.route == "corridorkey", rel
+        assert default.decision.asset_kind == "character", rel
+        assert default.decision.params["execution_profile"] == "corridorkey-character", rel
+        assert default.decision.confidence >= 0.79, rel
+
+
+def test_route_candidates_b056_b057_do_not_get_corridorkey_false_positive():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "button"
+    rels = [
+        "button_hole_ornate_plate_blue/blue.png",
+        "button_blue_play_clipped_hard_shadow/blue.png",
+    ]
+    for rel in rels:
+        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
+        candidates = build_route_candidates(img)
+        assert [candidate.decision.route for candidate in candidates] == ["pymatting_known_b"], rel
+        assert candidates[0].default is True, rel
+
+
+def test_route_complex_foreground_is_independent_of_canvas_aspect_ratio():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    image = np.asarray(
+        Image.open(root / "character/character_char_a06_pale_hair_translucent_sleeves_white_glow_blue/blue.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+    bg = tuple(int(c) for c in image[0, 0])
+    wide = np.full((image.shape[0], image.shape[1] + 600, 3), bg, dtype=np.uint8)
+    wide[:, 300 : 300 + image.shape[1]] = image
+    tall = np.full((image.shape[0] + 600, image.shape[1], 3), bg, dtype=np.uint8)
+    tall[300 : 300 + image.shape[0], :] = image
+
+    for variant in (image, wide, tall):
+        decision = classify_route(variant)
+        assert decision.route == "corridorkey"
+        assert decision.asset_kind == "character"
+        assert decision.params["execution_profile"] == "corridorkey-character"
+        char_info = decision.analysis["character_like_foreground"]
+        assert char_info["accepted"] is True
+        assert "foreground_aspect_ratio" not in char_info
+        assert "bbox_width_fraction" not in char_info
 
 
 def test_route_square_canvas_button_uses_known_b_without_geometry_gate():
@@ -312,6 +459,7 @@ def test_route_square_canvas_button_uses_known_b_without_geometry_gate():
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
     assert "button_" in decision.reasons[0]
+    assert decision.analysis["character_like_foreground"]["accepted"] is False
     ck = decision.analysis["corridorkey_analysis"]
     assert ck["parameter_profile"] != "composite_character_corridor_only"
     assert decision.analysis["complex_button_boundary"]["reason"] == "below complex-boundary and semi-alpha gates"
@@ -328,9 +476,8 @@ def test_route_round_same_key_opaque_button_uses_pymatting_without_aspect_gate()
     assert decision.backend == "pymatting_known_b"
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
-    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
-    assert decision.analysis["same_key_opaque_body_outline"]["accepted"] is True
-    assert decision.analysis["same_key_opaque_body_outline"]["outline_recipe"] == "closed_plateau_outline"
+    assert decision.params["pymatting_trimap_mode"] == "standard"
+    assert "same_key_opaque_body_outline" not in decision.analysis
     ck = decision.analysis["corridorkey_analysis"]
     assert ck["foreground_aspect_ratio"] == pytest.approx(1.0)
     assert ck["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
@@ -348,11 +495,10 @@ def test_route_same_key_opaque_button_uses_outline_trimap_only_when_outline_is_m
 
     assert decision.route == "pymatting_known_b"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
-    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
-    assert decision.params["pymatting_unknown_grow_px"] == 2
+    assert decision.params["pymatting_trimap_mode"] == "standard"
+    assert decision.params["pymatting_unknown_grow_px"] == 0
     assert decision.analysis["corridorkey_analysis"]["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
-    assert decision.analysis["same_key_opaque_body_outline"]["accepted"] is True
-    assert decision.analysis["same_key_opaque_body_outline"]["outline_recipe"] == "lower_perimeter_ridge"
+    assert "same_key_opaque_body_outline" not in decision.analysis
 
 
 def test_route_unknown_unstable_background_uses_pymatting_fallback():
@@ -366,7 +512,20 @@ def test_route_unknown_unstable_background_uses_pymatting_fallback():
     assert decision.params["execution_profile"] == "pymatting-fallback"
     assert "unknown_or_unstable_background_uses_pymatting_fallback" in decision.reasons
     assert decision.params["pymatting_bg_color"] == (0, 200, 0)
-    assert decision.params["pymatting_auto_adapt"] is False
+    assert decision.params["pymatting_adapt_bg_threshold"] is False
+    assert decision.params["pymatting_adapt_fg_threshold"] is False
+    assert decision.params["pymatting_adapt_boundary_band"] is False
+
+
+def test_route_non_screen_known_b_reports_known_b_parameter_profile():
+    img = _solid_with_subject((255, 255, 255))
+
+    decision = classify_route(img)
+    payload = decision.to_dict()
+
+    assert decision.route == "pymatting_known_b"
+    assert payload["parameter_profile"] == "known_b_background_standard"
+    assert payload["parameter_profile"] != decision.analysis["corridorkey_analysis"]["parameter_profile"]
 
 
 # --- broader bg-color sweep --------------------------------------------------

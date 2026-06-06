@@ -13,11 +13,9 @@ from .settings import direct_worker_location, get_direct_worker_url
 DEFAULT_DIRECT_WORKER_URL = get_direct_worker_url()
 
 ERMBG_COMFY_NODE_KEYS = (
-    "ErmbgRouteMatte",
     "ErmbgRouteStrategy",
-    "ErmbgPyMattingKnownB",
     "ErmbgClassify",
-    "ErmbgMasksToImages",
+    "Convert Masks to Images",
 )
 
 
@@ -72,9 +70,9 @@ def inspect_comfy_runtime(
             "capabilities": {
                 "system_stats": False,
                 "object_info": False,
-                "ermbg_route_matte": False,
                 "ermbg_route_strategy": False,
-                "ermbg_pymatting_known_b": False,
+                "ermbg_classify": False,
+                "convert_masks_to_images": False,
             },
             "nodes": {},
         }
@@ -84,9 +82,9 @@ def inspect_comfy_runtime(
         "capabilities": {
             "system_stats": False,
             "object_info": False,
-            "ermbg_route_matte": False,
             "ermbg_route_strategy": False,
-            "ermbg_pymatting_known_b": False,
+            "ermbg_classify": False,
+            "convert_masks_to_images": False,
         },
         "nodes": {},
     }
@@ -119,9 +117,9 @@ def inspect_comfy_runtime(
     payload["capabilities"]["object_info"] = True
     nodes = {key: key in object_info for key in ERMBG_COMFY_NODE_KEYS}
     payload["nodes"] = nodes
-    payload["capabilities"]["ermbg_route_matte"] = nodes.get("ErmbgRouteMatte", False)
     payload["capabilities"]["ermbg_route_strategy"] = nodes.get("ErmbgRouteStrategy", False)
-    payload["capabilities"]["ermbg_pymatting_known_b"] = nodes.get("ErmbgPyMattingKnownB", False)
+    payload["capabilities"]["ermbg_classify"] = nodes.get("ErmbgClassify", False)
+    payload["capabilities"]["convert_masks_to_images"] = nodes.get("Convert Masks to Images", False)
     return payload
 
 
@@ -159,9 +157,9 @@ def disabled_comfy_runtime(*, comfy_url: str = DEFAULT_COMFY_URL) -> dict[str, A
         "capabilities": {
             "system_stats": False,
             "object_info": False,
-            "ermbg_route_matte": False,
             "ermbg_route_strategy": False,
-            "ermbg_pymatting_known_b": False,
+            "ermbg_classify": False,
+            "convert_masks_to_images": False,
         },
         "nodes": {},
     }

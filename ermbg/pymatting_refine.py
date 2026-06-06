@@ -51,12 +51,13 @@ def normalize_known_background_field(
 
     Known-B PyMatting and ShadowPatch assume a single background color. Some
     generated green/blue-screen assets have low-frequency background drift that
-    is not subject or shadow, especially in alpha tails. This prepass builds a
-    continuous normalization weight from high-confidence background evidence
-    and near-background screen-colored tail pixels, then blends those pixels
-    toward the measured background color. The field is smooth and applied
-    before trimap construction so sure-BG/unknown borders do not get a hard
-    discontinuity.
+    is not subject or shadow, especially in alpha tails.
+
+    The ownership rule is stricter than "looks like the screen color": only
+    pixels in a normalization domain connected to sure-BG evidence may be
+    changed. Isolated blue/green-screen-like pixels can be dark subject grooves,
+    antialiasing, or material details, so color-line evidence alone is never
+    enough to repaint them as background.
     """
     if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
         raise ValueError("image_srgb must be HxWx3 uint8")
@@ -68,8 +69,10 @@ def normalize_known_background_field(
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
         boundary_band_px=2,
-        adaptive=bool(adaptive),
         require_exact_bg=False,
+        adapt_bg_threshold=bool(adaptive),
+        adapt_fg_threshold=bool(adaptive),
+        adapt_boundary_band=False,
     )
     thresholds = ownership.thresholds
     lab = srgb_to_oklab(image_srgb)
@@ -93,13 +96,19 @@ def normalize_known_background_field(
     image = image_srgb.astype(np.float32)
     bgf = bg.astype(np.float32).reshape(3)
     source_shadow_alpha = _known_background_display_shadow_alpha(image_srgb, bg)
-    isolated_residue_cleanup, isolated_residue_info = _known_background_isolated_bg_residue_cleanup_mask(
-        image_srgb,
-        bg,
-        subject_seed=ownership.sure_fg,
-        shadow_unknown=ownership.shadow_unknown,
-        source_shadow_alpha=source_shadow_alpha,
-    )
+    # Historical note: this path once repainted tiny detached screen-colored
+    # components as "background residue". That was wrong for hard UI assets:
+    # black/blue metal grooves can satisfy the same known-B darkening equation
+    # while being completely disconnected from sure-BG. Keep the metadata shape
+    # but disable isolated cleanup; all normalization below must flow from
+    # connected sure-BG support.
+    isolated_residue_cleanup = np.zeros((h, w), dtype=bool)
+    isolated_residue_info = {
+        "enabled": False,
+        "reason": "disabled: background normalization requires connected sure-bg evidence",
+        "candidate_pixels": 0,
+        "cleaned_pixels": 0,
+    }
     # Background normalization is allowed only where the source pixel implies
     # essentially no transferable screen darkening. Values above the weak
     # visible-shadow floor are protected so broad soft tails remain available
@@ -142,6 +151,8 @@ def normalize_known_background_field(
     others = [idx for idx in range(3) if idx != dominant]
     screen_like_tail = np.zeros((h, w), dtype=bool)
     tail_weight = np.zeros((h, w), dtype=np.float32)
+    normalization_connected_domain = sure_bg_normalization.copy()
+    disconnected_tail_pixels = 0
     if float(bgf[dominant]) >= 64.0 and float(bgf[dominant] - np.max(bgf[others])) >= 48.0:
         other_max = np.max(image[..., others], axis=2)
         # Tail normalization is intentionally limited to screen-colored pixels:
@@ -178,6 +189,18 @@ def normalize_known_background_field(
             subject_clearance = np.clip((dist_to_subject - 2.0) / 10.0, 0.0, 1.0).astype(np.float32)
             tail_weight *= subject_clearance
 
+        # Tail pixels are only soft candidates for extending the background
+        # field. The decisive proof is connectivity: keep only components that
+        # touch sure-BG seeds. This prevents a small interior dark-blue island
+        # from creating its own normalization support just because it fits the
+        # blue-screen darkening model.
+        tail_support = tail_weight > 1.0 / 255.0
+        allowed_domain = sure_bg_normalization | tail_support
+        normalization_connected_domain = _components_touching_seed(allowed_domain, sure_bg_normalization)
+        disconnected_tail = tail_support & ~normalization_connected_domain
+        disconnected_tail_pixels = int(disconnected_tail.sum())
+        tail_weight[~normalization_connected_domain] = 0.0
+
     raw_weight = np.zeros((h, w), dtype=np.float32)
     raw_weight[sure_bg_normalization] = 1.0
     raw_weight = np.maximum(raw_weight, tail_weight)
@@ -200,6 +223,10 @@ def normalize_known_background_field(
     weight = cv2.GaussianBlur(raw_weight, (ksize, ksize), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT)
     weight = np.clip(weight, 0.0, 1.0).astype(np.float32)
     weight = np.minimum(weight, shadow_normalization_gate).astype(np.float32)
+    # Blur is a numerical smoothing step, not new ownership evidence. Re-apply
+    # the connected domain after smoothing so weight cannot leak across a
+    # protected subject gap into isolated material.
+    weight[~normalization_connected_domain] = 0.0
     weight[sure_bg_normalization] = 1.0
     # Do not let smoothing spill into obvious material. Any residual line here
     # is less harmful than pre-normalizing real subject color.
@@ -209,7 +236,6 @@ def normalize_known_background_field(
     normalized = image * (1.0 - weight[..., None]) + bgf.reshape(1, 1, 3) * weight[..., None]
     normalized_u8 = np.clip(normalized + 0.5, 0, 255).astype(np.uint8)
     normalized_u8[sure_bg_normalization] = bg.reshape(1, 3)
-    normalized_u8[isolated_residue_cleanup] = bg.reshape(1, 3)
     changed = np.abs(normalized_u8.astype(np.int16) - image_srgb.astype(np.int16)).mean(axis=2) > 0
     return normalized_u8, {
         "enabled": True,
@@ -230,6 +256,8 @@ def normalize_known_background_field(
         "residual_std_u8": residual_std,
         "screen_like_tail_pixels": int(screen_like_tail.sum()),
         "tail_weight_pixels": int((tail_weight > 1.0 / 255.0).sum()),
+        "normalization_connected_domain_pixels": int(normalization_connected_domain.sum()),
+        "disconnected_tail_rejected_pixels": int(disconnected_tail_pixels),
         "shadow_normalization_gate": {
             "full_alpha": float(normalize_shadow_full_alpha),
             "zero_alpha": float(normalize_shadow_zero_alpha),
@@ -273,101 +301,6 @@ def _smoothstep_array(edge0: float, edge1: float, value: np.ndarray) -> np.ndarr
     return (x * x * (3.0 - 2.0 * x)).astype(np.float32)
 
 
-def _known_background_isolated_bg_residue_cleanup_mask(
-    image_srgb: np.ndarray,
-    background_color: np.ndarray,
-    *,
-    subject_seed: np.ndarray,
-    shadow_unknown: np.ndarray,
-    source_shadow_alpha: np.ndarray,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Find isolated screen-colored background dirt that should become known-B.
-
-    Coherent scalar darkening tied to a subject is shadow evidence and stays
-    unknown. Detached components that are close to the known-B color line and
-    do not touch subject seeds are treated as dirty background residue before
-    PyMatting sees them.
-    """
-    h, w = image_srgb.shape[:2]
-    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
-    dominant = int(np.argmax(bg))
-    others = [idx for idx in range(3) if idx != dominant]
-    if float(bg[dominant]) < 64.0 or float(bg[dominant] - np.max(bg[others])) < 48.0:
-        empty = np.zeros((h, w), dtype=bool)
-        return empty, {
-            "enabled": False,
-            "reason": "background is not screen-dominant",
-            "candidate_pixels": 0,
-            "cleaned_pixels": 0,
-        }
-
-    image = image_srgb.astype(np.float32)
-    other_max = np.max(image[..., others], axis=2)
-    screen_like = (
-        (image[..., dominant] > other_max + max(4.0, float(bg[dominant]) * 0.02))
-        & (image[..., dominant] < float(bg[dominant]) * 0.90)
-        & (other_max <= max(12.0, float(np.max(bg[others])) + 12.0))
-    )
-    shadow_replay = (1.0 - source_shadow_alpha[..., None]) * bg.reshape(1, 1, 3)
-    shadow_error = np.mean(np.abs(shadow_replay - image), axis=2)
-    candidate = (
-        screen_like
-        & (source_shadow_alpha > 0.035)
-        & (shadow_error < 8.0)
-        & ~np.asarray(subject_seed, dtype=bool)
-        & ~np.asarray(shadow_unknown, dtype=bool)
-    )
-    if not bool(candidate.any()):
-        return np.zeros((h, w), dtype=bool), {
-            "enabled": True,
-            "reason": "no isolated background residue candidates",
-            "candidate_pixels": 0,
-            "cleaned_pixels": 0,
-        }
-
-    subject_touch = cv2.dilate(subject_seed.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
-    shadow_touch = cv2.dilate(shadow_unknown.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
-    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), 8)
-    # Detached screen-darkened strips can be wider than pinpricks, but they are
-    # still weak background residue when they do not touch the subject. The
-    # absolute cap keeps this from flattening a large detached cast shadow.
-    max_area = int(max(32, min(768, round(float(h * w) * 0.025))))
-    cleanup = np.zeros((h, w), dtype=bool)
-    components: list[dict[str, Any]] = []
-    for label in range(1, labels_count):
-        comp = labels == label
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        touches_subject = bool((comp & subject_touch).any())
-        touches_shadow = bool((comp & shadow_touch).any())
-        keep = bool(area <= max_area and not touches_subject)
-        if keep:
-            cleanup |= comp
-        components.append(
-            {
-                "area": area,
-                "bbox_xyxy": [
-                    int(stats[label, cv2.CC_STAT_LEFT]),
-                    int(stats[label, cv2.CC_STAT_TOP]),
-                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
-                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
-                ],
-                "touches_subject": touches_subject,
-                "touches_shadow": touches_shadow,
-                "keep": keep,
-            }
-        )
-    components.sort(key=lambda item: (item["keep"], item["area"]), reverse=True)
-    return cleanup, {
-        "enabled": True,
-        "reason": "" if bool(cleanup.any()) else "no disconnected small residue components",
-        "candidate_pixels": int(candidate.sum()),
-        "cleaned_pixels": int(cleanup.sum()),
-        "component_max_area": int(max_area),
-        "components": components[:12],
-        "omitted_components": max(0, len(components) - 12),
-    }
-
-
 def _known_background_hard_shadow_subject_evidence_release(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -375,14 +308,17 @@ def _known_background_hard_shadow_subject_evidence_release(
     sure_fg: np.ndarray,
     shadow_unknown: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Release subject-side evidence when a hard shadow lacks subject color.
+    """Release subject-side pixels into unknown when hard shadow evidence is poor.
 
     PyMatting consumes trimap evidence; it does not know that a smooth hard
     shadow should become a separate shadow layer. When a high-alpha known-B
     shadow touches an outlined UI subject, and the current unknown band contains
     shadow/fringe but almost no true subject color, the shadow can be solved as
-    green/blue foreground. This pass locally releases a shallow sure-FG boundary
-    beside that shadow component so PyMatting sees enough subject-side evidence.
+    green/blue foreground. This pass removes a shallow, shadow-facing subject
+    strip from sure-FG so it becomes unknown. The goal is not to add more hard
+    foreground; it is to make the unknown band contain both subject color and
+    shadow color, giving PyMatting enough evidence to solve the shadow as
+    background-owned transparency.
     """
     h, w = sure_fg.shape
     release = np.zeros((h, w), dtype=bool)
@@ -408,19 +344,8 @@ def _known_background_hard_shadow_subject_evidence_release(
     source_shadow_alpha = _known_background_display_shadow_alpha(image_srgb, bg)
     labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(shadow_unknown.astype(np.uint8), 8)
     min_area = max(32, int(round(float(h * w) * 0.003)))
-    release_px = 8.0
-    shadow_neighborhood_px = 15
-    fg_neighborhood_px = 7
     dist_inside_fg = cv2.distanceTransform(sure_fg.astype(np.uint8), cv2.DIST_L2, 3)
-    _, fg_labels, _, _ = cv2.connectedComponentsWithStats(sure_fg.astype(np.uint8), 8)
-    shadow_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (shadow_neighborhood_px * 2 + 1, shadow_neighborhood_px * 2 + 1),
-    )
-    fg_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (fg_neighborhood_px * 2 + 1, fg_neighborhood_px * 2 + 1),
-    )
+    _, fg_labels, fg_stats, _ = cv2.connectedComponentsWithStats(sure_fg.astype(np.uint8), 8)
     exact_bg = np.all(image_srgb == bg.reshape(1, 1, 3), axis=2)
     components: list[dict[str, Any]] = []
 
@@ -429,6 +354,32 @@ def _known_background_hard_shadow_subject_evidence_release(
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < min_area:
             continue
+        comp_w = int(stats[label, cv2.CC_STAT_WIDTH])
+        comp_h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        comp_short = float(max(1, min(comp_w, comp_h)))
+        comp_long = float(max(1, max(comp_w, comp_h)))
+        image_short = float(max(1, min(h, w)))
+        # These are local geometry radii, not global UI constants. The old
+        # 8/15/7 px values are too large for small 100 px buttons: a local
+        # shadow would select the whole subject component and release internal
+        # structure. Scale by both source size and the measured shadow component.
+        release_px = float(max(1.0, min(8.0, image_short * 0.065, max(2.0, comp_short * 0.35))))
+        shadow_neighborhood_px = float(
+            max(release_px + 2.0, min(15.0, image_short * 0.12, max(release_px + 2.0, comp_long * 0.75)))
+        )
+        fg_neighborhood_px = float(
+            max(release_px + 1.0, min(7.0, image_short * 0.05, max(release_px + 1.0, comp_short * 0.50)))
+        )
+        shadow_radius = max(1, int(round(shadow_neighborhood_px)))
+        fg_radius = max(1, int(round(fg_neighborhood_px)))
+        shadow_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (shadow_radius * 2 + 1, shadow_radius * 2 + 1),
+        )
+        fg_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (fg_radius * 2 + 1, fg_radius * 2 + 1),
+        )
         values = source_shadow_alpha[comp]
         alpha_p50 = float(np.percentile(values, 50.0)) if values.size else 0.0
         alpha_p90 = float(np.percentile(values, 90.0)) if values.size else 0.0
@@ -460,6 +411,9 @@ def _known_background_hard_shadow_subject_evidence_release(
             "shadow_alpha_p90": alpha_p90,
             "local_sure_fg_pixels": local_sure_pixels,
             "local_unknown_pixels": local_unknown_pixels,
+            "release_px": float(release_px),
+            "shadow_neighborhood_px": float(shadow_neighborhood_px),
+            "fg_neighborhood_px": float(fg_neighborhood_px),
             "keep": False,
         }
         if not high_alpha_hard_shadow or local_sure_pixels < 20 or local_unknown_pixels < 20:
@@ -487,12 +441,16 @@ def _known_background_hard_shadow_subject_evidence_release(
         adjacent_fg_labels = np.unique(fg_labels[local_sure_fg])
         adjacent_fg_labels = adjacent_fg_labels[adjacent_fg_labels > 0]
         adjacent_subject = np.isin(fg_labels, adjacent_fg_labels) if adjacent_fg_labels.size else np.zeros_like(sure_fg)
-        # Once the evidence gap is proven by a hard-shadow component, release
-        # the adjacent subject component boundary, not only the shadow-facing
-        # edge. PyMatting needs a balanced local color manifold; a one-sided
-        # strip still lets the hard shadow dominate the unknown solve.
-        local_release = adjacent_subject & (dist_inside_fg <= release_px)
-        keep = bool(evidence_poor and local_release.any())
+        # Release only the shadow-facing subject strip into unknown.
+        # ``adjacent_subject`` can be a whole button component; using it without
+        # the local shadow neighborhood releases internal notches and unrelated
+        # edges on small controls. A ratio guard keeps a bad shadow component
+        # from moving too much of the nearby subject anchor into unknown.
+        local_release = adjacent_subject & dilated_shadow & (dist_inside_fg <= release_px)
+        adjacent_subject_pixels = int(adjacent_subject.sum())
+        release_fraction = float(local_release.sum()) / float(max(1, adjacent_subject_pixels))
+        max_release_fraction = 0.30
+        keep = bool(evidence_poor and local_release.any() and release_fraction <= max_release_fraction)
         if keep:
             release |= local_release
         component_info.update(
@@ -501,10 +459,18 @@ def _known_background_hard_shadow_subject_evidence_release(
                 "subject_like_ratio": subject_like_ratio,
                 "screen_like_ratio": screen_like_ratio,
                 "dark_outline_ratio": dark_outline_ratio,
+                "adjacent_subject_pixels": adjacent_subject_pixels,
+                "release_fraction_of_adjacent_subject": float(release_fraction),
+                "max_release_fraction_of_adjacent_subject": float(max_release_fraction),
                 "released_pixels": int(local_release.sum()) if keep else 0,
-                "release_px": float(release_px),
                 "keep": keep,
-                "reason": "" if keep else "subject evidence is sufficient",
+                "reason": ""
+                if keep
+                else (
+                    "release would remove too much adjacent subject evidence"
+                    if evidence_poor and local_release.any()
+                    else "subject evidence is sufficient"
+                ),
             }
         )
         components.append(component_info)
@@ -514,7 +480,7 @@ def _known_background_hard_shadow_subject_evidence_release(
         {
             "released_pixels": int(release.sum()),
             "component_min_area": int(min_area),
-            "release_px": float(release_px),
+            "release_px_source": "component_and_image_scale",
             "components": components[:12],
             "omitted_components": max(0, len(components) - 12),
             "reason": "" if bool(release.any()) else "no hard-shadow subject evidence gap",
@@ -612,8 +578,10 @@ def _build_known_background_ownership(
     bg_threshold: float,
     fg_threshold: float,
     boundary_band_px: int,
-    adaptive: bool,
     require_exact_bg: bool,
+    adapt_bg_threshold: bool,
+    adapt_fg_threshold: bool,
+    adapt_boundary_band: bool,
 ) -> KnownBOwnership:
     """Classify known-B ownership once, before normalization or trimap use.
 
@@ -627,11 +595,22 @@ def _build_known_background_ownership(
     lab = srgb_to_oklab(image_srgb)
     bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3))[0, 0]
     d = oklab_distance(lab, bg_lab)
-    thresholds = (
-        _adaptive_known_background_thresholds(d, image_srgb, bg, bg_threshold, fg_threshold)
-        if adaptive
-        else _fixed_known_background_thresholds(bg_threshold, fg_threshold)
-    )
+    if adapt_bg_threshold:
+        thresholds = _adaptive_known_background_thresholds(d, image_srgb, bg, bg_threshold, fg_threshold)
+    else:
+        thresholds = _fixed_known_background_thresholds(bg_threshold, fg_threshold)
+        if adapt_fg_threshold:
+            fg_stats = _adaptive_known_background_thresholds(d, image_srgb, bg, bg_threshold, fg_threshold)
+            thresholds = {
+                **thresholds,
+                "fg_threshold_effective": float(fg_stats["fg_threshold_effective"]),
+                "fg_threshold_source": str(fg_stats["fg_threshold_source"]),
+                "fg_threshold_percentile": fg_stats.get("fg_threshold_percentile"),
+                "background_noise_median": fg_stats.get("background_noise_median"),
+                "background_noise_mad": fg_stats.get("background_noise_mad"),
+                "background_noise_q99": fg_stats.get("background_noise_q99"),
+                "histogram_otsu_threshold": fg_stats.get("histogram_otsu_threshold"),
+            }
     effective_bg_threshold = float(thresholds["bg_threshold_effective"])
 
     bg_close = d <= effective_bg_threshold
@@ -642,7 +621,7 @@ def _build_known_background_ownership(
 
     not_exterior = ~exterior_bg
     dist_to_exterior = cv2.distanceTransform(not_exterior.astype(np.uint8), cv2.DIST_L2, 3)
-    if adaptive:
+    if adapt_fg_threshold:
         thresholds = {
             **thresholds,
             **_adaptive_foreground_seed_threshold(
@@ -653,7 +632,7 @@ def _build_known_background_ownership(
                 base_fg_threshold=float(thresholds["fg_threshold_effective"]),
                 base_fg_source=str(thresholds["fg_threshold_source"]),
                 requested_fg_threshold=float(fg_threshold),
-                background_noise_mad=float(thresholds["background_noise_mad"]),
+                background_noise_mad=float(thresholds.get("background_noise_mad") or 0.0),
                 boundary_band_px=int(boundary_band_px),
             ),
         }
@@ -667,9 +646,12 @@ def _build_known_background_ownership(
             effective_fg_threshold,
             boundary_band_px,
         )
-        if adaptive
+        if adapt_boundary_band
         else _fixed_boundary_band(boundary_band_px)
     )
+    thresholds["adapt_bg_threshold"] = bool(adapt_bg_threshold)
+    thresholds["adapt_fg_threshold"] = bool(adapt_fg_threshold)
+    thresholds["adapt_boundary_band"] = bool(adapt_boundary_band)
     strong_fg = d >= effective_fg_threshold
     screen_dominant_shadow = _screen_dominant_shadow_pixels(image_srgb, bg)
     subject_support, subject_support_info = _known_background_local_material_core_support(
@@ -716,17 +698,67 @@ def _build_known_background_ownership(
 
     if bool(sure_fg.any()):
         dist_to_subject = cv2.distanceTransform((~sure_fg).astype(np.uint8), cv2.DIST_L2, 3)
-        # This is a subject-derived transition guard, not an image-id constant.
-        # It reserves the immediate subject neighborhood so background fill does
-        # not flatten AA/shadow pixels before PyMatting sees them.
-        transition_px = float(max(3.0, min(12.0, float(boundary_info["boundary_band_px_effective"]) + 5.0)))
+        # ``transition_px`` controls where PyMatting receives subject-adjacent
+        # unknown evidence, not a generic "make the edge wider" blur. It must
+        # expose enough subject-side color beside exterior AA/shadow so the
+        # unknown band contains both subject and shadow/background samples. The
+        # old fixed ``boundary + 5`` radius was too global for small buttons:
+        # it could mark interior notches or weak material in the middle of the
+        # subject as unknown even though those pixels were not connected to the
+        # shadow/exterior solve. Scale the radius by subject and image size, and
+        # anchor intermediate-color transition pixels to exterior/shadow seeds.
+        transition_base_px = float(max(3.0, min(12.0, float(boundary_info["boundary_band_px_effective"]) + 5.0)))
+        fg_labels_count, _, fg_stats, _ = cv2.connectedComponentsWithStats(sure_fg.astype(np.uint8), 8)
+        if fg_labels_count > 1:
+            fg_label = 1 + int(np.argmax(fg_stats[1:, cv2.CC_STAT_AREA]))
+            subject_short = float(max(1, min(int(fg_stats[fg_label, cv2.CC_STAT_WIDTH]), int(fg_stats[fg_label, cv2.CC_STAT_HEIGHT]))))
+        else:
+            subject_short = float(max(1, min(image_srgb.shape[:2])))
+        image_short = float(max(1, min(image_srgb.shape[:2])))
+        scale_cap_px = float(
+            max(
+                float(boundary_info["boundary_band_px_effective"]) + 4.0,
+                min(12.0, subject_short * 0.05, image_short * 0.05),
+            )
+        )
+        transition_px = float(min(transition_base_px, scale_cap_px))
+        anchor_radius = max(1, int(round(transition_px + float(boundary_info["boundary_band_px_effective"]))))
+        anchor_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (anchor_radius * 2 + 1, anchor_radius * 2 + 1),
+        )
+        # Only strong ownership evidence may start subject-side exposure:
+        # exterior/hole known-B support or pixels already promoted to
+        # ``shadow_unknown`` by the scalar-darkening detector. A merely
+        # screen-dominant pixel is weak color evidence; if it can seed exposure
+        # by itself, small buttons with green/blue drift release unrelated
+        # interior notches into unknown. We still let screen-dominant pixels join
+        # the unknown band, but only after one of the stronger seeds anchors the
+        # local solve region.
+        transition_anchor = cv2.dilate(
+            (exterior_bg | enclosed_bg | shadow_unknown).astype(np.uint8),
+            anchor_kernel,
+            iterations=1,
+        ).astype(bool)
+        anchored_bg_transition = bg_candidate & transition_anchor
+        anchored_screen_transition = screen_dominant_shadow & transition_anchor
+        intermediate_transition = (
+            (d > effective_bg_threshold)
+            & (d < effective_fg_threshold)
+            & transition_anchor
+        )
         subject_transition = (
             (dist_to_subject <= transition_px)
             & ~sure_fg
-            & (bg_candidate | screen_dominant_shadow | ((d > effective_bg_threshold) & (d < effective_fg_threshold)))
+            & (anchored_bg_transition | anchored_screen_transition | intermediate_transition)
         )
     else:
         transition_px = 0.0
+        transition_base_px = 0.0
+        scale_cap_px = 0.0
+        anchor_radius = 0
+        subject_short = 0.0
+        image_short = float(max(1, min(image_srgb.shape[:2])))
         subject_transition = np.zeros(image_srgb.shape[:2], dtype=bool)
 
     protected_transition = shadow_unknown | subject_transition | neutral_subject_evidence_release
@@ -773,7 +805,52 @@ def _build_known_background_ownership(
     # later same-background reconstruction stages.
     sure_bg &= ~protected_transition
     sure_fg = sure_fg & ~(enclosed_bg | shadow_unknown)
-    unknown = ~(sure_fg | sure_bg)
+    outline_fg, outline_unknown, outline_info = _known_background_bg_seed_outline_fg(
+        image_srgb,
+        bg,
+        distance=d,
+        exterior_bg=exterior_bg,
+        enclosed_bg=enclosed_bg,
+        bg_candidate=bg_candidate,
+        sure_bg=sure_bg,
+        fg_seed=sure_fg,
+        protected_transition=protected_transition,
+        shadow_unknown=shadow_unknown,
+        screen_dominant_shadow=screen_dominant_shadow,
+        bg_threshold=effective_bg_threshold,
+        fg_threshold=effective_fg_threshold,
+        boundary_info=boundary_info,
+    )
+    if bool(outline_info.get("accepted", False)):
+        sure_fg = outline_fg & ~enclosed_bg
+        protected_transition |= outline_unknown
+
+    candidate_unknown = ~(sure_fg | sure_bg)
+    # Build the final unknown domain by connectivity from existing BG/hole
+    # unknown seeds, not by letting every non-FG/non-BG residual or every
+    # shadow-like pixel start its own solve island. PyMatting needs unknown to
+    # grow along the exterior/hole boundary and then into adjacent shadow-facing
+    # subject evidence. A small screen-colored/dark pixel cluster inside an
+    # opaque button can be "shadow-like" by color, but if it is not connected to
+    # the existing exterior/hole unknown domain it is not useful shadow evidence;
+    # keeping it unknown creates isolated internal transparency instead of
+    # helping the real boundary/shadow solve.
+    border_unknown_seed = candidate_unknown & _border_mask(candidate_unknown.shape)
+    bg_side_seed_source = bg_candidate | enclosed_bg | sure_bg
+    bg_side_unknown_seed = candidate_unknown & cv2.dilate(
+        bg_side_seed_source.astype(np.uint8),
+        np.ones((3, 3), np.uint8),
+        iterations=1,
+    ).astype(bool)
+    unknown_seed = (
+        border_unknown_seed
+        | bg_side_unknown_seed
+    )
+    seeded_unknown = _components_touching_seed(candidate_unknown, unknown_seed)
+    unseeded_internal_unknown = candidate_unknown & ~seeded_unknown
+    if bool(unseeded_internal_unknown.any()):
+        sure_fg |= unseeded_internal_unknown
+    unknown = seeded_unknown
 
     labels_count, _, stats, _ = cv2.connectedComponentsWithStats(enclosed_bg.astype(np.uint8), 8)
     enclosed_areas = [int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)]
@@ -782,13 +859,25 @@ def _build_known_background_ownership(
         "sure_fg_pixels": int(sure_fg.sum()),
         "sure_bg_pixels": int(sure_bg.sum()),
         "unknown_pixels": int(unknown.sum()),
+        "candidate_unknown_pixels": int(candidate_unknown.sum()),
+        "unknown_seed_pixels": int(unknown_seed.sum()),
+        "unseeded_internal_unknown_pixels": int(unseeded_internal_unknown.sum()),
         "protected_transition_pixels": int(protected_transition.sum()),
         "subject_transition_pixels": int(subject_transition.sum()),
         "subject_transition_px": float(transition_px),
+        "subject_transition_scale": {
+            "base_px": float(transition_base_px),
+            "scale_cap_px": float(scale_cap_px),
+            "subject_short_px": float(subject_short),
+            "image_short_px": float(image_short),
+            "anchor_radius_px": int(anchor_radius),
+            "source": "min(boundary_plus_margin, subject_and_image_scale_cap)_with_strong_ownership_anchor",
+        },
         "neutral_shadow_subject_evidence_release_pixels": int(neutral_subject_evidence_release.sum()),
         "neutral_shadow_subject_evidence": neutral_subject_evidence_info,
         "hard_shadow_subject_evidence_release_pixels": int(subject_evidence_release.sum()),
         "hard_shadow_subject_evidence": subject_evidence_info,
+        "bg_seed_outline": outline_info,
         "shadow_unknown_pixels": int(shadow_unknown.sum()),
         "exterior_bg_pixels": int(exterior_bg.sum()),
         "enclosed_bg_pixels": int(enclosed_bg.sum()),
@@ -830,7 +919,9 @@ def build_known_background_trimap(
     bg_threshold: float = 3.5,
     fg_threshold: float = 24.0,
     boundary_band_px: int = 2,
-    adaptive: bool = True,
+    adapt_bg_threshold: bool = False,
+    adapt_fg_threshold: bool = True,
+    adapt_boundary_band: bool = True,
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
     semantic_decision: dict[str, Any] | None = None,
@@ -854,7 +945,20 @@ def build_known_background_trimap(
         raise ValueError("image_srgb must be HxWx3 uint8")
 
     bg = np.asarray(background_color, dtype=np.uint8)
-    semantic_policy = str((semantic_decision or {}).get("enclosed_near_bg_policy") or "auto_default")
+    semantic_payload = semantic_decision or {}
+    has_region_hole_policies = isinstance(
+        semantic_payload.get("enclosed_near_bg_region_policies"),
+        dict,
+    ) and bool(semantic_payload.get("enclosed_near_bg_region_policies"))
+    # Region-scoped hole decisions are applied by Analyze/Web as explicit
+    # trimap overlays because this low-level helper does not receive region
+    # masks. Do not let the compatibility summary field reinterpret all
+    # enclosed same-B components as one global subject/background domain.
+    semantic_policy = (
+        "auto_default"
+        if has_region_hole_policies
+        else str(semantic_payload.get("enclosed_near_bg_policy") or "auto_default")
+    )
     mask_shape = image_srgb.shape[:2]
     # Brush masks are semantic constraints, not alpha mattes. Thresholding at
     # 0.5 makes antialiased PNG uploads behave like binary user intent while
@@ -884,9 +988,12 @@ def build_known_background_trimap(
         bg_threshold=float(bg_threshold),
         fg_threshold=float(fg_threshold),
         boundary_band_px=int(boundary_band_px),
-        adaptive=bool(adaptive),
         require_exact_bg=True,
+        adapt_bg_threshold=bool(adapt_bg_threshold),
+        adapt_fg_threshold=bool(adapt_fg_threshold),
+        adapt_boundary_band=bool(adapt_boundary_band),
     )
+    adaptive_summary = bool(adapt_bg_threshold or adapt_fg_threshold or adapt_boundary_band)
 
     # Route selection owns the semantic decision. If it requests the same-key
     # opaque body-outline trimap, execution consumes that contract directly
@@ -904,6 +1011,8 @@ def build_known_background_trimap(
         },
         "forced_background_pixels": 0,
         "applied": False,
+        "region_policies_present": bool(has_region_hole_policies),
+        "summary_policy_ignored_for_region_policies": bool(has_region_hole_policies),
     }
     if trimap_mode == "same_key_opaque_body_outline":
         body_trimap, body_outline_info = _build_same_key_opaque_body_outline_trimap(
@@ -929,7 +1038,7 @@ def build_known_background_trimap(
         body_trimap = Trimap(sure_fg=body_sure_fg, sure_bg=body_sure_bg, unknown=body_unknown)
         return body_trimap, {
             "method": "same_key_opaque_body_outline",
-            "adaptive": bool(adaptive),
+            "adaptive": adaptive_summary,
             "background_color": [int(c) for c in bg],
             "bg_threshold": float(bg_threshold),
             "fg_threshold": float(fg_threshold),
@@ -1001,7 +1110,7 @@ def build_known_background_trimap(
     trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
     return trimap, {
         "method": "known_background_exterior_band",
-        "adaptive": bool(adaptive),
+        "adaptive": adaptive_summary,
         "background_color": [int(c) for c in bg],
         "bg_threshold": float(bg_threshold),
         "fg_threshold": float(fg_threshold),
@@ -1260,22 +1369,72 @@ def _same_key_opaque_body_outline_trace(
     *,
     bg_threshold: float,
 ) -> dict[str, Any]:
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
     lower = _same_key_opaque_lower_perimeter_ridge_trace(
         image_srgb,
-        background_color,
+        bg,
         bg_threshold=float(bg_threshold),
     )
     if lower.get("accepted", False):
+        _reject_same_key_outline_internal_bg_holes(
+            lower,
+            image_srgb,
+            bg,
+            bg_threshold=float(bg_threshold),
+        )
         return lower
     closed = _same_key_opaque_closed_plateau_outline_trace(
         image_srgb,
-        background_color,
+        bg,
         bg_threshold=float(bg_threshold),
     )
     if closed.get("accepted", False):
+        _reject_same_key_outline_internal_bg_holes(
+            closed,
+            image_srgb,
+            bg,
+            bg_threshold=float(bg_threshold),
+        )
         closed["fallback_from"] = lower
         return closed
     return lower
+
+
+def _reject_same_key_outline_internal_bg_holes(
+    trace: dict[str, Any],
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    bg_threshold: float,
+) -> None:
+    """Reject opaque-body tracing when the measured body contains real BG holes."""
+    body = np.asarray(trace.get("body_fill"), dtype=bool)
+    if not bool(body.any()):
+        return
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
+    distance = oklab_distance(lab, bg_lab).astype(np.float32)
+    bg_close = distance <= float(bg_threshold)
+    exterior = _flood_from_border(bg_close)
+    enclosed_bg, enclosed_info = _filter_enclosed_background_components(bg_close & ~exterior)
+    body_holes = enclosed_bg & body
+    hole_pixels = int(body_holes.sum())
+
+    labels_count, _, stats, _ = cv2.connectedComponentsWithStats(body_holes.astype(np.uint8), 8)
+    largest_hole = int(max((int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, labels_count)), default=0))
+    hole_info = {
+        "enabled": True,
+        "pixels": hole_pixels,
+        "largest_component_pixels": largest_hole,
+        "components": int(labels_count - 1),
+        **enclosed_info,
+    }
+    trace["internal_clean_bg_holes"] = hole_info
+    if hole_pixels > 0:
+        trace["accepted"] = False
+        trace["reason"] = "body outline contains enclosed known-background holes"
 
 
 def _same_key_opaque_lower_perimeter_ridge_trace(
@@ -1808,6 +1967,324 @@ def build_same_key_opaque_inner_opaque_mask(
         "mask_pixels": int(mask.sum()),
         "outer_guard_pixels": int(guarded.sum()),
     }
+
+
+def _known_background_bg_seed_outline_fg(
+    image_srgb: np.ndarray,
+    background_color: np.ndarray,
+    *,
+    distance: np.ndarray,
+    exterior_bg: np.ndarray,
+    enclosed_bg: np.ndarray,
+    bg_candidate: np.ndarray,
+    sure_bg: np.ndarray,
+    fg_seed: np.ndarray,
+    protected_transition: np.ndarray,
+    shadow_unknown: np.ndarray,
+    screen_dominant_shadow: np.ndarray,
+    bg_threshold: float,
+    fg_threshold: float,
+    boundary_info: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Determine sure-FG by advancing known-B seeds until a measured outline.
+
+    This is the BG-first ownership rule: exterior known background and clean
+    enclosed-hole seeds are allowed to spread only through pixels that still
+    have known-B evidence. Where that spread meets a sharp color discontinuity,
+    the front becomes the subject or hole outline. Sure-FG is then the part of
+    the closed interior that is clear of both outline evidence and any BG-like
+    explanation. Color similarity alone never promotes a pixel to foreground.
+    """
+
+    shape = distance.shape
+    h, w = shape
+    empty = np.zeros(shape, dtype=bool)
+    info: dict[str, Any] = {
+        "enabled": True,
+        "accepted": False,
+        "reason": "",
+        "method": "bg_seed_reachable_outline_fg",
+    }
+    exterior_seed = np.asarray(sure_bg, dtype=bool) & np.asarray(exterior_bg, dtype=bool)
+    hole_seed = np.asarray(sure_bg, dtype=bool) & np.asarray(enclosed_bg, dtype=bool)
+    if not bool(exterior_seed.any()):
+        info.update(
+            {
+                "reason": "missing exterior sure-bg seed",
+                "exterior_seed_pixels": 0,
+                "hole_seed_pixels": int(hole_seed.sum()),
+            }
+        )
+        return empty, empty, info
+
+    lab = srgb_to_oklab(image_srgb).astype(np.float32)
+    grad_sq = np.zeros(shape, dtype=np.float32)
+    for channel in range(3):
+        gx = cv2.Sobel(lab[..., channel], cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(lab[..., channel], cv2.CV_32F, 0, 1, ksize=3)
+        grad_sq += gx * gx + gy * gy
+    grad = np.sqrt(grad_sq).astype(np.float32)
+
+    bg_grad_values = grad[exterior_seed]
+    bg_grad_p99 = float(np.percentile(bg_grad_values, 99.0)) if bg_grad_values.size else 0.0
+    # Gradients are OKLab-distance-per-Sobel-step. The adaptive term follows
+    # noisy generated backgrounds; the floor keeps a one-pixel AA ramp from
+    # being treated as a clean pass-through background region.
+    break_grad_min = max(6.0, bg_grad_p99 + 3.0)
+    bg_noise_gap = max(2.0, float(fg_threshold) - float(bg_threshold))
+    near_bg_limit = float(bg_threshold) + max(2.0, min(bg_noise_gap * 0.55, 10.0))
+    weak_bg_limit = float(fg_threshold)
+
+    strong_break = (grad >= break_grad_min) & (distance > near_bg_limit)
+    break_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    break_barrier = cv2.dilate(strong_break.astype(np.uint8), break_kernel, iterations=1).astype(bool)
+
+    # Separate BG traversal from outline evidence. A pixel can be BG-owned
+    # enough to stop flood growth without being subject boundary evidence. This
+    # matters for ornate hard surfaces: thin dark decorative strokes can satisfy
+    # the same known-B darkening model as a shadow. They must block the BG front
+    # so it does not walk into the subject, but they must not become red outline
+    # specks. Only ``subject_barrier`` below is allowed to draw the outline.
+    shadow_extra = (
+        np.asarray(shadow_unknown, dtype=bool)
+        | np.asarray(screen_dominant_shadow, dtype=bool)
+    ) & ~np.asarray(bg_candidate, dtype=bool)
+    complex_hole_surface = bool(
+        hole_seed.any()
+        and int(shadow_extra.sum()) >= max(64, int(round(float(h * w) * 0.05)))
+    )
+    if complex_hole_surface:
+        shadow_open_radius = max(1, int(round(max(2.0, min(4.0, float(boundary_info.get("boundary_band_px_effective") or 2.0) + 1.0)))))
+        shadow_open_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (shadow_open_radius * 2 + 1, shadow_open_radius * 2 + 1),
+        )
+        passable_shadow = (
+            cv2.morphologyEx(shadow_extra.astype(np.uint8), cv2.MORPH_OPEN, shadow_open_kernel, iterations=1).astype(bool)
+            if bool(shadow_extra.any())
+            else empty
+        )
+        passable_source = "bg_candidate_plus_wide_shadow_extra_for_complex_hole_surface"
+    else:
+        shadow_open_radius = 0
+        passable_shadow = np.asarray(shadow_unknown, dtype=bool) | np.asarray(screen_dominant_shadow, dtype=bool)
+        passable_source = "bg_candidate_shadow_screen_and_weak_near_bg"
+    weak_near_bg_passable = np.zeros(shape, dtype=bool) if complex_hole_surface else (distance <= weak_bg_limit)
+    bg_passable = (
+        np.asarray(bg_candidate, dtype=bool)
+        | passable_shadow
+        | weak_near_bg_passable
+    ) & ~break_barrier
+    bg_passable |= exterior_seed | hole_seed
+    bg_owned_blocked = shadow_extra & ~passable_shadow
+
+    fg_anchor = np.asarray(fg_seed, dtype=bool)
+    material_anchor_radius = 0
+    material_anchor = empty
+    color_barrier = distance >= near_bg_limit
+    if complex_hole_surface:
+        provisional_subject_domain = empty
+        subject_connected_domain = empty
+        subject_owned_blocked_barrier = empty
+        subject_front_radius = 0
+        subject_barrier = strong_break | ~bg_passable
+        outline_source = "front_meets_break_or_non_passable_complex_shadow_open"
+    else:
+        provisional_subject_domain = empty
+        subject_connected_domain = empty
+        subject_owned_blocked_barrier = empty
+        subject_front_radius = 0
+        subject_barrier = strong_break | ~bg_passable
+        outline_source = "front_meets_break_or_non_passable_standard"
+
+    exterior_reachable = _components_touching_seed(bg_passable, exterior_seed)
+    hole_reachable = _components_touching_seed(bg_passable, hole_seed) if bool(hole_seed.any()) else empty
+    outline_subject_domain = ~exterior_reachable
+    if bool(hole_reachable.any()):
+        outline_subject_domain &= ~hole_reachable
+    outline_subject_domain &= ~np.asarray(enclosed_bg, dtype=bool)
+
+    boundary_px = float(boundary_info.get("boundary_band_px_effective") or 2.0)
+    outline_radius = max(1, int(round(max(1.0, min(4.0, boundary_px)))))
+    outline_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (outline_radius * 2 + 1, outline_radius * 2 + 1),
+    )
+    exterior_front = cv2.dilate(exterior_reachable.astype(np.uint8), outline_kernel, iterations=1).astype(bool)
+    exterior_outline = exterior_front & ~exterior_reachable & subject_barrier
+    if bool(hole_reachable.any()):
+        hole_front = cv2.dilate(hole_reachable.astype(np.uint8), outline_kernel, iterations=1).astype(bool)
+        hole_outline = hole_front & ~hole_reachable & subject_barrier
+    else:
+        hole_outline = empty
+    outline_component_min_area = 0
+    exterior_outline_dropped_small_pixels = 0
+    hole_outline_dropped_small_pixels = 0
+    if complex_hole_surface:
+        outline_component_min_area = int(max(12, round(float(h * w) * 0.00008)))
+        exterior_outline, exterior_outline_dropped_small_pixels = _drop_small_outline_components(
+            exterior_outline,
+            min_area=outline_component_min_area,
+        )
+        hole_outline, hole_outline_dropped_small_pixels = _drop_small_outline_components(
+            hole_outline,
+            min_area=outline_component_min_area,
+        )
+    actual_outline = exterior_outline | hole_outline
+
+    subject_domain = ~exterior_reachable
+    if bool(hole_reachable.any()):
+        subject_domain &= ~hole_reachable
+    # Enclosed same-B/hole cores are semantic ambiguity seeds, not foreground.
+    subject_domain &= ~np.asarray(enclosed_bg, dtype=bool)
+
+    bg_evidence = (
+        np.asarray(bg_candidate, dtype=bool)
+        | np.asarray(shadow_unknown, dtype=bool)
+        | np.asarray(screen_dominant_shadow, dtype=bool)
+        | (distance <= near_bg_limit)
+    )
+    dist_from_outline = cv2.distanceTransform((~actual_outline).astype(np.uint8), cv2.DIST_L2, 3)
+    core_clearance_px = float(max(1.0, min(5.0, boundary_px + 1.0)))
+    if bool(fg_anchor.any()):
+        fg_domain = _components_touching_seed(subject_domain, fg_anchor & subject_domain)
+        fg_domain_source = "subject_domain_connected_to_existing_fg_seed"
+    else:
+        fg_domain = subject_domain
+        fg_domain_source = "subject_domain_without_existing_fg_seed"
+    sure_fg = fg_domain & (dist_from_outline > core_clearance_px)
+    if bool(fg_seed.any()):
+        # Existing material seeds remain useful, but only inside the BG-first
+        # subject domain. Color similarity to known-B no longer removes them:
+        # after the BG front has found the outline, interior dark/blue grooves
+        # are subject material, not background evidence.
+        sure_fg |= np.asarray(fg_seed, dtype=bool) & fg_domain
+    shadow_inward_unknown = empty
+    shadow_inward_components: list[dict[str, Any]] = []
+    shadow_inward_seed = np.asarray(shadow_unknown, dtype=bool) & ~(sure_fg | sure_bg)
+    shadow_component_min_area = int(max(64, round(float(h * w) * 0.003)))
+    shadow_touch_radius = max(1, int(round(max(1.0, min(4.0, boundary_px + 1.0)))))
+    shadow_inward_px = max(1, int(round(max(1.0, min(5.0, boundary_px + 2.0)))))
+    if bool(actual_outline.any()) and bool(shadow_inward_seed.any()):
+        touch_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (shadow_touch_radius * 2 + 1, shadow_touch_radius * 2 + 1),
+        )
+        inward_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (shadow_inward_px * 2 + 1, shadow_inward_px * 2 + 1),
+        )
+        labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            shadow_inward_seed.astype(np.uint8),
+            8,
+        )
+        for label in range(1, labels_count):
+            comp = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < shadow_component_min_area:
+                shadow_inward_components.append(
+                    {
+                        "area": area,
+                        "bbox_xyxy": [
+                            int(stats[label, cv2.CC_STAT_LEFT]),
+                            int(stats[label, cv2.CC_STAT_TOP]),
+                            int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                            int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                        ],
+                        "touches_outline": False,
+                        "released_pixels": 0,
+                        "keep": False,
+                        "reason": "shadow component is below min area",
+                    }
+                )
+                continue
+            comp_near_outline = cv2.dilate(comp.astype(np.uint8), touch_kernel, iterations=1).astype(bool)
+            outline_contact = actual_outline & comp_near_outline
+            touches_outline = bool(outline_contact.any())
+            released = empty
+            if touches_outline:
+                released = (
+                    sure_fg
+                    & cv2.dilate(outline_contact.astype(np.uint8), inward_kernel, iterations=1).astype(bool)
+                    & cv2.dilate(comp.astype(np.uint8), inward_kernel, iterations=1).astype(bool)
+                )
+                shadow_inward_unknown |= released
+            shadow_inward_components.append(
+                {
+                    "area": area,
+                    "bbox_xyxy": [
+                        int(stats[label, cv2.CC_STAT_LEFT]),
+                        int(stats[label, cv2.CC_STAT_TOP]),
+                        int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                        int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                    ],
+                    "touches_outline": touches_outline,
+                    "outline_contact_pixels": int(outline_contact.sum()),
+                    "released_pixels": int(released.sum()),
+                    "keep": bool(touches_outline and released.any()),
+                    "reason": "" if bool(touches_outline and released.any()) else "no outline-connected inward release",
+                }
+            )
+    if bool(shadow_inward_unknown.any()):
+        sure_fg &= ~shadow_inward_unknown
+    outline_unknown = (actual_outline | shadow_inward_unknown) & ~sure_bg
+
+    min_fg_pixels = int(max(12, round(float(h * w) * 0.0004)))
+    largest_fg = _largest_component_area(sure_fg)
+    accepted = bool(largest_fg >= min_fg_pixels and int(outline_unknown.sum()) > 0)
+    info.update(
+        {
+            "accepted": accepted,
+            "reason": "" if accepted else "insufficient closed subject core from bg-seed outline",
+            "exterior_seed_pixels": int(exterior_seed.sum()),
+            "hole_seed_pixels": int(hole_seed.sum()),
+            "bg_passable_pixels": int(bg_passable.sum()),
+            "complex_hole_surface": bool(complex_hole_surface),
+            "passable_source": passable_source,
+            "shadow_extra_pixels": int(shadow_extra.sum()),
+            "passable_shadow_pixels": int(passable_shadow.sum()),
+            "bg_owned_blocked_pixels": int(bg_owned_blocked.sum()),
+            "shadow_open_radius_px": int(shadow_open_radius),
+            "material_anchor_radius_px": int(material_anchor_radius),
+            "material_anchor_pixels": int(material_anchor.sum()),
+            "subject_connected_domain_pixels": int(subject_connected_domain.sum()),
+            "subject_owned_blocked_barrier_pixels": int(subject_owned_blocked_barrier.sum()),
+            "subject_front_radius_px": int(subject_front_radius),
+            "subject_barrier_pixels": int(subject_barrier.sum()),
+            "outline_source": outline_source,
+            "exterior_reachable_pixels": int(exterior_reachable.sum()),
+            "hole_reachable_pixels": int(hole_reachable.sum()),
+            "strong_break_pixels": int(strong_break.sum()),
+            "break_barrier_pixels": int(break_barrier.sum()),
+            "break_grad_min": float(break_grad_min),
+            "background_gradient_p99": float(bg_grad_p99),
+            "near_bg_limit": float(near_bg_limit),
+            "weak_bg_limit": float(weak_bg_limit),
+            "outline_radius_px": int(outline_radius),
+            "actual_outline_pixels": int(actual_outline.sum()),
+            "exterior_outline_pixels": int(exterior_outline.sum()),
+            "hole_outline_pixels": int(hole_outline.sum()),
+            "outline_component_min_area": int(outline_component_min_area),
+            "exterior_outline_dropped_small_pixels": int(exterior_outline_dropped_small_pixels),
+            "hole_outline_dropped_small_pixels": int(hole_outline_dropped_small_pixels),
+            "outline_unknown_pixels": int(outline_unknown.sum()),
+            "subject_domain_pixels": int(subject_domain.sum()),
+            "fg_domain_pixels": int(fg_domain.sum()),
+            "fg_domain_source": fg_domain_source,
+            "shadow_inward_unknown_pixels": int(shadow_inward_unknown.sum()),
+            "shadow_inward_component_min_area": int(shadow_component_min_area),
+            "shadow_inward_touch_radius_px": int(shadow_touch_radius),
+            "shadow_inward_px": int(shadow_inward_px),
+            "shadow_inward_components": shadow_inward_components[:12],
+            "shadow_inward_omitted_components": max(0, len(shadow_inward_components) - 12),
+            "bg_evidence_pixels": int(bg_evidence.sum()),
+            "core_clearance_px": float(core_clearance_px),
+            "sure_fg_pixels": int(sure_fg.sum()),
+            "largest_sure_fg_component": int(largest_fg),
+            "min_sure_fg_component": int(min_fg_pixels),
+        }
+    )
+    return sure_fg, outline_unknown, info
 
 
 def _known_background_local_material_core_support(
@@ -2817,6 +3294,40 @@ def _flood_from_border(mask: np.ndarray) -> np.ndarray:
     return work == 2
 
 
+def _components_touching_seed(mask: np.ndarray, seed: np.ndarray) -> np.ndarray:
+    """Return only components whose ownership is anchored by seed evidence."""
+    mask_bool = np.asarray(mask, dtype=bool)
+    seed_bool = np.asarray(seed, dtype=bool) & mask_bool
+    if not bool(mask_bool.any()) or not bool(seed_bool.any()):
+        return np.zeros(mask_bool.shape, dtype=bool)
+    labels_count, labels, _, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), 8)
+    seed_labels = np.unique(labels[seed_bool])
+    keep = np.zeros(mask_bool.shape, dtype=bool)
+    for label in seed_labels:
+        label_int = int(label)
+        if label_int == 0 or label_int >= labels_count:
+            continue
+        keep |= labels == label_int
+    return keep
+
+
+def _drop_small_outline_components(mask: np.ndarray, *, min_area: int) -> tuple[np.ndarray, int]:
+    """Remove tiny detached outline specks without changing connected outlines."""
+    mask_bool = np.asarray(mask, dtype=bool)
+    if not bool(mask_bool.any()) or int(min_area) <= 1:
+        return mask_bool.copy(), 0
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), 8)
+    keep = np.zeros(mask_bool.shape, dtype=bool)
+    dropped = 0
+    for label in range(1, labels_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area >= int(min_area):
+            keep |= labels == label
+        else:
+            dropped += area
+    return keep, int(dropped)
+
+
 def estimate_known_background_alpha_with_pymatting(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int] | np.ndarray,
@@ -2826,7 +3337,9 @@ def estimate_known_background_alpha_with_pymatting(
     bg_threshold: float = 3.5,
     fg_threshold: float = 24.0,
     boundary_band_px: int = 2,
-    adaptive: bool = True,
+    adapt_bg_threshold: bool = False,
+    adapt_fg_threshold: bool = True,
+    adapt_boundary_band: bool = True,
 ) -> PyMattingAlphaResult:
     """Convenience path: build a known-B trimap, then solve with PyMatting."""
     trimap, trimap_info = build_known_background_trimap(
@@ -2835,7 +3348,9 @@ def estimate_known_background_alpha_with_pymatting(
         bg_threshold=bg_threshold,
         fg_threshold=fg_threshold,
         boundary_band_px=boundary_band_px,
-        adaptive=adaptive,
+        adapt_bg_threshold=adapt_bg_threshold,
+        adapt_fg_threshold=adapt_fg_threshold,
+        adapt_boundary_band=adapt_boundary_band,
     )
     result = estimate_alpha_with_pymatting(
         image_srgb,

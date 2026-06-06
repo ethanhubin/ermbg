@@ -52,8 +52,9 @@ Comfy 节点或 Comfy 后端前必须显式配置地址。
    curl -s "<services.comfy_url>/object_info" | python -c "import json,sys; d=json.load(sys.stdin); print([k for k in d if k.startswith('Ermbg')])"
    ```
 
-   预期的 key 包括 `ErmbgRouteMatte`、`ErmbgRouteStrategy`、
-   `ErmbgPyMattingKnownB` 和 `ErmbgClassify`。
+   预期的 key 包括 `ErmbgRouteStrategy`、`ErmbgClassify` 和
+   `Convert Masks to Images`。Comfy 执行型节点已移除，Known-B/RouteMatte
+   通过 Direct Worker 路径执行。
 
 ## 更新
 

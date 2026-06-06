@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import cv2
@@ -19,7 +19,8 @@ from .pipeline_contracts import (
     SemanticCandidate,
 )
 from .preprocess import BACKGROUND_REPAIR, repair_known_background_preprocess
-from .router import classify_route
+from .router import build_route_candidates, select_default_route_candidate
+from .types import Trimap
 
 
 def _route_payload(route_decision: Any) -> dict[str, Any]:
@@ -39,6 +40,19 @@ def _route_payload(route_decision: Any) -> dict[str, Any]:
     }
 
 
+def _route_candidate_payload(route_candidate: Any) -> dict[str, Any]:
+    payload = route_candidate.to_dict()
+    route = _route_payload(route_candidate)
+    return {
+        **route,
+        "id": payload.get("id"),
+        "default": bool(payload.get("default", False)),
+        "route_candidate_id": payload.get("route_candidate_id") or payload.get("id"),
+        "evidence": payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
+        "risks": payload.get("risks") if isinstance(payload.get("risks"), list) else [],
+    }
+
+
 def _background_from_route(route: dict[str, Any]) -> tuple[int, int, int] | None:
     params = route.get("params")
     if not isinstance(params, dict):
@@ -55,7 +69,9 @@ def _known_b_thresholds_from_route(route: dict[str, Any]) -> dict[str, Any]:
     return {
         "bg_threshold": float(params.get("pymatting_bg_threshold", 3.5)),
         "fg_threshold": float(params.get("pymatting_fg_threshold", 24.0)),
-        "adaptive": bool(params.get("pymatting_auto_adapt", True)),
+        "adapt_bg_threshold": bool(params.get("pymatting_adapt_bg_threshold", False)),
+        "adapt_fg_threshold": bool(params.get("pymatting_adapt_fg_threshold", True)),
+        "adapt_boundary_band": bool(params.get("pymatting_adapt_boundary_band", True)),
     }
 
 
@@ -68,14 +84,16 @@ def _known_b_trimap_kwargs_from_route(route: dict[str, Any]) -> dict[str, Any]:
         "bg_threshold": float(params.get("pymatting_bg_threshold", 3.5)),
         "fg_threshold": float(params.get("pymatting_fg_threshold", 24.0)),
         "boundary_band_px": int(params.get("pymatting_boundary_band_px", 2)),
-        "adaptive": bool(params.get("pymatting_auto_adapt", True)),
+        "adapt_bg_threshold": bool(params.get("pymatting_adapt_bg_threshold", False)),
+        "adapt_fg_threshold": bool(params.get("pymatting_adapt_fg_threshold", True)),
+        "adapt_boundary_band": bool(params.get("pymatting_adapt_boundary_band", True)),
         "trimap_mode": str(params.get("pymatting_trimap_mode") or "standard"),
         "unknown_grow_px": int(params.get("pymatting_unknown_grow_px", 0)),
     }
 
 
 def _known_b_semantic_region_settings(route: dict[str, Any]) -> dict[str, Any]:
-    profile = str(route.get("parameter_profile") or "")
+    profile = _route_semantic_parameter_profile(route)
     if profile == "translucent_button":
         return {
             # Translucent/glossy known-B buttons contain white or near-white
@@ -99,6 +117,17 @@ def _known_b_semantic_region_settings(route: dict[str, Any]) -> dict[str, Any]:
         "max_area_ratio": 0.25,
         "evidence_mode": "tight_enclosed_background_match",
     }
+
+
+def _route_semantic_parameter_profile(route: dict[str, Any]) -> str:
+    """Return the measured semantic profile used for Analyze ambiguity logic."""
+
+    analysis = route.get("analysis")
+    if isinstance(analysis, dict):
+        ck = analysis.get("corridorkey_analysis")
+        if isinstance(ck, dict) and isinstance(ck.get("parameter_profile"), str):
+            return str(ck.get("parameter_profile") or "")
+    return str(route.get("parameter_profile") or "")
 
 
 def _merge_preprocess_decisions(
@@ -140,6 +169,19 @@ def _exterior_mask(mask: np.ndarray) -> np.ndarray:
         if work[y, x]:
             cv2.floodFill(work, flood, (x, y), 2)
     return work == 2
+
+
+def _components_touching_seed(mask: np.ndarray, seed: np.ndarray) -> np.ndarray:
+    mask_bool = np.asarray(mask, dtype=bool)
+    seed_bool = np.asarray(seed, dtype=bool) & mask_bool
+    if not bool(mask_bool.any()) or not bool(seed_bool.any()):
+        return np.zeros_like(mask_bool, dtype=bool)
+    labels_count, labels, _stats, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), connectivity=8)
+    touching = np.unique(labels[seed_bool])
+    touching = touching[touching != 0]
+    if touching.size == 0:
+        return np.zeros_like(mask_bool, dtype=bool)
+    return np.isin(labels, touching)
 
 
 def _bbox(mask: np.ndarray) -> list[int]:
@@ -233,19 +275,84 @@ def _known_b_trimap_preview(
     image_srgb: np.ndarray,
     route: dict[str, Any],
     candidate: SemanticCandidate,
+    *,
+    candidate_mask: np.ndarray | None = None,
+    region_masks: dict[str, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Build the explicit trimap that Analyze will hand to Execute.
+
+    The current Known-B contract is deliberately simple: normalize the measured
+    background field, let the BG-seed outline builder decide BG/unknown/FG, then
+    apply only semantic hole decisions as an overlay. Shadow evidence is handled
+    inside the outline builder as boundary expansion; it is not a separate
+    candidate branch here.
+    """
+
     kwargs = _known_b_trimap_kwargs_from_route(route)
     background = kwargs.pop("background_color")
     if background is None:
         return None
-    from .pymatting_refine import build_known_background_trimap
+    decision = candidate.decision or {}
+    region_masks = region_masks or {}
+    try:
+        from .pymatting_refine import build_known_background_trimap, normalize_known_background_field
 
-    trimap, info = build_known_background_trimap(
-        image_srgb,
-        background,
-        semantic_decision=candidate.decision,
-        **kwargs,
-    )
+        trimap_input, normalization_info = normalize_known_background_field(
+            image_srgb,
+            np.asarray(background, dtype=np.uint8),
+            bg_threshold=float(kwargs["bg_threshold"]),
+            fg_threshold=float(kwargs["fg_threshold"]),
+            adaptive=bool(kwargs["adapt_bg_threshold"]),
+        )
+
+        trimap, assembly_info = build_known_background_trimap(
+            trimap_input,
+            background,
+            bg_threshold=float(kwargs["bg_threshold"]),
+            fg_threshold=float(kwargs["fg_threshold"]),
+            boundary_band_px=int(kwargs["boundary_band_px"]),
+            adapt_bg_threshold=bool(kwargs["adapt_bg_threshold"]),
+            adapt_fg_threshold=bool(kwargs["adapt_fg_threshold"]),
+            adapt_boundary_band=bool(kwargs["adapt_boundary_band"]),
+            trimap_mode=str(kwargs.get("trimap_mode") or "standard"),
+            unknown_grow_px=int(kwargs.get("unknown_grow_px") or 0),
+            semantic_decision=dict(decision),
+        )
+    except Exception:
+        return None
+    hole_policies = decision.get("enclosed_near_bg_region_policies")
+    semantic_forced_bg = np.zeros(trimap.sure_bg.shape, dtype=bool)
+    semantic_forced_fg = np.zeros(trimap.sure_fg.shape, dtype=bool)
+    if isinstance(hole_policies, dict):
+        for region_id, policy_value in hole_policies.items():
+            mask = region_masks.get(str(region_id))
+            if mask is None or mask.shape != trimap.sure_bg.shape:
+                continue
+            if str(policy_value) == "transparent_hole":
+                semantic_forced_bg |= np.asarray(mask, dtype=bool)
+            elif str(policy_value) == "subject":
+                semantic_forced_fg |= np.asarray(mask, dtype=bool)
+    else:
+        summary_policy = str(decision.get("enclosed_near_bg_policy") or "")
+        if summary_policy == "transparent_hole" and candidate_mask is not None:
+            semantic_forced_bg |= np.asarray(candidate_mask, dtype=bool)
+        elif summary_policy == "subject" and candidate_mask is not None:
+            semantic_forced_fg |= np.asarray(candidate_mask, dtype=bool)
+
+    if bool(semantic_forced_bg.any() or semantic_forced_fg.any()):
+        sure_fg = trimap.sure_fg.copy()
+        sure_bg = trimap.sure_bg.copy()
+        unknown = trimap.unknown.copy()
+        if bool(semantic_forced_fg.any()):
+            sure_fg[semantic_forced_fg] = True
+            sure_bg[semantic_forced_fg] = False
+            unknown[semantic_forced_fg] = False
+        if bool(semantic_forced_bg.any()):
+            sure_bg[semantic_forced_bg] = True
+            sure_fg[semantic_forced_bg] = False
+            unknown[semantic_forced_bg] = False
+        trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
+
     preview = _trimap_preview_from_masks(trimap.sure_bg, trimap.unknown, trimap.sure_fg)
     metadata = {
         "states": {
@@ -253,9 +360,19 @@ def _known_b_trimap_preview(
             "unknown": {"value": 128, "color": [128, 128, 128], "pixels": int(trimap.unknown.sum())},
             "sure_fg": {"value": 255, "color": [255, 255, 255], "pixels": int(trimap.sure_fg.sum())},
         },
-        "source": "build_known_background_trimap",
-        "method": info.get("method"),
-        "semantic_decision": info.get("semantic_decision"),
+        "source": "known_b_bg_seed_outline_candidate_trimap",
+        "method": assembly_info.get("method"),
+        "semantic_decision": dict(decision),
+        "pymatting_trimap_mode": kwargs.get("trimap_mode"),
+        "pymatting_unknown_grow_px": kwargs.get("unknown_grow_px"),
+        "enclosed_near_bg_region_policies": hole_policies if isinstance(hole_policies, dict) else None,
+        "region_policy_application": "bg_seed_outline_region_overlay_applied"
+        if isinstance(hole_policies, dict)
+        else None,
+        "semantic_forced_bg_pixels": int(semantic_forced_bg.sum()),
+        "semantic_forced_fg_pixels": int(semantic_forced_fg.sum()),
+        "background_normalization": normalization_info,
+        "candidate_assembly": assembly_info,
     }
     return preview, metadata
 
@@ -309,13 +426,22 @@ def _attach_preview_assets(
     updated: list[SemanticCandidate] = []
     for candidate in candidates:
         decision = candidate.decision or {}
-        policy = str(decision.get("enclosed_near_bg_policy") or decision.get("screen_material_policy") or "")
+        policy = str(
+            decision.get("enclosed_near_bg_policy")
+            or decision.get("screen_material_policy")
+            or decision.get("button_body_policy")
+            or ""
+        )
         cut = policy in {"transparent_hole", "background", "remove"}
-        keep = policy in {"subject", "foreground", "keep", "preserve"} or not cut
+        keep = policy in {"subject", "foreground", "keep", "preserve", "opaque_subject"} or not cut
         color = (0, 190, 255, 96) if keep else (255, 86, 72, 112)
         mask = _candidate_mask(candidate, region_masks, (h, w))
         refs: dict[str, str] = {}
-        trimap_preview = _known_b_trimap_preview(image_srgb, route, candidate) if route_algorithm == "pymatting_known_b" else None
+        trimap_preview = (
+            _known_b_trimap_preview(image_srgb, route, candidate, candidate_mask=mask, region_masks=region_masks)
+            if route_algorithm == "pymatting_known_b"
+            else None
+        )
         trimap_image = trimap_preview[0] if trimap_preview is not None else _trimap_preview_from_masks(
             np.zeros((h, w), dtype=bool),
             np.ones((h, w), dtype=bool),
@@ -391,11 +517,11 @@ def _enclosed_near_background_regions(
         (2 * int(anchor_dilate_px) + 1, 2 * int(anchor_dilate_px) + 1),
     )
     near_subject = cv2.dilate(subject_support.astype(np.uint8), kernel, iterations=1).astype(bool)
-    candidate = enclosed & near_subject
+    support = enclosed & near_subject
 
     min_area = max(1, int(round(float(h * w) * float(min_area_ratio))))
     max_area = max(min_area, int(round(float(h * w) * float(max_area_ratio))))
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(candidate.astype(np.uint8), connectivity=8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(enclosed.astype(np.uint8), connectivity=8)
     regions: list[AmbiguityRegion] = []
     masks: dict[str, np.ndarray] = {}
     for label_idx in range(1, n_labels):
@@ -403,6 +529,16 @@ def _enclosed_near_background_regions(
         if area < min_area or area > max_area:
             continue
         comp = labels == label_idx
+        support_pixels = int((comp & support).sum())
+        support_fraction = float(support_pixels) / max(float(area), 1.0)
+        # The semantic unit is the whole enclosed same-B component. Nearby
+        # subject support is only evidence that the component is an internal
+        # ownership ambiguity, not the mask to preserve/cut. Using only the
+        # support ring makes keep-hole candidates preserve a thin outline while
+        # the actual same-B island remains governed by the generic trimap.
+        min_support_pixels = max(4, min(24, int(round(float(area) * 0.03))))
+        if support_pixels < min_support_pixels:
+            continue
         region_id = f"ambiguous_enclosed_bg_{len(regions)}"
         masks[region_id] = comp.copy()
         regions.append(
@@ -417,6 +553,9 @@ def _enclosed_near_background_regions(
                     "touches_exterior_background": False,
                     "enclosed_by_subject_support": True,
                     "near_background_fraction": float(near_bg[comp].mean()) if area else 0.0,
+                    "subject_support_pixels": int(support_pixels),
+                    "subject_support_fraction": float(support_fraction),
+                    "semantic_mask_scope": "full_enclosed_component",
                     "bg_distance_max": float(bg_distance_max),
                     "subject_distance_min": float(subject_distance_min),
                     "anchor_dilate_px": int(anchor_dilate_px),
@@ -454,13 +593,14 @@ def _screen_material_regions(
         return [], {}
     if route.get("algorithm") != "corridorkey":
         return [], {}
-    profile = str(route.get("parameter_profile") or "")
+    profile = _route_semantic_parameter_profile(route)
     execution_profile = str(route.get("execution_profile") or "")
     high_risk_profile = profile in {
         "key_color_material",
         "screen_tinted_translucency",
         "translucent_button",
     } or execution_profile in {
+        "corridorkey-character",
         "corridorkey-transparent-button",
         "corridorkey-effect-icon",
     }
@@ -514,6 +654,367 @@ def _screen_material_regions(
     return regions, masks
 
 
+def _known_b_button_body_regions(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    route: dict[str, Any],
+    *,
+    shadow_anchor_masks: dict[str, np.ndarray] | None = None,
+    min_area_ratio: float = 0.002,
+    max_area_ratio: float = 0.55,
+) -> tuple[list[AmbiguityRegion], dict[str, np.ndarray]]:
+    """Find same-key opaque body ownership ambiguity.
+
+    This is not the ordinary hard-button shadow path. Standard Known-B should
+    solve normal button shadows by shaping the shadow-facing unknown band. The
+    opaque-body recipe is a same-key special case: the subject color is close
+    enough to the known background that standard body evidence may fail to
+    measure the opaque material domain at all. Only that route/profile may add
+    an opaque-body candidate dimension.
+    """
+    if route.get("asset_kind") != "button":
+        return [], {}
+    profile = _route_semantic_parameter_profile(route)
+    if profile != "opaque_hard_ui_same_key_plateau":
+        return [], {}
+
+    params = route.get("params") if isinstance(route.get("params"), dict) else {}
+    try:
+        from .pymatting_refine import build_known_background_trimap
+
+        standard, standard_info = build_known_background_trimap(
+            image_srgb,
+            background_color,
+            bg_threshold=float(params.get("pymatting_bg_threshold", 3.5)),
+            fg_threshold=float(params.get("pymatting_fg_threshold", 24.0)),
+            boundary_band_px=int(params.get("pymatting_boundary_band_px", 2)),
+            adapt_bg_threshold=bool(params.get("pymatting_adapt_bg_threshold", False)),
+            adapt_fg_threshold=bool(params.get("pymatting_adapt_fg_threshold", True)),
+            adapt_boundary_band=bool(params.get("pymatting_adapt_boundary_band", True)),
+            trimap_mode="standard",
+            unknown_grow_px=0,
+        )
+        body, body_info = build_known_background_trimap(
+            image_srgb,
+            background_color,
+            bg_threshold=float(params.get("pymatting_bg_threshold", 3.5)),
+            fg_threshold=float(params.get("pymatting_fg_threshold", 24.0)),
+            boundary_band_px=int(params.get("pymatting_boundary_band_px", 2)),
+            adapt_bg_threshold=bool(params.get("pymatting_adapt_bg_threshold", False)),
+            adapt_fg_threshold=bool(params.get("pymatting_adapt_fg_threshold", True)),
+            adapt_boundary_band=bool(params.get("pymatting_adapt_boundary_band", True)),
+            trimap_mode="same_key_opaque_body_outline",
+            unknown_grow_px=2,
+        )
+    except Exception:
+        return [], {}
+
+    invaded_subject = standard.unknown & body.sure_fg
+    h, w = invaded_subject.shape
+    min_area = max(24, int(round(float(h * w) * min_area_ratio)))
+    max_area = max(min_area, int(round(float(h * w) * max_area_ratio)))
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(invaded_subject.astype(np.uint8), connectivity=8)
+
+    components: list[tuple[int, int]] = []
+    for label_idx in range(1, labels_count):
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        if min_area <= area <= max_area:
+            components.append((area, label_idx))
+    components.sort(reverse=True)
+
+    if not components:
+        return [], {}
+
+    shadow_anchor = np.zeros((h, w), dtype=bool)
+    if shadow_anchor_masks:
+        for mask in shadow_anchor_masks.values():
+            if mask.shape == shadow_anchor.shape:
+                shadow_anchor |= np.asarray(mask, dtype=bool)
+    if not bool(shadow_anchor.any()) or not bool(body.sure_fg.any()):
+        return [], {}
+
+    body_dist = cv2.distanceTransform(body.sure_fg.astype(np.uint8), cv2.DIST_L2, 3)
+    shadow_labels_count, shadow_labels, shadow_stats, _ = cv2.connectedComponentsWithStats(
+        shadow_anchor.astype(np.uint8),
+        connectivity=8,
+    )
+    largest_shadow_area = max(
+        (int(shadow_stats[label_idx, cv2.CC_STAT_AREA]) for label_idx in range(1, shadow_labels_count)),
+        default=0,
+    )
+    min_body_anchor_area = max(24, int(round(float(largest_shadow_area) * 0.25)))
+    body_evidence = np.zeros((h, w), dtype=bool)
+    body_components: list[dict[str, Any]] = []
+    omitted_shadow_components = 0
+    image_short = float(max(1, min(h, w)))
+    for label_idx in range(1, shadow_labels_count):
+        comp = shadow_labels == label_idx
+        area = int(shadow_stats[label_idx, cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        # Body evidence release should be driven by the dominant shadow-facing
+        # boundary. Tiny dark edge fragments are ignored as anchors so they do
+        # not cause unrelated subject-side exposure.
+        if area < min_body_anchor_area:
+            omitted_shadow_components += 1
+            continue
+        comp_w = int(shadow_stats[label_idx, cv2.CC_STAT_WIDTH])
+        comp_h = int(shadow_stats[label_idx, cv2.CC_STAT_HEIGHT])
+        comp_short = float(max(1, min(comp_w, comp_h)))
+        comp_long = float(max(1, max(comp_w, comp_h)))
+        # The exposure width is tied to the measured shadow component and image
+        # size. It should be a shallow subject-side strip along the shadow
+        # boundary: wide enough for the unknown band to contain real subject
+        # color, but not so wide that a small button turns into scattered
+        # interior unknowns unrelated to the shadow solve.
+        expose_px = float(max(1.0, min(6.0, image_short * 0.055, max(2.0, comp_short * 0.35))))
+        search_px = float(max(expose_px + 2.0, min(12.0, image_short * 0.10, max(expose_px + 2.0, comp_long * 0.45))))
+        radius = max(1, int(round(search_px)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+        near_shadow = cv2.dilate(comp.astype(np.uint8), kernel, iterations=1).astype(bool)
+        local_body = body.sure_fg & near_shadow & (body_dist <= expose_px)
+        if bool(local_body.any()):
+            body_evidence |= local_body
+        body_components.append(
+            {
+                "shadow_area_px": area,
+                "shadow_bbox_xyxy": [
+                    int(shadow_stats[label_idx, cv2.CC_STAT_LEFT]),
+                    int(shadow_stats[label_idx, cv2.CC_STAT_TOP]),
+                    int(shadow_stats[label_idx, cv2.CC_STAT_LEFT] + shadow_stats[label_idx, cv2.CC_STAT_WIDTH]),
+                    int(shadow_stats[label_idx, cv2.CC_STAT_TOP] + shadow_stats[label_idx, cv2.CC_STAT_HEIGHT]),
+                ],
+                "expose_px": float(expose_px),
+                "search_px": float(search_px),
+                "released_body_pixels": int(local_body.sum()),
+            }
+        )
+
+    if not bool(body_evidence.any()):
+        return [], {}
+    # Close tiny raster breaks along the shadow-facing strip, while keeping the
+    # mask anchored to body.sure_fg so it cannot spill into the shadow band.
+    body_evidence = cv2.morphologyEx(body_evidence.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)).astype(bool)
+    body_evidence &= body.sure_fg
+
+    body_outline = body_info.get("same_key_opaque_body_outline")
+    if not isinstance(body_outline, dict):
+        body_outline = {}
+
+    region_id = "ambiguous_button_body_shadow_facing_0"
+    largest_invaded = int(components[0][0]) if components else 0
+    region = AmbiguityRegion(
+        id=region_id,
+        type="button_body_subject_ownership",
+        bbox_xyxy=_bbox(body_evidence),
+        area_px=int(body_evidence.sum()),
+        mask_ref=region_id,
+        evidence={
+            "background_color": [int(c) for c in background_color],
+            "standard_trimap_method": standard_info.get("method"),
+            "body_outline_method": body_info.get("method"),
+            "outline_recipe": body_outline.get("outline_recipe"),
+            "standard_unknown_pixels": int(standard.unknown.sum()),
+            "body_outline_sure_fg_pixels": int(body.sure_fg.sum()),
+            "invaded_subject_pixels": int(invaded_subject.sum()),
+            "invaded_subject_components": int(labels_count - 1),
+            "largest_invaded_subject_component_px": largest_invaded,
+            "shadow_facing_body_pixels": int(body_evidence.sum()),
+            "shadow_components": body_components,
+            "omitted_small_shadow_components": int(omitted_shadow_components),
+            "min_body_anchor_shadow_area_px": int(min_body_anchor_area),
+            "evidence_mode": "shadow_facing_subject_evidence_for_button_shadow",
+        },
+        ambiguity={
+            "standard_unknown_score": 0.5,
+            "opaque_subject_score": 0.5,
+            "reason": "standard_trimap_lacks_subject_color_evidence_next_to_button_shadow",
+        },
+    )
+    return [region], {region_id: body_evidence.copy()}
+
+
+def _known_b_button_shadow_anchor_masks(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    route: dict[str, Any],
+    *,
+    min_area_ratio: float = 0.001,
+    max_area_ratio: float = 0.18,
+) -> dict[str, np.ndarray]:
+    """Find shadow-like boundary anchors for same-key body analysis.
+
+    These masks are not semantic ambiguity regions and never produce candidates.
+    They are only a direction hint for the rare same-key button-body case: when
+    the subject color is close to B, a shadow-facing strip can reveal where the
+    body outline should release more foreground evidence.
+    """
+    if route.get("asset_kind") != "button":
+        return {}
+
+    h, w = image_srgb.shape[:2]
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(3)
+    bgf = bg.astype(np.float32)
+    dominant = int(np.argmax(bgf))
+    sorted_bg = np.sort(bgf)
+    if float(bgf[dominant]) < 64.0 or float(sorted_bg[-1] - sorted_bg[-2]) < 48.0:
+        return {}
+
+    profile = _route_semantic_parameter_profile(route)
+    if profile == "opaque_hard_ui_no_shadow":
+        # Route/CorridorKey has already measured a hard UI button without cast
+        # shadow. Dark antialiasing, outline ridges, and body shading can satisfy
+        # the known-B darkening equation locally, but without shadow-profile
+        # support that color evidence is not enough to create a semantic shadow
+        # ownership candidate.
+        return {}
+    params = route.get("params") if isinstance(route.get("params"), dict) else {}
+    bg_distance_max = float(params.get("pymatting_bg_threshold", 3.5))
+    subject_distance_min = float(params.get("pymatting_fg_threshold", 24.0))
+    lab = srgb_to_oklab(image_srgb)
+    bg_lab = srgb_to_oklab(bg.reshape(1, 1, 3)).reshape(3)
+    distance = oklab_distance(lab, bg_lab).astype(np.float32)
+    near_bg = distance <= bg_distance_max
+    exterior_bg = _exterior_mask(near_bg)
+    enclosed_bg = near_bg & ~exterior_bg
+    # Distance from B is only "not proven background". Hard shadows and dark
+    # screen-material can satisfy this test too, so it must not be used as a
+    # subject semantic anchor directly.
+    non_bg_support = distance >= subject_distance_min
+    img = image_srgb.astype(np.float32)
+    other_max = np.max(np.delete(img, dominant, axis=2), axis=2)
+    non_dominant_delta = np.max(np.delete(np.abs(img - bgf.reshape(1, 1, 3)), dominant, axis=2), axis=2)
+    channel_drop = bgf[dominant] - img[..., dominant]
+    bg_image = bgf.reshape(1, 1, 3)
+    usable_bg = bg_image >= 8.0
+    shadow_weights = np.where(usable_bg, bg_image * bg_image, 0.0).astype(np.float32)
+    shadow_weight_sum = max(float(shadow_weights.sum()), 1e-6)
+    display_shadow = np.clip(
+        ((1.0 - img / np.maximum(bg_image, 1.0)) * shadow_weights).sum(axis=2) / shadow_weight_sum,
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    shadow_replay = (1.0 - display_shadow[..., None]) * bg_image
+    shadow_replay_error = np.mean(np.abs(shadow_replay - img), axis=2).astype(np.float32)
+    exact_known_bg = np.all(image_srgb == bg.reshape(1, 1, 3), axis=2)
+
+    max_channel = np.max(img, axis=2)
+    scalar_shadow_for_anchor = (
+        (display_shadow >= 0.025)
+        & (shadow_replay_error <= 18.0)
+        & ~exact_known_bg
+    )
+    bright_subject_floor = max(72.0, float(bgf[dominant]) * 0.55)
+    shadow_subject_anchor = (
+        non_bg_support
+        & (max_channel >= bright_subject_floor)
+        & ~scalar_shadow_for_anchor
+    )
+    shadow_subject_anchor = cv2.morphologyEx(
+        shadow_subject_anchor.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), np.uint8),
+    ).astype(bool)
+    if int(shadow_subject_anchor.sum()) < max(24, int(round(float(non_bg_support.sum()) * 0.12))):
+        shadow_subject_anchor = non_bg_support & ~scalar_shadow_for_anchor
+
+    image_short = float(max(1, min(h, w)))
+    near_subject_radius = max(1, int(round(image_short * 0.030)))
+    near_subject = cv2.dilate(
+        shadow_subject_anchor.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (near_subject_radius * 2 + 1, near_subject_radius * 2 + 1)),
+        iterations=1,
+    ).astype(bool)
+    boundary_anchor = shadow_subject_anchor | enclosed_bg
+    shadow_invade_px = float(image_short * 0.010)
+    shadow_expand_px = float(image_short * 0.125)
+    if bool(boundary_anchor.any()):
+        dist_outside_anchor = cv2.distanceTransform((~boundary_anchor).astype(np.uint8), cv2.DIST_L2, 3)
+        dist_inside_anchor = cv2.distanceTransform(boundary_anchor.astype(np.uint8), cv2.DIST_L2, 3)
+        subject_invasion_corridor = boundary_anchor & (dist_inside_anchor <= shadow_invade_px)
+        background_expansion_corridor = (~boundary_anchor) & (dist_outside_anchor <= shadow_expand_px)
+        shadow_boundary_corridor = (
+            background_expansion_corridor
+            | subject_invasion_corridor
+        )
+    else:
+        subject_invasion_corridor = np.zeros((h, w), dtype=bool)
+        background_expansion_corridor = np.zeros((h, w), dtype=bool)
+        shadow_boundary_corridor = np.zeros((h, w), dtype=bool)
+    background_shadow_solvable = (
+        (display_shadow >= 0.025)
+        & (shadow_replay_error <= 10.0)
+        & (background_expansion_corridor | (subject_invasion_corridor & near_subject))
+        & ~exterior_bg
+    )
+    screen_channel_darkening = (
+        (channel_drop >= max(10.0, float(bgf[dominant]) * 0.06))
+        & (img[..., dominant] > other_max + max(6.0, float(bgf[dominant]) * 0.03))
+        & (non_dominant_delta <= 52.0)
+        & (background_expansion_corridor | (subject_invasion_corridor & near_subject))
+        & ~exterior_bg
+    )
+    shadow_core = (background_shadow_solvable | screen_channel_darkening) & shadow_boundary_corridor & ~enclosed_bg
+    outward_shadow_tail = (
+        (display_shadow >= 0.006)
+        & (shadow_replay_error <= 12.0)
+        & background_expansion_corridor
+        & ~exact_known_bg
+        & ~enclosed_bg
+    )
+    shadow_direction_info: dict[str, Any] = {
+        "enabled": False,
+        "reason": "shadow_region_is_not_direction_clipped",
+    }
+    shadow_like = _components_touching_seed(shadow_core | outward_shadow_tail, shadow_core)
+    shadow_like = cv2.morphologyEx(shadow_like.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)).astype(bool)
+
+    min_area = max(12, int(round(float(h * w) * min_area_ratio)))
+    max_area = max(min_area, int(round(float(h * w) * max_area_ratio)))
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(shadow_like.astype(np.uint8), connectivity=8)
+    components: list[tuple[int, int]] = []
+    adjacency_radius = max(1, int(round(image_short * 0.006)))
+    adjacency_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (adjacency_radius * 2 + 1, adjacency_radius * 2 + 1),
+    )
+    for label_idx in range(1, labels_count):
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        if area < min_area or area > max_area:
+            continue
+        comp = labels == label_idx
+        ring = cv2.dilate(comp.astype(np.uint8), adjacency_kernel, iterations=1).astype(bool) & ~comp
+        ring_pixels = int(ring.sum())
+        exterior_bg_pixels = int((ring & exterior_bg).sum()) if ring_pixels else 0
+        near_bg_pixels = int((ring & near_bg).sum()) if ring_pixels else 0
+        subject_ring_pixels = int((ring & shadow_subject_anchor).sum()) if ring_pixels else 0
+        exterior_bg_fraction = float(exterior_bg_pixels) / max(float(ring_pixels), 1.0)
+        # Color alone cannot distinguish black/dark subject decoration from a
+        # black shadow over the measured screen. As an anchor it must expose a
+        # background-side boundary; subject-only dark details would pull the body
+        # detector inward, which is exactly the B056 failure mode we avoid.
+        min_exterior_bg_fraction = 0.015
+        if exterior_bg_fraction < min_exterior_bg_fraction:
+            continue
+        components.append((area, label_idx))
+    components.sort(reverse=True)
+    if components:
+        dominant_area = int(components[0][0])
+        min_relative_area = max(min_area, int(round(float(dominant_area) * 0.05)))
+        components = [
+            (area, label_idx)
+            for area, label_idx in components
+            if int(area) >= min_relative_area
+        ]
+
+    masks: dict[str, np.ndarray] = {}
+    for area, label_idx in components[:3]:
+        comp = labels == label_idx
+        region_id = f"button_shadow_anchor_{len(masks)}"
+        masks[region_id] = comp.copy()
+    return masks
+
+
 def _ready_candidate() -> SemanticCandidate:
     return SemanticCandidate(
         id="auto_default",
@@ -525,6 +1026,13 @@ def _ready_candidate() -> SemanticCandidate:
         decision={"policy": "auto_default"},
         reasons=["no high-impact semantic ambiguity detected"],
     )
+
+
+def _default_candidate_id(candidates: list[SemanticCandidate]) -> str:
+    for candidate in candidates:
+        if candidate.default:
+            return candidate.id
+    return candidates[0].id if candidates else "auto_default"
 
 
 def _enclosed_near_bg_candidates(regions: list[AmbiguityRegion]) -> list[SemanticCandidate]:
@@ -636,6 +1144,420 @@ def _screen_material_candidates(regions: list[AmbiguityRegion]) -> list[Semantic
     ]
 
 
+@dataclass(frozen=True)
+class _CandidateOption:
+    id: str
+    label: str
+    decision: dict[str, Any]
+    regions: list[str]
+    score: float
+    weight: float
+    reasons: list[str]
+
+
+@dataclass(frozen=True)
+class _CandidateUnit:
+    id: str
+    kind: str
+    options: list[_CandidateOption]
+
+
+def _merge_candidate_decisions(options: list[_CandidateOption]) -> dict[str, Any]:
+    decision: dict[str, Any] = {}
+    hole_policies: dict[str, str] = {}
+    units: list[dict[str, Any]] = []
+    for option in options:
+        option_decision = dict(option.decision)
+        option_holes = option_decision.pop("enclosed_near_bg_region_policies", None)
+        if isinstance(option_holes, dict):
+            for region_id, policy in option_holes.items():
+                hole_policies[str(region_id)] = str(policy)
+        decision.update(option_decision)
+        units.append(
+            {
+                "option_id": option.id,
+                "label": option.label,
+                "score": float(option.score),
+                "regions": list(option.regions),
+            }
+        )
+    if hole_policies:
+        decision["enclosed_near_bg_region_policies"] = hole_policies
+        unique_values = set(hole_policies.values())
+        if len(unique_values) == 1:
+            decision["enclosed_near_bg_policy"] = next(iter(unique_values))
+    decision["candidate_units"] = units
+    return decision
+
+
+def _rank_candidate_option_combos(
+    units: list[_CandidateUnit],
+    *,
+    beam_width: int = 24,
+    max_candidates: int = 8,
+) -> list[tuple[float, list[_CandidateOption]]]:
+    """Score and prune semantic candidate combinations.
+
+    Button candidates are a product of the semantic units that still require a
+    user choice: enclosed known-B holes and the rare same-key opaque-body case.
+    Shadow is not a unit here; it is boundary evidence inside the trimap builder.
+    The score is a weighted mean of observable local evidence and is exposed as
+    candidate confidence rather than hidden as a router default.
+    """
+    combos: list[tuple[float, float, list[_CandidateOption]]] = [(0.0, 0.0, [])]
+    for unit in units:
+        expanded: list[tuple[float, float, list[_CandidateOption]]] = []
+        for score_sum, weight_sum, chosen in combos:
+            for option in unit.options:
+                expanded.append(
+                    (
+                        score_sum + option.score * option.weight,
+                        weight_sum + option.weight,
+                        chosen + [option],
+                    )
+                )
+        expanded.sort(key=lambda item: (item[0] / max(item[1], 1e-6), item[0]), reverse=True)
+        combos = expanded[:beam_width]
+    ranked = [
+        (score_sum / max(weight_sum, 1e-6), chosen)
+        for score_sum, weight_sum, chosen in combos
+    ]
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[:max_candidates]
+
+
+def _candidate_id_from_options(options: list[_CandidateOption]) -> str:
+    if not options:
+        return "auto_default"
+    return "use_" + "_".join(option.id for option in options)
+
+
+def _button_candidate_units(regions: list[AmbiguityRegion]) -> list[_CandidateUnit]:
+    hole_regions = [region for region in regions if region.type == "enclosed_near_background"]
+    body_regions = [region for region in regions if region.type == "button_body_subject_ownership"]
+    units: list[_CandidateUnit] = []
+
+    if body_regions:
+        body_ids = [region.id for region in body_regions]
+        # Opaque body is a same-key special-case dimension, not the ordinary
+        # hard-button shadow path. Standard body remains the default route for
+        # normal buttons; this unit exists only when route/profile evidence says
+        # same-key material can collapse under the standard trimap.
+        invaded = sum(int(region.evidence.get("invaded_subject_pixels") or 0) for region in body_regions)
+        body_score_boost = min(0.08, invaded / max(1.0, sum(region.area_px for region in body_regions)) * 0.02)
+        units.append(
+            _CandidateUnit(
+                id="button_body",
+                kind="button_body_subject_ownership",
+                options=[
+                    _CandidateOption(
+                        id="opaque_body",
+                        label="Opaque body",
+                        decision={
+                            "button_body_policy": "opaque_subject",
+                            "pymatting_trimap_mode": "same_key_opaque_body_outline",
+                            "pymatting_unknown_grow_px": 2,
+                        },
+                        regions=body_ids,
+                        score=min(0.94, 0.84 + body_score_boost),
+                        weight=1.15,
+                        reasons=[
+                            "measured button outline gives a better shadow-facing unknown distribution",
+                            "standard trimap leaves the disputed shadow band with too little subject color evidence",
+                        ],
+                    ),
+                    _CandidateOption(
+                        id="standard_body",
+                        label="Standard body",
+                        decision={
+                            "button_body_policy": "standard_subject_evidence",
+                            "pymatting_trimap_mode": "standard",
+                            "pymatting_unknown_grow_px": 0,
+                        },
+                        regions=body_ids,
+                        score=0.42,
+                        weight=1.15,
+                        reasons=[
+                            "standard trimap is retained as a counterfactual for uncertain button-body tracing",
+                        ],
+                    ),
+                ],
+            )
+        )
+
+    if len(hole_regions) > 1:
+        hole_ids = [region.id for region in hole_regions]
+        tight_count = sum(
+            1
+            for region in hole_regions
+            if str(region.evidence.get("evidence_mode") or "") == "tight_enclosed_background_match"
+        )
+        tight_fraction = float(tight_count) / max(float(len(hole_regions)), 1.0)
+        cut_score = 0.42 + 0.24 * tight_fraction
+        keep_score = 0.64 - 0.12 * tight_fraction
+        units.append(
+            _CandidateUnit(
+                id="holes",
+                kind="enclosed_near_background_group",
+                options=[
+                    _CandidateOption(
+                        id="cut_all_holes",
+                        label="Cut all holes",
+                        decision={
+                            "enclosed_near_bg_region_policies": {
+                                region_id: "transparent_hole" for region_id in hole_ids
+                            }
+                        },
+                        regions=hole_ids,
+                        score=cut_score,
+                        weight=0.9,
+                        reasons=[
+                            "multiple enclosed same-background components are grouped as one hole ownership choice",
+                        ],
+                    ),
+                    _CandidateOption(
+                        id="keep_all_holes",
+                        label="Keep all holes",
+                        decision={
+                            "enclosed_near_bg_region_policies": {
+                                region_id: "subject" for region_id in hole_ids
+                            }
+                        },
+                        regions=hole_ids,
+                        score=keep_score,
+                        weight=0.9,
+                        reasons=[
+                            "single-image evidence cannot prove that repeated enclosed same-background details are transparent cutouts",
+                        ],
+                    ),
+                ],
+            )
+        )
+    else:
+        for index, region in enumerate(hole_regions):
+            evidence_mode = str(region.evidence.get("evidence_mode") or "")
+            tight_known_b = evidence_mode == "tight_enclosed_background_match"
+            # A clean enclosed known-B island is more likely a real hole;
+            # translucent material bands get the opposite prior. A single hole
+            # remains independently selectable; multiple repeated holes are
+            # grouped above so the useful all-cut/all-keep alternatives do not
+            # disappear behind beam pruning.
+            cut_score = 0.66 if tight_known_b else 0.42
+            keep_score = 0.52 if tight_known_b else 0.64
+            units.append(
+                _CandidateUnit(
+                    id=f"hole_{index}",
+                    kind="enclosed_near_background",
+                    options=[
+                        _CandidateOption(
+                            id=f"cut_hole_{index}",
+                            label=f"Cut hole {index + 1}",
+                            decision={"enclosed_near_bg_region_policies": {region.id: "transparent_hole"}},
+                            regions=[region.id],
+                            score=cut_score,
+                            weight=0.9,
+                            reasons=[
+                                "enclosed pixels match the known background color",
+                                "hole decisions are scored per region before candidate pruning",
+                            ],
+                        ),
+                        _CandidateOption(
+                            id=f"keep_hole_{index}",
+                            label=f"Keep hole {index + 1}",
+                            decision={"enclosed_near_bg_region_policies": {region.id: "subject"}},
+                            regions=[region.id],
+                            score=keep_score,
+                            weight=0.9,
+                            reasons=[
+                                "single-image evidence cannot prove every enclosed same-background region is transparent",
+                            ],
+                        ),
+                    ],
+                )
+            )
+
+    return units
+
+
+def _button_known_b_candidates(regions: list[AmbiguityRegion]) -> list[SemanticCandidate]:
+    units = _button_candidate_units(regions)
+    if not units:
+        return [_ready_candidate()]
+
+    ranked = _rank_candidate_option_combos(units)
+    candidates: list[SemanticCandidate] = []
+    for rank, (score, options) in enumerate(ranked):
+        decision = _merge_candidate_decisions(options)
+        decision["candidate_score"] = float(score)
+        decision["candidate_rank"] = int(rank)
+        region_ids = sorted({region_id for option in options for region_id in option.regions})
+        preview = {
+            "regions": region_ids,
+            "area_px": int(sum(region.area_px for region in regions if region.id in region_ids)),
+            "bbox_xyxy": regions[0].bbox_xyxy if regions else [0, 0, 0, 0],
+            "score": float(score),
+            "rank": int(rank),
+            "beam_width": 24,
+            "max_candidates": 8,
+            "unit_count": len(units),
+        }
+        candidates.append(
+            SemanticCandidate(
+                id=_candidate_id_from_options(options),
+                label=" + ".join(option.label for option in options),
+                intent="Apply the ranked ownership decisions for the measured Known-B button ambiguities.",
+                default=rank == 0,
+                confidence=float(score),
+                risk_level="medium",
+                decision=decision,
+                regions=region_ids,
+                preview=preview,
+                reasons=[reason for option in options for reason in option.reasons],
+            )
+        )
+    return candidates
+
+
+def _candidate_with_route(
+    candidate: SemanticCandidate,
+    *,
+    route_candidate_id: str,
+    id_prefix: str | None = None,
+    region_id_map: dict[str, str] | None = None,
+) -> SemanticCandidate:
+    region_id_map = region_id_map or {}
+    candidate_id = f"{id_prefix}__{candidate.id}" if id_prefix else candidate.id
+    regions = [region_id_map.get(region_id, region_id) for region_id in candidate.regions]
+    preview = dict(candidate.preview)
+    if isinstance(preview.get("regions"), list):
+        preview["regions"] = [region_id_map.get(str(region_id), str(region_id)) for region_id in preview["regions"]]
+    decision = _remap_decision_region_ids(candidate.decision, region_id_map)
+    return replace(
+        candidate,
+        id=candidate_id,
+        route_candidate_id=route_candidate_id,
+        regions=regions,
+        preview=preview,
+        decision=decision,
+    )
+
+
+def _remap_decision_region_ids(decision: dict[str, Any], region_id_map: dict[str, str]) -> dict[str, Any]:
+    if not region_id_map:
+        return dict(decision)
+    remapped = dict(decision)
+    hole_policies = remapped.get("enclosed_near_bg_region_policies")
+    if isinstance(hole_policies, dict):
+        remapped["enclosed_near_bg_region_policies"] = {
+            region_id_map.get(str(region_id), str(region_id)): policy
+            for region_id, policy in hole_policies.items()
+        }
+    units = remapped.get("candidate_units")
+    if isinstance(units, list):
+        updated_units = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                updated_units.append(unit)
+                continue
+            unit_copy = dict(unit)
+            if isinstance(unit_copy.get("regions"), list):
+                unit_copy["regions"] = [
+                    region_id_map.get(str(region_id), str(region_id))
+                    for region_id in unit_copy["regions"]
+                ]
+            updated_units.append(unit_copy)
+        remapped["candidate_units"] = updated_units
+    return remapped
+
+
+def _prefix_route_regions(
+    regions: list[AmbiguityRegion],
+    masks: dict[str, np.ndarray],
+    *,
+    prefix: str | None,
+) -> tuple[list[AmbiguityRegion], dict[str, np.ndarray], dict[str, str]]:
+    if not prefix:
+        return regions, masks, {}
+    region_id_map = {region.id: f"{prefix}__{region.id}" for region in regions}
+    updated_regions = [
+        replace(region, id=region_id_map[region.id], mask_ref=region_id_map[region.id])
+        for region in regions
+    ]
+    updated_masks = {
+        region_id_map.get(region_id, region_id): mask
+        for region_id, mask in masks.items()
+    }
+    return updated_regions, updated_masks, region_id_map
+
+
+def _semantic_plan_for_route(
+    image_srgb: np.ndarray,
+    *,
+    route: dict[str, Any],
+    preprocess: PreprocessDecision | None,
+) -> tuple[np.ndarray, PreprocessDecision | None, list[AmbiguityRegion], dict[str, np.ndarray], list[SemanticCandidate]]:
+    regions: list[AmbiguityRegion] = []
+    region_masks: dict[str, np.ndarray] = {}
+    background = _background_from_route(route)
+    semantic_input = image_srgb
+    effective_preprocess = preprocess
+    if route.get("algorithm") == "pymatting_known_b" and background is not None:
+        selected_preprocess = set(preprocess.selected) if preprocess is not None else set()
+        if BACKGROUND_REPAIR in selected_preprocess:
+            thresholds = _known_b_thresholds_from_route(route)
+            normalized, known_b_preprocess = repair_known_background_preprocess(
+                image_srgb,
+                background,
+                bg_threshold=float(thresholds["bg_threshold"]),
+                fg_threshold=float(thresholds["fg_threshold"]),
+                adaptive=False,
+            )
+            effective_preprocess = _merge_preprocess_decisions(preprocess, known_b_preprocess)
+            semantic_input = normalized
+        hole_regions, hole_masks = _enclosed_near_background_regions(
+            semantic_input,
+            background,
+            **_known_b_semantic_region_settings(route),
+        )
+        regions = hole_regions
+        region_masks = dict(hole_masks)
+        if route.get("asset_kind") == "button":
+            # Shadow-like darkening is collected only as a directional anchor for
+            # same-key body tracing. It is deliberately not merged into regions:
+            # ordinary button shadows should be handled by the BG-seed outline
+            # trimap, while only enclosed known-B islands remain as hole choices.
+            shadow_anchor_masks = _known_b_button_shadow_anchor_masks(
+                semantic_input,
+                background,
+                route,
+            )
+            body_regions, body_masks = _known_b_button_body_regions(
+                semantic_input,
+                background,
+                route,
+                shadow_anchor_masks=shadow_anchor_masks,
+            )
+            regions = hole_regions + body_regions
+            region_masks = {**hole_masks, **body_masks}
+    elif route.get("algorithm") == "corridorkey":
+        regions, region_masks = _screen_material_regions(semantic_input, route)
+
+    if regions:
+        region_types = {region.type for region in regions}
+        if "screen_material_or_translucency" in region_types:
+            candidates = _screen_material_candidates(regions)
+        elif (
+            "button_body_subject_ownership" in region_types
+            or (route.get("asset_kind") == "button" and "enclosed_near_background" in region_types)
+        ):
+            candidates = _button_known_b_candidates(regions)
+        else:
+            candidates = _enclosed_near_bg_candidates(regions)
+    else:
+        candidates = [_ready_candidate()]
+    return semantic_input, effective_preprocess, regions, region_masks, candidates
+
+
 def analyze_candidates(
     image_srgb: np.ndarray,
     *,
@@ -646,85 +1568,106 @@ def analyze_candidates(
 ) -> AnalyzeResult:
     """Run lightweight route/profile and semantic candidate analysis."""
 
-    route_decision = classify_route(
+    route_candidate_models = build_route_candidates(
         image_srgb,
         screen_mode=screen_mode,
         preset=preset,
         fallback_background_color=fallback_background_color,
     )
-    route = _route_payload(route_decision)
-    regions: list[AmbiguityRegion] = []
-    region_masks: dict[str, np.ndarray] = {}
-    background = _background_from_route(route)
-    semantic_input = image_srgb
+    default_route_candidate = select_default_route_candidate(route_candidate_models)
+    route = _route_payload(default_route_candidate)
+    route_candidate_payloads = [_route_candidate_payload(candidate) for candidate in route_candidate_models]
+    route_candidate_models_for_semantics = sorted(
+        route_candidate_models,
+        key=lambda candidate: (candidate.id != default_route_candidate.id, candidate.id),
+    )
+    multiple_routes = len(route_candidate_models) > 1
+
+    all_regions: list[AmbiguityRegion] = []
+    all_region_masks: dict[str, np.ndarray] = {}
+    route_plans: list[dict[str, Any]] = []
     effective_preprocess = preprocess
-    if route.get("algorithm") == "pymatting_known_b" and background is not None:
-        selected_preprocess = set(preprocess.selected) if preprocess is not None else set()
-        if BACKGROUND_REPAIR in selected_preprocess:
-            normalized, known_b_preprocess = repair_known_background_preprocess(
-                image_srgb,
-                background,
-                **_known_b_thresholds_from_route(route),
-            )
-            effective_preprocess = _merge_preprocess_decisions(preprocess, known_b_preprocess)
-            semantic_input = normalized
-        regions, region_masks = _enclosed_near_background_regions(
-            semantic_input,
-            background,
-            **_known_b_semantic_region_settings(route),
+    for route_candidate in route_candidate_models_for_semantics:
+        route_candidate_id = route_candidate.id
+        route_payload = _route_payload(route_candidate)
+        semantic_input, route_preprocess, regions, region_masks, candidates = _semantic_plan_for_route(
+            image_srgb,
+            route=route_payload,
+            preprocess=preprocess,
         )
-    elif route.get("algorithm") == "corridorkey":
-        regions, region_masks = _screen_material_regions(semantic_input, route)
+        if route_preprocess is not None:
+            effective_preprocess = _merge_preprocess_decisions(effective_preprocess, route_preprocess)
+        prefix = route_candidate_id if multiple_routes else None
+        regions, region_masks, region_id_map = _prefix_route_regions(regions, region_masks, prefix=prefix)
+        candidates = [
+            _candidate_with_route(
+                candidate,
+                route_candidate_id=route_candidate_id,
+                id_prefix=prefix,
+                region_id_map=region_id_map,
+            )
+            for candidate in candidates
+        ]
+        all_regions.extend(regions)
+        all_region_masks.update(region_masks)
+        route_plans.append(
+            {
+                "route": route_payload,
+                "route_candidate_id": route_candidate_id,
+                "semantic_input": semantic_input,
+                "regions": regions,
+                "region_masks": region_masks,
+                "candidates": candidates,
+            }
+        )
 
     analysis_id = _analysis_id(
-        semantic_input,
-        route=route,
+        image_srgb,
+        route={"default": route, "route_candidates": route_candidate_payloads},
         preprocess=effective_preprocess,
-        regions=regions,
+        regions=all_regions,
     )
-    regions = _with_mask_refs(regions, analysis_id)
+    region_refs = _with_mask_refs(all_regions, analysis_id)
+    region_by_id = {region.id: region for region in region_refs}
+    all_regions = region_refs
 
-    if regions:
-        region_types = {region.type for region in regions}
-        if "screen_material_or_translucency" in region_types:
-            candidates = _screen_material_candidates(regions)
-        else:
-            candidates = _enclosed_near_bg_candidates(regions)
-        candidates, preview_assets = _attach_preview_assets(
-            semantic_input,
-            route=route,
-            route_algorithm=str(route.get("algorithm") or ""),
+    all_candidates: list[SemanticCandidate] = []
+    preview_assets: dict[str, Any] = {
+        "schema": "ermbg.analysis_preview_assets.v1",
+        "image_space": "analyze_semantic_input",
+    }
+    for plan in route_plans:
+        plan_regions = [region_by_id.get(region.id, region) for region in plan["regions"]]
+        candidates, assets = _attach_preview_assets(
+            plan["semantic_input"],
+            route=plan["route"],
+            route_algorithm=str(plan["route"].get("algorithm") or ""),
             analysis_id=analysis_id,
-            regions=regions,
-            region_masks=region_masks,
-            candidates=candidates,
+            regions=plan_regions,
+            region_masks=plan["region_masks"],
+            candidates=plan["candidates"],
         )
-        return AnalyzeResult(
-            status="needs_decision",
-            analysis_id=analysis_id,
-            preprocess=effective_preprocess,
-            route=route,
-            ambiguity_regions=regions,
-            candidates=candidates,
-            default_candidate_id="auto_default",
-            preview_assets=preview_assets,
-        )
-    candidates, preview_assets = _attach_preview_assets(
-        semantic_input,
-        route=route,
-        route_algorithm=str(route.get("algorithm") or ""),
-        analysis_id=analysis_id,
-        regions=[],
-        region_masks={},
-        candidates=[_ready_candidate()],
-    )
+        preview_assets.update(assets)
+        all_candidates.extend(candidates)
+
+    default_route_candidate_id = default_route_candidate.id
+    default_route_candidates = [
+        candidate
+        for candidate in all_candidates
+        if candidate.route_candidate_id == default_route_candidate_id
+    ]
+    default_candidate_id = _default_candidate_id(default_route_candidates or all_candidates)
+    status = "needs_decision" if all_regions or len(route_candidate_models) > 1 else "ready"
     return AnalyzeResult(
-        status="ready",
+        status=status,
         analysis_id=analysis_id,
         preprocess=effective_preprocess,
         route=route,
-        candidates=candidates,
-        default_candidate_id="auto_default",
+        route_candidates=route_candidate_payloads,
+        default_route_candidate_id=default_route_candidate_id,
+        ambiguity_regions=all_regions,
+        candidates=all_candidates,
+        default_candidate_id=default_candidate_id,
         preview_assets=preview_assets,
     )
 

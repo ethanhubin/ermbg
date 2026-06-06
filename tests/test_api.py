@@ -88,7 +88,9 @@ def test_matte_image_pymatting_known_b_accepts_parameters():
         pymatting_bg_threshold=4.5,
         pymatting_fg_threshold=28.0,
         pymatting_boundary_band_px=3,
-        pymatting_auto_adapt=False,
+        pymatting_adapt_bg_threshold=False,
+        pymatting_adapt_fg_threshold=False,
+        pymatting_adapt_boundary_band=False,
         pymatting_cg_maxiter=1500,
         pymatting_cg_rtol=1e-5,
     )
@@ -102,7 +104,9 @@ def test_matte_image_pymatting_known_b_accepts_parameters():
     assert params["bg_threshold"] == 4.5
     assert params["fg_threshold"] == 28.0
     assert params["boundary_band_px"] == 3
-    assert params["auto_adapt"] is False
+    assert params["adapt_bg_threshold"] is False
+    assert params["adapt_fg_threshold"] is False
+    assert params["adapt_boundary_band"] is False
     assert params["cg_maxiter"] == 1500
     assert params["cg_rtol"] == 1e-5
 
@@ -215,7 +219,7 @@ def test_matte_image_pymatting_known_b_auto_background_falls_back_when_unstable(
     assert background["auto_background"]["reason"] == "corner/background border is unstable"
     assert params["requested_bg_source"] == "auto"
     assert params["bg_source"] == "custom"
-    assert params["auto_adapt"] is False
+    assert params["adapt_bg_threshold"] is False
 
 
 def test_matte_image_pymatting_known_b_recovers_neutral_ui_shadow():

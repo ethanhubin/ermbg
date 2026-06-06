@@ -51,31 +51,49 @@ powershell -ExecutionPolicy Bypass -File scripts\start_local.ps1 -DirectUrl http
 - `python -m ermbg.direct_worker_server --host 127.0.0.1 --port 7871`;
 - `python -m uvicorn ermbg.web:app --host 127.0.0.1 --port 7860`。
 
+## 远端 Worker 更新
+
+远端算法或 API 改动后:
+
+```bash
+scripts/sync_comfy_ssh.sh --clean --smoke
+scripts/restart_direct_worker_ssh.sh --restart
+curl -sS "http://192.168.0.8:7871/health"
+```
+
+`health.git_sha` 带 `-dirty` 是允许的，表示当前同步的是本地脏工作区快照。
+
 ## 必跑测试
 
-涉及 Web 或运行时改动时至少运行:
+涉及 Web 或运行时改动:
 
 ```powershell
 .venv\Scripts\pytest.exe tests\test_web.py tests\test_runtime_capabilities.py
 ```
 
-涉及 Direct Worker request 或 executor 边界时补充:
+涉及 Direct Worker request 或 executor 边界:
 
 ```powershell
 .venv\Scripts\pytest.exe tests\test_direct_worker_server.py
 ```
 
-## Web smoke
+涉及 Known-B / Analyze:
+
+```powershell
+.venv\Scripts\pytest.exe tests\test_analyze.py tests\test_pymatting_refine.py
+```
+
+## Web Smoke
 
 1. 确认 `7860` 由 `uvicorn ermbg.web:app` 持有。
-2. 确认首页包含改动标记,例如 `Auto Route`、`Overlay`、`Trimap`、`Hint`。
-3. 请求 `/api/runtime-capabilities?include_comfy=false&include_object_info=false`。
-4. 用真实图片调用 `/api/analyze-candidates`。
-5. 用 Analyze payload 调用 `/api/execute-candidate`。
+2. 请求 `/api/runtime-capabilities`，确认 Direct Worker URL、health、GPU/CPU 能力。
+3. 用真实图片调用 `/api/preprocess-analysis`。
+4. 用真实图片调用 `/api/analyze-candidates`，确认 Analyze 不执行完整 matte。
+5. 用 Analyze payload 或兼容层 `/api/matte-candidates?backend=auto` 跑真实执行。
 6. 检查 `execution_backend`、`execution_server_url`、`server_elapsed_sec`。
-7. 对显式 Execute request,检查 Direct Worker `timings.route_sec` 为 `0.0` 或接近 0。
+7. 对显式 Execute request，检查 Direct Worker `timings.route_sec` 为 `0.0` 或接近 0。
 
-## 产物规则
+## Eval 产物
 
-生成的 eval/debug 产物放在 `out/` 下自包含目录中,并写机器可读 `summary.json`。
-批量测试产物使用标准 `ermbg.run.v1` manifest。
+生成的 eval/debug 产物必须放在 `out/` 下自包含目录中，并写机器可读
+`summary.json`。批量测试产物使用标准 `ermbg.run.v1` manifest。

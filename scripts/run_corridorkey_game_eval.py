@@ -17,13 +17,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ermbg import matte_image
+from ermbg.analyze import analyze_candidates
 from ermbg.artifacts import build_run_manifest, route_from_response, runtime_from_response, write_run_manifest
 from ermbg.comfy import DEFAULT_COMFY_URL
 from ermbg.direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
-EVAL_BACKENDS = ("auto", "direct-worker", "comfy-corridorkey", "comfy-pymatting-known-b", "comfy-rmbg")
+EVAL_BACKENDS = ("auto", "direct-worker")
 COLOR_PROTECTION_MODES = ("auto", "on", "off")
 HARD_UI_HINT_MODES = (
     "all_white",
@@ -53,6 +54,157 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _decode_png_data_url_gray(data_url: str) -> np.ndarray:
+    marker = "base64,"
+    if not data_url.startswith("data:image/png;") or marker not in data_url:
+        raise ValueError("Analyze preview asset must be a PNG data URL")
+    data = base64.b64decode(data_url.split(marker, 1)[1])
+    return np.asarray(Image.open(io.BytesIO(data)).convert("L"), dtype=np.uint8)
+
+
+def _semantic_candidate_record(analysis_payload: dict[str, Any], candidate_id: str) -> dict[str, Any] | None:
+    candidates = analysis_payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if isinstance(candidate, dict) and str(candidate.get("id") or "") == candidate_id:
+            return candidate
+    return None
+
+
+def _selected_route_payload(analysis_payload: dict[str, Any], candidate: dict[str, Any] | None) -> dict[str, Any]:
+    route_candidate_id = None
+    if isinstance(candidate, dict):
+        route_candidate_id = candidate.get("route_candidate_id")
+        decision = candidate.get("decision")
+        if route_candidate_id is None and isinstance(decision, dict):
+            route_candidate_id = decision.get("route_candidate_id")
+    if route_candidate_id is None:
+        route_candidate_id = analysis_payload.get("default_route_candidate_id")
+    route_candidates = analysis_payload.get("route_candidates")
+    if isinstance(route_candidates, list) and route_candidate_id is not None:
+        for route_candidate in route_candidates:
+            if isinstance(route_candidate, dict) and route_candidate.get("id") == route_candidate_id:
+                return dict(route_candidate)
+    route = analysis_payload.get("route")
+    return dict(route) if isinstance(route, dict) else {}
+
+
+def _candidate_explicit_trimap(
+    analysis_payload: dict[str, Any],
+    candidate: dict[str, Any] | None,
+    image_shape: tuple[int, int],
+) -> np.ndarray | None:
+    route = _selected_route_payload(analysis_payload, candidate)
+    if str(route.get("algorithm") or route.get("backend") or "") != "pymatting_known_b":
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    preview = candidate.get("preview")
+    assets = preview.get("assets") if isinstance(preview, dict) else None
+    asset_ref = str(assets.get("trimap") or "") if isinstance(assets, dict) else ""
+    if not asset_ref:
+        asset_ref = f"candidate:{candidate.get('id')}:trimap"
+    preview_assets = analysis_payload.get("preview_assets")
+    asset = preview_assets.get(asset_ref) if isinstance(preview_assets, dict) else None
+    if not isinstance(asset, dict):
+        return None
+    if asset.get("execution_role") not in {None, "pymatting_explicit_trimap"}:
+        return None
+    data_url = asset.get("data_url")
+    if not isinstance(data_url, str):
+        return None
+    trimap = _decode_png_data_url_gray(data_url)
+    if trimap.shape != image_shape:
+        raise ValueError("Analyze candidate trimap shape does not match input image")
+    out = np.full(trimap.shape, 128, dtype=np.uint8)
+    out[trimap < 64] = 0
+    out[trimap > 191] = 255
+    return out
+
+
+def _analyze_default_execution_contract(
+    input_path: Path,
+    *,
+    screen_mode: str,
+    preset: str,
+    fallback_background_color: tuple[int, int, int],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], np.ndarray | None]:
+    image_srgb = np.asarray(Image.open(input_path).convert("RGB"), dtype=np.uint8)
+    analysis_payload = analyze_candidates(
+        image_srgb,
+        screen_mode=screen_mode,
+        preset=preset,
+        fallback_background_color=fallback_background_color,
+    ).to_dict()
+    selected_candidate_id = str(analysis_payload.get("default_candidate_id") or "auto_default")
+    candidate = _semantic_candidate_record(analysis_payload, selected_candidate_id)
+    route_decision = _selected_route_payload(analysis_payload, candidate)
+    semantic_decision = dict(candidate.get("decision") or {}) if isinstance(candidate, dict) else {"policy": "auto_default"}
+    explicit_trimap = _candidate_explicit_trimap(analysis_payload, candidate, image_srgb.shape[:2])
+    contract = _analysis_contract_summary(
+        analysis_payload,
+        selected_candidate_id=selected_candidate_id,
+        selected_candidate=candidate,
+        route_decision=route_decision,
+        explicit_trimap=explicit_trimap,
+    )
+    return route_decision, semantic_decision, contract, explicit_trimap
+
+
+def _analysis_contract_summary(
+    analysis_payload: dict[str, Any],
+    *,
+    selected_candidate_id: str,
+    selected_candidate: dict[str, Any] | None,
+    route_decision: dict[str, Any],
+    explicit_trimap: np.ndarray | None,
+) -> dict[str, Any]:
+    route_candidates = [
+        {
+            "id": candidate.get("id"),
+            "algorithm": candidate.get("algorithm"),
+            "default": candidate.get("default"),
+            "confidence": candidate.get("confidence"),
+            "parameter_profile": candidate.get("parameter_profile"),
+        }
+        for candidate in analysis_payload.get("route_candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    semantic_candidates = [
+        {
+            "id": candidate.get("id"),
+            "label": candidate.get("label"),
+            "route_candidate_id": candidate.get("route_candidate_id"),
+            "default": candidate.get("default"),
+            "confidence": candidate.get("confidence"),
+            "intent": candidate.get("intent"),
+            "risk_level": candidate.get("risk_level"),
+        }
+        for candidate in analysis_payload.get("candidates", [])
+        if isinstance(candidate, dict)
+    ]
+    trimap_stats = None
+    if explicit_trimap is not None:
+        values, counts = np.unique(explicit_trimap, return_counts=True)
+        trimap_stats = {str(int(value)): int(count) for value, count in zip(values, counts, strict=False)}
+    return {
+        "enabled": True,
+        "analysis_id": analysis_payload.get("analysis_id"),
+        "status": analysis_payload.get("status"),
+        "default_route_candidate_id": analysis_payload.get("default_route_candidate_id"),
+        "default_candidate_id": analysis_payload.get("default_candidate_id"),
+        "selected_candidate_id": selected_candidate_id,
+        "selected_route_candidate_id": route_decision.get("id") or route_decision.get("route_candidate_id"),
+        "selected_algorithm": route_decision.get("algorithm") or route_decision.get("backend"),
+        "selected_candidate_label": selected_candidate.get("label") if isinstance(selected_candidate, dict) else None,
+        "selected_semantic_decision": selected_candidate.get("decision") if isinstance(selected_candidate, dict) else None,
+        "explicit_trimap_states": trimap_stats,
+        "route_candidates": route_candidates,
+        "semantic_candidates": semantic_candidates,
+    }
 
 
 def _debug_timings(debug: dict[str, Any]) -> dict[str, float]:
@@ -253,6 +405,7 @@ def _case_outputs(case_dir: Path) -> dict[str, str]:
         "corridorkey_subject_rgba": "corridorkey_subject_rgba.png",
         "corridorkey_subject_alpha": "corridorkey_subject_alpha.png",
         "trimap": "trimap.png",
+        "analyze_candidate_trimap": "analyze_candidate_trimap.png",
         "hint": "corridorkey_hint.png",
         "raw_alpha": "corridorkey_raw_alpha.png",
         "key_color_protection": "key_color_protection.png",
@@ -282,6 +435,7 @@ def _write_case_manifest(
         "alpha": case_dir / "alpha.png",
         "foreground": case_dir / "foreground.png",
         "trimap": case_dir / "trimap.png",
+        "analyze_candidate_trimap": case_dir / "analyze_candidate_trimap.png",
         "shadow": case_dir / "shadow.png",
         "contact_sheet": case_dir / "contact_sheet.png",
     }
@@ -446,14 +600,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         sample_id = str(case.get("sample_id") or f"G{case_index:02d}")
         input_path = PROJECT_ROOT / str(case["input"])
         screen = _case_input_screen(case)
+        background = _case_background(manifest, case, screen)
         case_dir = out_root / f"{sample_id}_{case_id}_{screen}"
         case_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(input_path, case_dir / "input.png")
         print(f"[{case_index}/{total}] {sample_id}-{screen[:1].upper()} {case_id}", flush=True)
         start = time.perf_counter()
         result: Any | None = None
+        analysis_contract: dict[str, Any] | None = None
         try:
             if args.backend in {"direct-worker", "auto"}:
+                route_decision = None
+                semantic_decision = None
+                explicit_trimap = None
+                if args.use_analyze_candidates:
+                    route_decision, semantic_decision, analysis_contract, explicit_trimap = _analyze_default_execution_contract(
+                        input_path,
+                        screen_mode="auto",
+                        preset=args.corridorkey_preset,
+                        fallback_background_color=background,
+                    )
                 result = matte_image_direct_worker(
                     input_path,
                     direct_worker_url=args.direct_worker_url,
@@ -461,8 +627,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     shadow_mode="on",
                     corridorkey_preset=args.corridorkey_preset,
                     corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
+                    route_decision=route_decision,
+                    semantic_decision=semantic_decision,
+                    pymatting_explicit_trimap=explicit_trimap,
+                    fallback_bg_color=background,
                 )
                 _write_direct_worker_outputs(case_dir, result)
+                if explicit_trimap is not None:
+                    Image.fromarray(explicit_trimap, mode="L").save(case_dir / "analyze_candidate_trimap.png")
             else:
                 result = matte_image(
                     input_path,
@@ -481,7 +653,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if args.backend not in {"direct-worker", "auto"}:
                 _copy_backend_outputs(case_dir, stem)
             _write_contact_sheet(case_dir)
-            background = _case_background(manifest, case, screen)
             metrics = _coverage_metrics(case_dir / "input.png", case_dir / "alpha.png", background, args.subject_threshold)
             summary = {
                 "status": "ok",
@@ -494,6 +665,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "timings": _debug_timings(result.debug),
                 "outputs": _case_outputs(case_dir),
                 "remote_debug": _json_safe(result.debug),
+                "analysis_contract": _json_safe(analysis_contract) if analysis_contract is not None else {"enabled": False},
                 "quality_metrics": metrics,
                 "case_metadata": case,
             }
@@ -544,6 +716,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "corridorkey_color_protection": args.corridorkey_color_protection,
                 "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "all_white",
                 "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
+                "use_analyze_candidates": bool(args.use_analyze_candidates),
             },
             "timing_summary": _timing_summary(runs),
             "runs": runs,
@@ -580,6 +753,16 @@ def main() -> None:
     parser.add_argument("--corridorkey-preset", default="auto", choices=("auto", "detail_safe", "spill_safe", "manual"))
     parser.add_argument("--corridorkey-color-protection", default="auto", choices=COLOR_PROTECTION_MODES)
     parser.add_argument("--corridorkey-hard-ui-hint-mode", default="bbox_2px", choices=HARD_UI_HINT_MODES)
+    parser.add_argument(
+        "--use-analyze-candidates",
+        dest="use_analyze_candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For direct-worker/auto runs, execute the Analyze default route/semantic candidate "
+            "and send its explicit trimap to the worker when available."
+        ),
+    )
     args = parser.parse_args()
     if args.out_dir is None:
         args.out_dir = _next_versioned_out_dir(f"{_backend_slug(args.backend)}_game_input")

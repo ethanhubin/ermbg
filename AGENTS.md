@@ -23,7 +23,7 @@
 - 模块细节：`docs/modules/`。
 - 安装/启动：`docs/modules/operations.md`。
 - profile 契约：`docs/modules/route-profiles.md`。
-- 本地归属细节：`docs/modules/known-b.md`。
+- Known-B 当前算法：`docs/modules/known-b.md`。
 - 历史材料：`docs/archive/`；不要把已归档的计划当作活跃内容。
 
 ## 开发基础
@@ -45,28 +45,36 @@
   case manifest 路径和输出文件路径，保证 Web 后台列表稳定发现。最终
   `rgba` 是通用输出；`trimap`、`alpha`、`shadow` 等诊断图只在该后端实际
   产出时写入并列入 manifest，不作为所有 backend 的强制要求。
+- 当前 game eval manifest 全量为 86 个样本；标准流程不要继续按旧 85 样本口径汇报。
 
-## 算法规则
+## 算法相关任务
 
-- 设计目标：在纯色背景上达到像素级完美的透明抠图。
-- 游戏 UI 素材使用 PyMatting Known-B，再基于可测量的已知背景证据
-  做像素级修复。
-- 复杂的绿幕/蓝幕素材使用 CorridorKey。
-- 图片特征分类在执行前决定算法和参数。执行阶段消费
-  `execution_profile`；它不得重新推断素材类别。
-- 路由决策只输出 algorithm 和 profile；具体执行 server 由本地配置的
-  Direct Worker server URL 列表决定。
-- 算法修复必须由机制驱动。不要围绕样本 ID、文件名、坐标、图标尺寸或单一
-  观测到的颜色去调参，除非 Ethan 要求做一次性的特例处理。
-- 启发式阈值、置信度门限、过渡带宽度、面积比和重映射常数，都需要在附近写
-  注释，说明意图、可观测信号以及要保护的失败模式。
+只有在任务涉及路由、profile、matting executor、像素归属、算法参数或质量回归时，
+才加载对应算法文档：
+
+- 路由/profile 契约：`docs/modules/route-profiles.md`。
+- PyMatting Known-B、BG-seed outline trimap 和孔洞候选：`docs/modules/known-b.md`。
+- CorridorKey、绿幕/蓝幕和复杂 UI 路径：`docs/modules/corridorkey.md`。
+
+顶层只保留跨模块硬边界：
+
+- 设计目标：在已知或可测背景上生成高质量透明抠图，纯色背景图形优先追求像素级准确。
+- Analyze/Decide 在 Execute 前决定 algorithm、profile、参数和语义约束；
+  Execute 消费显式 request，不得重新推断素材类别。
+- Known-B 当前主线由 Analyze 生成 explicit trimap：强置信 BG seed 向内找 outline，
+  outline 内填充 FG core，边缘/transition/shadow-facing 区域为 unknown；enclosed
+  near-B holes 是语义候选，shadow 不再作为独立候选。
+- Route 决策只描述 algorithm/profile/params，不描述具体 server URL。
+- 算法修复必须由机制驱动。不要围绕样本 ID、文件名、坐标、图标尺寸或单一观测颜色
+  做特例调参，除非 Ethan 明确要求一次性处理。
 
 ## Web 验证
 
 在改动 `ermbg/web.py`、Web UI/API 行为或某个 Web 侧后端之后：
 
 1. 先确认目标 Direct Worker 是本机还是远端。远端算法改动必须先跑
-   当前机器的源码同步流程,再跑 `scripts/restart_direct_worker_ssh.sh --restart`。
+   `scripts/sync_comfy_ssh.sh --clean --smoke`,再跑
+   `scripts/restart_direct_worker_ssh.sh --restart`。
 2. 用 `scripts\start_local.ps1` 或等价方式重启本地 Web；如果走远端,
    Web 必须连接 `ermbg.local.json` 或 `ERMBG_DIRECT_URL` 中的远端 URL。
 3. 确认端口 `7860` 由预期的 `uvicorn ermbg.web:app` 进程持有。
