@@ -54,14 +54,14 @@ def test_corridorkey_hint_variants_have_ordered_translucent_support() -> None:
     }
     mask = plans["feature_balanced"].features.translucent_candidate
     internal = plans["feature_balanced"].features.internal_transparency_candidate
-    diagnostic = build_corridorkey_hint_plan(image, (0, 37, 252), variant="full_frame_aggressive")
+    diagnostic = build_corridorkey_hint_plan(image, (0, 37, 252), variant="full_frame_zero")
 
     assert plans["current_default_prior"].hint.min() == 0.32
     assert plans["current_default_prior"].hint.max() == 0.32
-    assert "full_frame_aggressive" not in corridorkey_hint_variants()
-    assert corridorkey_hint_diagnostic_variants() == ("full_frame_aggressive",)
-    assert diagnostic.hint.min() == 1.0
-    assert diagnostic.hint.max() == 1.0
+    assert "full_frame_zero" not in corridorkey_hint_variants()
+    assert corridorkey_hint_diagnostic_variants() == ("full_frame_zero",)
+    assert diagnostic.hint.min() == 0.0
+    assert diagnostic.hint.max() == 0.0
     assert "bbox_plus_2_aggressive" not in corridorkey_hint_variants()
     assert plans["feature_conservative"].hint[mask].mean() > plans["feature_balanced"].hint[mask].mean()
     assert plans["feature_internal_opaque"].hint[internal].mean() > plans["feature_balanced"].hint[internal].mean()
@@ -79,8 +79,8 @@ def test_corridorkey_hint_variants_have_ordered_translucent_support() -> None:
     assert float((plans["feature_internal_opaque"].hint[outside_control] > 0.25).mean()) < 0.05
 
 
-def test_explicit_full_white_hint_is_inverted_for_corridorkey_mask() -> None:
-    hint = np.ones((16, 16), dtype=np.float32)
+def test_full_frame_zero_hint_passes_through_as_black_corridorkey_mask() -> None:
+    hint = np.zeros((16, 16), dtype=np.float32)
 
     mask_tensor, debug = LocalCorridorKeyClient._corridorkey_mask_tensor_from_hint(
         hint,
@@ -93,4 +93,21 @@ def test_explicit_full_white_hint_is_inverted_for_corridorkey_mask() -> None:
     assert mask is not None
     assert float(mask.min()) == 0.0
     assert float(mask.max()) == 0.0
-    assert debug["convention"] == "corridorkey_explicit_full_frame_white_inverted_to_black_hint"
+    assert debug["convention"] == "corridorkey_full_frame_zero_hint"
+
+
+def test_explicit_full_frame_white_hint_is_no_longer_inverted() -> None:
+    hint = np.ones((16, 16), dtype=np.float32)
+
+    mask_tensor, debug = LocalCorridorKeyClient._corridorkey_mask_tensor_from_hint(
+        hint,
+        screen_color="blue",
+        execution_profile="corridorkey-character",
+        hint_source="provided_corridorkey_hint_mask",
+    )
+
+    mask = _mask_to_numpy(mask_tensor)
+    assert mask is not None
+    assert float(mask.min()) == 1.0
+    assert float(mask.max()) == 1.0
+    assert debug["convention"] == "corridorkey_full_frame_foreground_hint"

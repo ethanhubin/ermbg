@@ -166,32 +166,14 @@ class LocalCorridorKeyClient:
             except Exception:
                 pass
 
-        hint_min = float(hint.min()) if hint.size else 0.0
-        explicit_hint = str(hint_source or "").startswith("provided")
-        if hint_min >= 0.999 and explicit_hint:
-            corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
-            convention = "corridorkey_explicit_full_frame_white_inverted_to_black_hint"
+        corridorkey_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
+        hint_min = float(corridorkey_mask.min()) if corridorkey_mask.size else 0.0
+        hint_max = float(corridorkey_mask.max()) if corridorkey_mask.size else 0.0
+        if hint_max <= 0.001:
+            convention = "corridorkey_full_frame_zero_hint"
         elif hint_min >= 0.999:
-            # Full-frame hints are a route-level control signal, not a literal
-            # foreground shape. Keep priors profile-specific so transparent
-            # buttons, characters, and effect icons cannot disturb each other.
-            if execution_profile == "corridorkey-character":
-                corridorkey_mask = np.full(hint.shape, 0.32, dtype=np.float32)
-                convention = "corridorkey_character_full_frame_prior"
-            elif execution_profile == "corridorkey-transparent-button" and str(screen_color) != "green":
-                corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
-                convention = "corridorkey_transparent_button_zero_prior"
-            elif str(screen_color) == "green":
-                corridorkey_mask = np.full(hint.shape, 0.32, dtype=np.float32)
-                convention = f"{execution_profile}_green_full_frame_soft_prior"
-            else:
-                corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
-                convention = f"{execution_profile}_full_frame_zero_prior"
+            convention = "corridorkey_full_frame_foreground_hint"
         else:
-            # Shaped hints already describe foreground support for CorridorKey.
-            # Inverting them turns known background into model-owned support,
-            # which shows up as full-frame green/blue residue on soft glow icons.
-            corridorkey_mask = np.clip(hint, 0.0, 1.0).astype(np.float32)
             convention = "corridorkey_shaped_foreground_hint"
         return _numpy_mask_to_tensor(corridorkey_mask), {
             "convention": convention,

@@ -108,7 +108,7 @@ def run_probe(
     run_remote: bool,
     timeout: float,
     constant_hint_strengths: tuple[float, ...] = (),
-    include_full_white_diagnostic: bool = False,
+    include_full_frame_zero_diagnostic: bool = False,
 ) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     image = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
@@ -127,7 +127,7 @@ def run_probe(
     masks: dict[str, np.ndarray] | None = None
     worker_available = bool(run_remote and _worker_ok(direct_worker_url))
     variants = list(corridorkey_hint_variants())
-    if include_full_white_diagnostic:
+    if include_full_frame_zero_diagnostic:
         variants.extend(corridorkey_hint_diagnostic_variants())
     for variant in variants:
         plan = build_corridorkey_hint_plan(image, bg_color, variant=variant)
@@ -308,9 +308,9 @@ def main() -> None:
         help="Also probe full-frame constant hint strengths 0, 0.1, 0.32, 0.6, and 1.",
     )
     parser.add_argument(
-        "--include-full-white-diagnostic",
+        "--include-full-frame-zero-diagnostic",
         action="store_true",
-        help="Also probe the full-frame white diagnostic upper bound.",
+        help="Also probe the literal full-frame black/zero CorridorKey hint diagnostic.",
     )
     parser.add_argument("--timeout", type=float, default=240.0)
     args = parser.parse_args()
@@ -325,7 +325,7 @@ def main() -> None:
         run_remote=bool(args.run_remote),
         timeout=float(args.timeout),
         constant_hint_strengths=(0.0, 0.1, 0.32, 0.6, 1.0) if args.include_strength_diagnostics else (),
-        include_full_white_diagnostic=bool(args.include_full_white_diagnostic),
+        include_full_frame_zero_diagnostic=bool(args.include_full_frame_zero_diagnostic),
     )
     print(json.dumps({"summary": summary["out_dir"], "worker_available": summary["worker_available"]}, ensure_ascii=False))
 

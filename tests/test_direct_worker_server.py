@@ -81,6 +81,50 @@ def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button"
     )
 
 
+def test_direct_worker_server_health_reports_corridorkey_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_corridorkey_runtime_status",
+        lambda: {
+            "available": False,
+            "torch_importable": True,
+            "torch_cuda_available": False,
+            "import_error": "No module named 'corridor_key'",
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["capabilities"]["direct_corridorkey"] is False
+    assert payload["corridorkey_runtime"]["available"] is False
+    assert "corridor_key" in payload["corridorkey_runtime"]["import_error"]
+
+
+def test_direct_worker_server_health_reports_corridorkey_available(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_corridorkey_runtime_status",
+        lambda: {
+            "available": True,
+            "torch_importable": True,
+            "torch_cuda_available": True,
+            "runner": "direct_processor_fallback",
+            "module": "corridor_key",
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["capabilities"]["direct_corridorkey"] is True
+    assert payload["corridorkey_runtime"]["runner"] == "direct_processor_fallback"
+
+
 def test_direct_worker_server_matte_endpoint(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
 
@@ -387,7 +431,7 @@ def test_direct_worker_server_health_reports_capabilities():
     assert "git_sha" in payload
     assert payload["capabilities"]["route_profile_contract"] is True
     assert payload["capabilities"]["direct_pymatting_known_b"] is True
-    assert payload["capabilities"]["direct_corridorkey"] is True
+    assert payload["capabilities"]["direct_corridorkey"] is payload["corridorkey_runtime"]["available"]
     assert payload["capabilities"]["direct_known_bg_glow"] is True
     assert payload["capabilities"]["batch_matte"] is True
 

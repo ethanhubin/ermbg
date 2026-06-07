@@ -1260,7 +1260,7 @@ def _matte_page_html() -> str:
         <div class="settings-grid">
           <input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">
           <label class="inline-label">预设<select id="ck-preset" name="corridorkey_preset"><option value="auto" selected>自动</option><option value="detail_safe">细节保护</option><option value="spill_safe">强去溢色</option><option value="manual">手动参数</option></select></label>
-          <label class="inline-label">硬 UI Hint<select id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled><option value="all_white">全白</option><option value="bbox_2px" selected>bbox 2px</option><option value="boundary_2px">边界 2px</option><option value="boundary_2px_shadow_safe">边界 2px shadow-safe</option><option value="boundary_2px_shadow_safe_edge_floor">边界 2px edge floor</option><option value="translucent_button">玻璃/半透明</option></select></label>
+          <label class="inline-label">硬 UI Hint<select id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled><option value="full_frame_zero">全黑 hint</option><option value="bbox_2px" selected>bbox 2px</option><option value="boundary_2px">边界 2px</option><option value="boundary_2px_shadow_safe">边界 2px shadow-safe</option><option value="boundary_2px_shadow_safe_edge_floor">边界 2px edge floor</option><option value="translucent_button">玻璃/半透明</option></select></label>
           <label class="inline-label">色彩空间<select id="ck-gamma-space" name="corridorkey_gamma_space"><option value="sRGB" selected>sRGB</option><option value="Linear">Linear</option></select></label>
           <div class="settings-row">
             <label>去溢色<input id="ck-despill" name="corridorkey_despill_strength" type="number" min="0" max="1" step="0.01" value="1"></label>
@@ -4632,7 +4632,7 @@ def _execute_matte_candidates_payload(
     if request.corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
         raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
     if request.corridorkey_hard_ui_hint_mode not in {
-        "all_white",
+        "full_frame_zero",
         "bbox_2px",
         "boundary_2px",
         "boundary_2px_shadow_safe",
@@ -4642,7 +4642,7 @@ def _execute_matte_candidates_payload(
         raise HTTPException(
             status_code=400,
             detail=(
-                "corridorkey_hard_ui_hint_mode must be all_white, bbox_2px, boundary_2px, "
+                "corridorkey_hard_ui_hint_mode must be full_frame_zero, bbox_2px, boundary_2px, "
                 "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
             ),
         )

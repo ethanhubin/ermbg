@@ -232,7 +232,7 @@ def test_index_serves_upload_ui():
     assert 'name="corridorkey_despill_strength"' in response.text
     assert 'name="corridorkey_auto_mask"' in response.text
     assert 'id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled' in response.text
-    assert '<option value="all_white">全白</option>' in response.text
+    assert '<option value="full_frame_zero">全黑 hint</option>' in response.text
     assert '<option value="translucent_button">玻璃/半透明</option>' in response.text
     assert 'function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }' in response.text
     assert 'autoMask.addEventListener("change", () => syncAutoMaskControls());' in response.text

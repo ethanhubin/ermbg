@@ -972,7 +972,7 @@ def main() -> None:
     parser.add_argument(
         "--corridorkey-hard-ui-hint-mode",
         choices=(
-            "all_white",
+            "full_frame_zero",
             "bbox_2px",
             "boundary_2px",
             "boundary_2px_shadow_safe",

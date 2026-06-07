@@ -19,7 +19,7 @@ CorridorKeyHintVariant = Literal[
     "feature_balanced",
     "feature_internal_opaque",
     "feature_translucent",
-    "full_frame_aggressive",
+    "full_frame_zero",
 ]
 
 
@@ -48,6 +48,22 @@ class CorridorKeyHintPlan:
     hint: np.ndarray
     features: CorridorKeyHintFeatures
     metadata: dict[str, Any]
+
+
+def corridorkey_full_frame_prior_value(
+    *,
+    execution_profile: str,
+    screen_mode: str,
+) -> tuple[float, str]:
+    """Return the literal full-frame CorridorKey hint value for a route profile."""
+
+    if execution_profile == "corridorkey-character":
+        return 0.32, "soft_prior"
+    if execution_profile == "corridorkey-transparent-button" and screen_mode != "green":
+        return 0.0, "zero_prior"
+    if screen_mode == "green":
+        return 0.32, "soft_prior"
+    return 0.0, "zero_prior"
 
 
 def _smooth_mask(mask: np.ndarray, *, sigma: float = 3.0) -> np.ndarray:
@@ -324,16 +340,16 @@ def build_corridorkey_hint_plan(
             "outside_bbox_plus_2": 0.32,
             "note": "emulates current corridorkey-character full-frame soft prior",
         }
-    elif variant == "full_frame_aggressive":
-        hint = np.ones(shape, dtype=np.float32)
+    elif variant == "full_frame_zero":
+        hint = np.zeros(shape, dtype=np.float32)
         policy = {
             "diagnostic": True,
-            "hard_subject": 1.0,
-            "subject_support": 1.0,
-            "translucent_candidate": 1.0,
-            "soft_boundary_candidate": 1.0,
-            "outside_bbox_plus_2": 1.0,
-            "note": "full-frame white is a diagnostic upper bound, not a candidate",
+            "hard_subject": 0.0,
+            "subject_support": 0.0,
+            "translucent_candidate": 0.0,
+            "soft_boundary_candidate": 0.0,
+            "outside_bbox_plus_2": 0.0,
+            "note": "full-frame zero CorridorKey hint is a diagnostic, not a candidate",
         }
     else:
         if variant == "feature_conservative":
@@ -414,7 +430,7 @@ def corridorkey_hint_variants() -> tuple[CorridorKeyHintVariant, ...]:
 
 def corridorkey_hint_diagnostic_variants() -> tuple[CorridorKeyHintVariant, ...]:
     return (
-        "full_frame_aggressive",
+        "full_frame_zero",
     )
 
 
@@ -423,6 +439,7 @@ __all__ = [
     "CorridorKeyHintPlan",
     "CorridorKeyHintVariant",
     "build_corridorkey_hint_plan",
+    "corridorkey_full_frame_prior_value",
     "corridorkey_hint_diagnostic_variants",
     "corridorkey_hint_variants",
     "detect_corridorkey_hint_features",

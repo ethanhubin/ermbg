@@ -99,7 +99,8 @@ def test_matte_corridorkey_direct_uses_fake_client_without_comfy():
     assert result.report["despill_method"] == "direct_corridorkey"
     assert calls[0]["screen_color"] == "green"
     assert calls[0]["execution_profile"] == "corridorkey-transparent-button"
-    assert calls[0]["hint_source"] == "glass_all_white_corridorkey_hint"
+    assert calls[0]["hint_source"] == "glass_full_frame_soft_prior_corridorkey_hint"
+    assert np.allclose(calls[0]["hint_alpha"], 0.32)
 
 
 def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():

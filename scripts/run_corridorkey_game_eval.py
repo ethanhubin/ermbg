@@ -27,7 +27,7 @@ DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest
 EVAL_BACKENDS = ("auto", "direct-worker")
 COLOR_PROTECTION_MODES = ("auto", "on", "off")
 HARD_UI_HINT_MODES = (
-    "all_white",
+    "full_frame_zero",
     "bbox_2px",
     "boundary_2px",
     "boundary_2px_shadow_safe",
@@ -645,7 +645,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     comfy_url=args.comfy_url,
                     corridorkey_preset=args.corridorkey_preset,
                     corridorkey_color_protection=_color_protection_arg(args.corridorkey_color_protection),
-                    corridorkey_auto_mask=args.corridorkey_hard_ui_hint_mode != "all_white",
+                    corridorkey_auto_mask=args.corridorkey_hard_ui_hint_mode != "full_frame_zero",
                     corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
                 )
             elapsed = time.perf_counter() - start
@@ -715,7 +715,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "eval_overrides": {
                 "corridorkey_preset": args.corridorkey_preset,
                 "corridorkey_color_protection": args.corridorkey_color_protection,
-                "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "all_white",
+                "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "full_frame_zero",
                 "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
                 "use_analyze_candidates": use_analyze_candidates,
             },

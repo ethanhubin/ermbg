@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import io
 import json
 import os
@@ -27,6 +28,7 @@ from .direct_worker import (
     DirectWorkerResult,
     direct_matte_from_decision,
 )
+from .corridorkey_runner import LocalCorridorKeyClient
 from .router import RouteDecision, classify_route
 from .runtime_capabilities import get_ermbg_version
 
@@ -675,8 +677,63 @@ def _parse_bg_color(text: str) -> tuple[int, int, int]:
 app = FastAPI(title="ERMBG Direct Worker", version="0.1.0")
 
 
+def _corridorkey_runtime_status() -> dict[str, Any]:
+    """Report whether the local process can actually execute CorridorKey.
+
+    The health endpoint is used by Web/API routing before dispatching expensive
+    jobs. Keep this probe import-only: it must catch missing local custom-node
+    installs, but it must not instantiate the model or allocate GPU memory.
+    """
+
+    status: dict[str, Any] = {"available": False}
+    try:
+        import torch
+
+        status["torch_importable"] = True
+        status["torch_cuda_available"] = bool(torch.cuda.is_available())
+    except Exception as exc:
+        status["torch_importable"] = False
+        status["torch_error"] = str(exc)
+        return status
+
+    try:
+        node_cls = LocalCorridorKeyClient._loaded_corridorkey_node_class()
+    except Exception as exc:
+        status["loaded_node_error"] = str(exc)
+        node_cls = None
+    if node_cls is not None:
+        status.update(
+            {
+                "available": True,
+                "runner": "loaded_comfy_node",
+                "node_module": str(getattr(node_cls, "__module__", "")),
+                "node_class": str(getattr(node_cls, "__name__", type(node_cls).__name__)),
+            }
+        )
+        return status
+
+    try:
+        LocalCorridorKeyClient._ensure_import_path()
+        module = importlib.import_module("corridor_key")
+        getattr(module, "CorridorKeyProcessor")
+        getattr(module, "CorridorKeySettings")
+    except Exception as exc:
+        status["import_error"] = str(exc)
+        return status
+
+    status.update(
+        {
+            "available": True,
+            "runner": "direct_processor_fallback",
+            "module": "corridor_key",
+        }
+    )
+    return status
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
+    corridorkey_runtime = _corridorkey_runtime_status()
     info: dict[str, Any] = {
         "status": "ok",
         "backend": "direct-worker",
@@ -688,10 +745,11 @@ def health() -> dict[str, Any]:
             "route_profile_contract": True,
             "direct_pymatting_known_b": True,
             "direct_pymatting_explicit_trimap": True,
-            "direct_corridorkey": True,
+            "direct_corridorkey": bool(corridorkey_runtime.get("available")),
             "direct_known_bg_glow": True,
             "batch_matte": True,
         },
+        "corridorkey_runtime": corridorkey_runtime,
     }
     try:
         import torch

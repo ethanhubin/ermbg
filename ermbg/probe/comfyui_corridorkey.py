@@ -89,8 +89,8 @@ def build_hard_ui_corridorkey_hint(
     """Build a CorridorKey bbox hint for opaque hard UI.
 
     Failure mode this tests against: pixel-exact known-B hints can import mask
-    defects into CorridorKey, while all-white hints can leave crisp UI outlines
-    under-supported. For hard UI, use known-B evidence only to locate the
+    defects into CorridorKey, while full-frame priors are too coarse to support
+    crisp UI outlines. For hard UI, use known-B evidence only to locate the
     subject's rectangle, then give CorridorKey a simple bbox hint. The 2 px
     expansion is deliberate for hard UI antialias/outline pixels: it avoids
     clipping the visible border without turning the whole screen into foreground.

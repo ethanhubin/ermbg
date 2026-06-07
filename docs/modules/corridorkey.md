@@ -111,21 +111,19 @@ hint 特征检测必须保持位置无关，不能假设透明区域在中间。
   提高到接近不透明支持；
 - `feature_translucent`: 缩窄 soft support，并降低半透明/反光区域前景支持。
 
-`full_frame_aggressive` 是全白显式 hint，仅作为诊断上界，必须用探针脚本的
-`--include-full-white-diagnostic` 显式打开，不作为推荐候选。
-显式全白 hint 在送入 CorridorKey mask 前会反为全黑；全白不再表示“整张图都是前景”，
-否则会把纯色背景也保留下来。
-
-当前路由默认里的全帧 hint 为历史兼容 soft prior；用户/实验显式上传的全白 hint
-必须按真正全白前景支持传给 CorridorKey，不能被降级成 soft prior。
+`full_frame_zero` 是字面全帧黑/零值 CorridorKey hint，仅作为诊断项，必须用探针脚本的
+`--include-full-frame-zero-diagnostic` 显式打开，不作为推荐候选。
+CorridorKey runner 不再对 hint 做来源/白色特殊反转；源头生成的 hint 数值就是送入
+CorridorKey mask 的语义。路由 profile 需要全帧 soft prior 时，源头直接生成常量
+`0.32`；需要 zero prior 时，源头直接生成常量 `0.0`。
 
 `bbox+2` 曾作为大图速度实验项验证。实测没有带来稳定加速，且作为全矩形
 aggressive hint 会改变解的形态，因此不再作为候选输出。若后续要做性能优化，
 应在 executor 层做真正的 ROI crop/uncrop，而不是只把 hint 外围置零。
 
-纯常量 hint 强度实验显示：低到中等强度的全帧常量 hint 对 CorridorKey 输出
-影响很弱；全白 hint 会突然把全图推向前景，容易保留绿/蓝幕色。候选应优先来自
-feature-driven hint，而不是全帧常量强度。
+纯常量 hint 强度实验显示：低到中等强度的全帧常量输入 hint 对 CorridorKey 输出
+影响很弱；全帧零值 hint 只作为诊断，不表达候选解释。
+候选应优先来自 feature-driven hint，而不是全帧常量强度。
 
 单图确定性纯色背景的 hint 生成规范:
 

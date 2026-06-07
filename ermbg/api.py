@@ -33,6 +33,7 @@ from PIL import Image
 from . import io as ermbg_io
 from .artifacts import build_run_manifest, write_run_manifest
 from .comfy import DEFAULT_COMFY_URL
+from .corridorkey_hint import corridorkey_full_frame_prior_value
 from .qa import run_qa
 from .router import RouteDecision, Strategy, classify_route, classify_strategy
 from .types import Trimap
@@ -416,11 +417,12 @@ def matte_image(
             measured screen-darkening out of local interior restore.
             ``boundary_2px_shadow_safe_edge_floor`` also applies a soft
             known-background material floor for unoutlined hard-UI edges.
-            ``translucent_button`` sends a full-frame CorridorKey hint and
-            disables color protection for glass/translucent UI, leaving the
-            model to solve both material translucency and shadow.
-            ``all_white`` disables automatic hint construction while keeping
-            the same CorridorKey and post-processing path.
+            ``translucent_button`` sends a full-frame input hint and disables
+            color protection for glass/translucent UI, leaving the model to
+            solve both material translucency and shadow.
+            ``full_frame_zero`` sends a literal all-black/zero CorridorKey hint
+            as a diagnostic while keeping the same CorridorKey and
+            post-processing path.
         pymatting_*: known-background PyMatting controls.
             The most important knobs are background source, trimap thresholds,
             and unknown-band width; solver knobs are exposed for A/B only.
@@ -3048,7 +3050,7 @@ def _matte_image_comfy_corridorkey(
     )
 
     hard_ui_hint_modes = {
-        "all_white",
+        "full_frame_zero",
         "bbox_2px",
         "boundary_2px",
         "boundary_2px_shadow_safe",
@@ -3057,7 +3059,7 @@ def _matte_image_comfy_corridorkey(
     }
     if hard_ui_hint_mode not in hard_ui_hint_modes:
         raise ValueError(
-            "corridorkey_hard_ui_hint_mode must be all_white, bbox_2px, boundary_2px, "
+            "corridorkey_hard_ui_hint_mode must be full_frame_zero, bbox_2px, boundary_2px, "
             "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
         )
 
@@ -3138,21 +3140,30 @@ def _matte_image_comfy_corridorkey(
     solid_interior_info: dict[str, Any] = {}
     if hint_alpha is not None:
         hint_source = "provided_corridorkey_hint_mask"
-    elif not auto_mask or hard_ui_hint_mode == "all_white":
-        # ``corridorkey_auto_mask`` now controls only automatic hint strategy,
-        # not an external SAM-style model. Off means a pure all-white control
-        # hint; hard-UI strategies are used only when the caller opts in.
-        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-        hint_source = "all_white_alpha_hint"
+    elif not auto_mask or hard_ui_hint_mode == "full_frame_zero":
+        hint_alpha = np.zeros(rgb.shape[:2], dtype=np.float32)
+        hint_source = "full_frame_zero_corridorkey_hint"
     elif execution_profile == "corridorkey-transparent-button":
-        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-        hint_source = "glass_all_white_corridorkey_hint"
+        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+            execution_profile=execution_profile,
+            screen_mode=screen_mode,
+        )
+        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
+        hint_source = f"glass_full_frame_{prior_kind}_corridorkey_hint"
     elif execution_profile == "corridorkey-character":
-        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-        hint_source = "character_all_white_corridorkey_hint"
+        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+            execution_profile=execution_profile,
+            screen_mode=screen_mode,
+        )
+        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
+        hint_source = f"character_full_frame_{prior_kind}_corridorkey_hint"
     elif execution_profile == "corridorkey-effect-icon":
-        hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-        hint_source = "effect_all_white_corridorkey_hint"
+        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+            execution_profile=execution_profile,
+            screen_mode=screen_mode,
+        )
+        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
+        hint_source = f"effect_full_frame_{prior_kind}_corridorkey_hint"
     elif analysis.parameter_profile.startswith("opaque_hard_ui"):
         if hard_ui_hint_mode == "boundary_2px":
             hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
