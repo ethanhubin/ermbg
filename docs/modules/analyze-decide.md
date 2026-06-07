@@ -118,17 +118,22 @@ same-key body decision:
 }
 ```
 
-CorridorKey decision:
+CorridorKey hint-variant decision:
 
 ```json
-{"screen_material_policy": "preserve"}
+{
+  "policy": "corridorkey_hint_variant",
+  "corridorkey_hint_variant": "feature_balanced",
+  "review_region_types": [
+    "glass_core_transparency",
+    "soft_alpha_gradient",
+    "screen_material_or_translucency"
+  ]
+}
 ```
 
-或:
-
-```json
-{"screen_material_policy": "background"}
-```
+CorridorKey 候选通过 Execute 阶段生成 hint mask 并送入模型，不通过输出后的硬
+alpha 约束生效。
 
 旧 shadow ownership decision 不属于当前主线。
 
@@ -139,6 +144,8 @@ Preview assets 是服务端生成的轻量图:
 - Known-B: `trimap`，三态 `0/128/255`，带
   `execution_role=pymatting_explicit_trimap`；
 - Known-B hole candidates: trimap 上叠加 region policy；
+- CorridorKey: `hint`，带 `execution_role=corridorkey_hint_mask`，metadata 中记录
+  `corridorkey_hint_variant`、hint policy 和 feature pixels；
 - CorridorKey: `hint`；
 - 通用: `overlay`、`region_mask:*`。
 

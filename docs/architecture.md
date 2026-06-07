@@ -26,7 +26,8 @@ input
 - Route 只描述 algorithm/profile/params，不描述 server URL。
 - Analyze/Decide 在 Execute 前确定 route、候选和语义约束。
 - Execute 只消费显式 request，不重新推断 asset kind。
-- `/api/matte-candidates` 是兼容层；Web 主线是 Analyze/Execute 分离。
+- `/api/matte-candidates` 仅用于旧调用方兼容；Web 主线是 Analyze/Execute 分离，
+  新候选质量验证必须走 `/api/analyze-candidates` -> `/api/execute-candidate`。
 
 ## 运行边界
 

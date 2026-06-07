@@ -213,7 +213,15 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         "pymatting_known_b",
         "corridorkey",
     }
-    assert result.ambiguity_regions[0].type == "screen_material_or_translucency"
+    assert {
+        region.type
+        for region in result.ambiguity_regions
+        if region.id.startswith("route_corridorkey__")
+    } == {
+        "screen_material_or_translucency",
+        "glass_core_transparency",
+        "soft_alpha_gradient",
+    }
     corridorkey_candidates = [
         candidate
         for candidate in result.candidates
@@ -221,13 +229,80 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
     ]
     assert [candidate.id for candidate in corridorkey_candidates] == [
         "route_corridorkey__auto_default",
-        "route_corridorkey__preserve_screen_material",
-        "route_corridorkey__remove_screen_tint",
+        "route_corridorkey__corridorkey_translucent",
+        "route_corridorkey__corridorkey_conservative",
+        "route_corridorkey__corridorkey_internal_opaque",
     ]
-    assert corridorkey_candidates[1].decision == {"screen_material_policy": "preserve"}
-    assert corridorkey_candidates[2].decision == {"screen_material_policy": "background"}
+    assert corridorkey_candidates[0].default is True
+    assert corridorkey_candidates[0].decision == {
+        "policy": "corridorkey_hint_variant",
+        "corridorkey_hint_variant": "feature_balanced",
+        "review_region_types": [
+            "glass_core_transparency",
+            "soft_alpha_gradient",
+            "screen_material_or_translucency",
+        ],
+    }
+    assert corridorkey_candidates[1].decision["corridorkey_hint_variant"] == "feature_translucent"
+    assert corridorkey_candidates[2].decision["corridorkey_hint_variant"] == "feature_conservative"
+    assert corridorkey_candidates[3].decision["corridorkey_hint_variant"] == "feature_internal_opaque"
     assert "trimap" not in corridorkey_candidates[1].preview["assets"]
-    assert result.preview_assets["candidate:route_corridorkey__preserve_screen_material:hint"]["data_url"].startswith("data:image/png;base64,")
+    assert result.preview_assets["candidate:route_corridorkey__auto_default:hint"]["execution_role"] == "corridorkey_hint_mask"
+    assert result.preview_assets["candidate:route_corridorkey__corridorkey_internal_opaque:hint"]["data_url"].startswith("data:image/png;base64,")
+
+
+def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "needs_decision"
+    assert result.route["algorithm"] == "corridorkey"
+    assert result.route["execution_profile"] == "corridorkey-character"
+    assert result.default_candidate_id == "route_corridorkey__auto_default"
+    corridorkey_regions = [
+        region
+        for region in result.ambiguity_regions
+        if region.id.startswith("route_corridorkey__")
+    ]
+    assert {region.type for region in corridorkey_regions} == {
+        "screen_material_or_translucency",
+        "glass_core_transparency",
+        "soft_alpha_gradient",
+    }
+    assert sum(region.area_px for region in corridorkey_regions if region.type == "glass_core_transparency") > 7000
+    assert sum(region.area_px for region in corridorkey_regions if region.type == "soft_alpha_gradient") > 4000
+    corridorkey_candidates = [
+        candidate
+        for candidate in result.candidates
+        if candidate.route_candidate_id == "route_corridorkey"
+    ]
+    assert [candidate.id for candidate in corridorkey_candidates] == [
+        "route_corridorkey__auto_default",
+        "route_corridorkey__corridorkey_translucent",
+        "route_corridorkey__corridorkey_conservative",
+        "route_corridorkey__corridorkey_internal_opaque",
+    ]
+    assert corridorkey_candidates[0].default is True
+    assert corridorkey_candidates[0].decision == {
+        "policy": "corridorkey_hint_variant",
+        "corridorkey_hint_variant": "feature_balanced",
+        "review_region_types": [
+            "glass_core_transparency",
+            "soft_alpha_gradient",
+            "screen_material_or_translucency",
+        ],
+    }
+    assert corridorkey_candidates[3].decision["corridorkey_hint_variant"] == "feature_internal_opaque"
+    assert result.preview_assets[
+        "candidate:route_corridorkey__corridorkey_internal_opaque:hint"
+    ]["data_url"].startswith("data:image/png;base64,")
 
 
 def test_analyze_button_shadow_is_resolved_by_bg_seed_outline_without_candidates() -> None:

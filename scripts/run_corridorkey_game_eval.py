@@ -582,6 +582,7 @@ def _coverage_metrics(input_path: Path, alpha_path: Path, background: tuple[int,
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     manifest = _load_manifest(args.manifest)
+    use_analyze_candidates = bool(getattr(args, "use_analyze_candidates", True))
     cases = [case for case in manifest.get("cases", []) if isinstance(case, dict)]
     if args.sample_id:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
@@ -613,7 +614,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 route_decision = None
                 semantic_decision = None
                 explicit_trimap = None
-                if args.use_analyze_candidates:
+                if use_analyze_candidates:
                     route_decision, semantic_decision, analysis_contract, explicit_trimap = _analyze_default_execution_contract(
                         input_path,
                         screen_mode="auto",
@@ -716,7 +717,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "corridorkey_color_protection": args.corridorkey_color_protection,
                 "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "all_white",
                 "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
-                "use_analyze_candidates": bool(args.use_analyze_candidates),
+                "use_analyze_candidates": use_analyze_candidates,
             },
             "timing_summary": _timing_summary(runs),
             "runs": runs,

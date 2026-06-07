@@ -356,6 +356,29 @@ def test_route_candidates_i012_i017_use_corridorkey_soft_effect_composite_defaul
         assert evidence["soft_effect_gate"] or evidence["fine_boundary_gate"], rel
 
 
+def test_route_glass_portal_icon_uses_corridorkey_soft_alpha_default():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png"
+    )
+    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+    candidates = build_route_candidates(img)
+    by_route = {candidate.decision.route: candidate for candidate in candidates}
+    default = next(candidate for candidate in candidates if candidate.default)
+
+    assert {"pymatting_known_b", "corridorkey"} <= set(by_route)
+    assert default.decision.route == "corridorkey"
+    assert by_route["corridorkey"].decision.params["execution_profile"] == "corridorkey-character"
+    assert by_route["corridorkey"].decision.analysis["corridorkey_analysis"]["screen_mode"] == "blue"
+    assert by_route["corridorkey"].decision.analysis["corridorkey_analysis"]["background_color"] == [0, 37, 252]
+    evidence = by_route["corridorkey"].evidence["fine_detail_composite_evidence"]
+    assert evidence["accepted"] is True
+    assert evidence["fine_boundary_gate"] is True
+    assert evidence["semi_alpha_fraction"] >= 0.20
+    assert evidence["interior_semi_largest"] >= 7000
+
+
 def test_route_candidates_i006_i007_use_corridorkey_soft_boundary_detail_default():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "icon"
     rels = [

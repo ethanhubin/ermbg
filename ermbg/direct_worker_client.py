@@ -65,10 +65,10 @@ def matte_image_direct_worker(
     corridorkey_color_protection: bool | None = None,
     corridorkey_protection_bg_max: float | None = None,
     corridorkey_protection_fg_min: float | None = None,
-    corridorkey_screen_mode: str = "auto",
-    corridorkey_preset: str = "auto",
+    corridorkey_screen_mode: str | None = None,
+    corridorkey_preset: str | None = None,
     corridorkey_hint_mask: Any | None = None,
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
+    corridorkey_hard_ui_hint_mode: str | None = None,
     known_bg_glow_material_strength: float | None = None,
     pymatting_method: str | None = None,
     pymatting_image_space: str | None = None,
@@ -112,12 +112,15 @@ def matte_image_direct_worker(
     data = {
         "execution_backend": execution_backend,
         "shadow_mode": shadow_mode,
-        "corridorkey_screen_mode": corridorkey_screen_mode,
-        "corridorkey_preset": corridorkey_preset,
-        "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
         "fallback_bg_color": ",".join(str(int(c)) for c in fallback_bg_color),
         "include_image": "true",
     }
+    if corridorkey_screen_mode is not None:
+        data["corridorkey_screen_mode"] = str(corridorkey_screen_mode)
+    if corridorkey_preset is not None:
+        data["corridorkey_preset"] = str(corridorkey_preset)
+    if corridorkey_hard_ui_hint_mode is not None:
+        data["corridorkey_hard_ui_hint_mode"] = str(corridorkey_hard_ui_hint_mode)
     if corridorkey_gamma_space is not None:
         data["corridorkey_gamma_space"] = corridorkey_gamma_space
     if corridorkey_despill_strength is not None:

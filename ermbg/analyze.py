@@ -12,6 +12,8 @@ import cv2
 import numpy as np
 
 from .colorspace import oklab_distance, srgb_to_oklab
+from .corridorkey_hint import build_corridorkey_hint_plan
+from .keyer import KeyerThresholds, chromatic_key_alpha
 from .pipeline_contracts import (
     AmbiguityRegion,
     AnalyzeResult,
@@ -58,6 +60,22 @@ def _background_from_route(route: dict[str, Any]) -> tuple[int, int, int] | None
     if not isinstance(params, dict):
         return None
     color = params.get("pymatting_bg_color")
+    if isinstance(color, (list, tuple)) and len(color) == 3:
+        return tuple(int(np.clip(c, 0, 255)) for c in color)
+    return None
+
+
+def _corridorkey_background_from_route(route: dict[str, Any]) -> tuple[int, int, int] | None:
+    analysis = route.get("analysis")
+    if isinstance(analysis, dict):
+        ck = analysis.get("corridorkey_analysis")
+    else:
+        ck = None
+    if not isinstance(ck, dict):
+        ck = route.get("corridorkey_analysis") if isinstance(route.get("corridorkey_analysis"), dict) else None
+    if not isinstance(ck, dict):
+        return None
+    color = ck.get("background_color")
     if isinstance(color, (list, tuple)) and len(color) == 3:
         return tuple(int(np.clip(c, 0, 255)) for c in color)
     return None
@@ -384,6 +402,12 @@ def _hint_preview(mask: np.ndarray, shape: tuple[int, int], *, keep: bool) -> np
     return hint
 
 
+def _grayscale_hint_preview(hint: np.ndarray) -> np.ndarray:
+    gray = np.clip(hint.astype(np.float32), 0.0, 1.0)
+    u8 = (gray * 255.0 + 0.5).astype(np.uint8)
+    return np.dstack([u8, u8, u8, np.full(u8.shape, 255, dtype=np.uint8)])
+
+
 def _attach_preview_assets(
     image_srgb: np.ndarray,
     *,
@@ -460,6 +484,20 @@ def _attach_preview_assets(
             "trimap": _png_data_url_rgb(trimap_image),
             "hint": _png_data_url_rgba(_hint_preview(mask, (h, w), keep=keep)),
         }
+        hint_metadata: dict[str, Any] | None = None
+        if route_algorithm == "corridorkey":
+            variant = decision.get("corridorkey_hint_variant")
+            background = _corridorkey_background_from_route(route)
+            if isinstance(variant, str) and background is not None:
+                try:
+                    plan = build_corridorkey_hint_plan(image_srgb, background, variant=variant)  # type: ignore[arg-type]
+                    mode_images["hint"] = _png_data_url_rgba(_grayscale_hint_preview(plan.hint))
+                    hint_metadata = plan.metadata
+                except Exception:
+                    hint_metadata = {
+                        "source": "corridorkey_hint_preview_unavailable",
+                        "corridorkey_hint_variant": variant,
+                    }
         for mode in preview_modes:
             data_url = mode_images[mode]
             key = f"candidate:{candidate.id}:{mode}"
@@ -476,6 +514,9 @@ def _attach_preview_assets(
                 preview_assets[key]["execution_role"] = "pymatting_explicit_trimap"
                 preview_assets[key]["states"] = {"sure_bg": 0, "unknown": 128, "sure_fg": 255}
                 preview_assets[key]["metadata"] = trimap_metadata
+            if mode == "hint" and hint_metadata is not None:
+                preview_assets[key]["execution_role"] = "corridorkey_hint_mask"
+                preview_assets[key]["metadata"] = hint_metadata
         preview = {
             **candidate.preview,
             "assets": refs,
@@ -651,6 +692,104 @@ def _screen_material_regions(
             )
         )
         break
+    return regions, masks
+
+
+def _corridorkey_alpha_structure_regions(
+    image_srgb: np.ndarray,
+    route: dict[str, Any],
+    *,
+    min_area_ratio: float = 0.001,
+) -> tuple[list[AmbiguityRegion], dict[str, np.ndarray]]:
+    analysis = route.get("analysis")
+    if not isinstance(analysis, dict) or route.get("algorithm") != "corridorkey":
+        return [], {}
+    ck = analysis.get("corridorkey_analysis")
+    if not isinstance(ck, dict):
+        return [], {}
+    execution_profile = str(route.get("execution_profile") or "")
+    if execution_profile not in {
+        "corridorkey-character",
+        "corridorkey-transparent-button",
+        "corridorkey-effect-icon",
+        "corridorkey-shaped-icon",
+    }:
+        return [], {}
+    bg = ck.get("background_color")
+    if not (isinstance(bg, list) and len(bg) == 3):
+        return [], {}
+    background = tuple(int(np.clip(c, 0, 255)) for c in bg)
+    key = chromatic_key_alpha(image_srgb, background, KeyerThresholds(bg_max=5.5, fg_min=18.0))
+    support = key >= 0.16
+    if not bool(support.any()):
+        return [], {}
+    distance_to_exterior = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3)
+    core = (key >= 0.20) & (key <= 0.85) & (distance_to_exterior >= 10.0)
+    gradient = (key >= 0.03) & (key <= 0.55) & (distance_to_exterior <= 14.0)
+    core = cv2.morphologyEx(core.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)).astype(bool)
+    gradient = cv2.morphologyEx(gradient.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)).astype(bool)
+    min_area = max(16, int(round(float(image_srgb.shape[0] * image_srgb.shape[1]) * float(min_area_ratio))))
+    region_specs = [
+        (
+            "ambiguous_glass_core_transparency",
+            "glass_core_transparency",
+            core,
+            {
+                "alpha_min": 0.20,
+                "alpha_max": 0.85,
+                "distance_to_exterior_min": 10.0,
+            },
+            {
+                "transparent_glass_score": 0.5,
+                "solid_subject_score": 0.5,
+                "reason": "central_mid_alpha_glass_or_energy_core",
+            },
+        ),
+        (
+            "ambiguous_soft_alpha_gradient",
+            "soft_alpha_gradient",
+            gradient,
+            {
+                "alpha_min": 0.03,
+                "alpha_max": 0.55,
+                "distance_to_exterior_max": 14.0,
+            },
+            {
+                "preserve_gradient_score": 0.55,
+                "remove_residue_score": 0.45,
+                "reason": "outer_soft_alpha_gradient_or_screen_residue",
+            },
+        ),
+    ]
+    regions: list[AmbiguityRegion] = []
+    masks: dict[str, np.ndarray] = {}
+    for prefix, region_type, mask, evidence, ambiguity in region_specs:
+        if int(mask.sum()) < min_area:
+            continue
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+        kept = np.zeros(mask.shape, dtype=bool)
+        for label_idx in range(1, n_labels):
+            if int(stats[label_idx, cv2.CC_STAT_AREA]) >= min_area:
+                kept |= labels == label_idx
+        if not bool(kept.any()):
+            continue
+        region_id = f"{prefix}_{len(regions)}"
+        masks[region_id] = kept
+        regions.append(
+            AmbiguityRegion(
+                id=region_id,
+                type=region_type,
+                bbox_xyxy=_bbox(kept),
+                area_px=int(kept.sum()),
+                mask_ref=region_id,
+                evidence={
+                    "background_color": [int(c) for c in background],
+                    "execution_profile": execution_profile,
+                    **evidence,
+                },
+                ambiguity=ambiguity,
+            )
+        )
     return regions, masks
 
 
@@ -1091,56 +1230,83 @@ def _enclosed_near_bg_candidates(regions: list[AmbiguityRegion]) -> list[Semanti
 
 
 def _screen_material_candidates(regions: list[AmbiguityRegion]) -> list[SemanticCandidate]:
-    region_ids = [region.id for region in regions]
-    total_area = sum(region.area_px for region in regions)
+    return _corridorkey_translucency_candidates(regions)
+
+
+def _corridorkey_translucency_candidates(regions: list[AmbiguityRegion]) -> list[SemanticCandidate]:
+    all_ids = [region.id for region in regions]
+    screen_ids = [region.id for region in regions if region.type == "screen_material_or_translucency"]
+    core_ids = [region.id for region in regions if region.type == "glass_core_transparency"]
+    gradient_ids = [region.id for region in regions if region.type == "soft_alpha_gradient"]
     preview = {
-        "regions": region_ids,
-        "area_px": int(total_area),
+        "regions": all_ids,
+        "area_px": int(sum(region.area_px for region in regions)),
         "bbox_xyxy": regions[0].bbox_xyxy if regions else [0, 0, 0, 0],
     }
+    region_types = [
+        region_type
+        for region_type, ids in (
+            ("glass_core_transparency", core_ids),
+            ("soft_alpha_gradient", gradient_ids),
+            ("screen_material_or_translucency", screen_ids),
+        )
+        if ids
+    ]
+    specs = [
+        (
+            "auto_default",
+            "CorridorKey balanced",
+            "Use the measured feature hint as the default moderate interpretation.",
+            "feature_balanced",
+            True,
+            0.62,
+        ),
+        (
+            "corridorkey_translucent",
+            "CorridorKey translucent",
+            "Bias disputed same-screen material toward a more transparent interpretation.",
+            "feature_translucent",
+            False,
+            0.48,
+        ),
+        (
+            "corridorkey_conservative",
+            "CorridorKey conservative",
+            "Bias disputed same-screen material toward stronger foreground retention.",
+            "feature_conservative",
+            False,
+            0.5,
+        ),
+        (
+            "corridorkey_internal_opaque",
+            "CorridorKey internal opaque",
+            "Treat the enclosed hard-edge internal transparency domain as mostly opaque material.",
+            "feature_internal_opaque",
+            False,
+            0.46,
+        ),
+    ]
     return [
         SemanticCandidate(
-            id="auto_default",
-            label="Auto default",
-            intent="Use the current route/profile default interpretation.",
-            default=True,
-            confidence=0.55,
+            id=candidate_id,
+            label=label,
+            intent=intent,
+            default=default,
+            confidence=confidence,
             risk_level="medium",
-            decision={"policy": "auto_default"},
-            regions=region_ids,
-            preview=preview,
-            reasons=["route detected screen-material or translucent ownership risk"],
-        ),
-        SemanticCandidate(
-            id="preserve_screen_material",
-            label="Keep screen-color material",
-            intent="Treat same-screen or translucent pixels as subject-owned material/glow.",
-            default=False,
-            confidence=0.5,
-            risk_level="medium",
-            decision={"screen_material_policy": "preserve"},
-            regions=region_ids,
+            decision={
+                "policy": "corridorkey_hint_variant",
+                "corridorkey_hint_variant": variant,
+                "review_region_types": region_types,
+            },
+            regions=all_ids,
             preview=preview,
             reasons=[
-                "pixels are near the known screen color but not connected plain background",
-                "transparent buttons and glow can be damaged by treating this band as background",
+                "CorridorKey ambiguity is controlled by hint image variants, not post-alpha hard constraints",
+                "single-image evidence cannot produce one mathematically exact translucent solution",
             ],
-        ),
-        SemanticCandidate(
-            id="remove_screen_tint",
-            label="Remove screen tint",
-            intent="Treat same-screen or translucent pixels as removable screen contamination.",
-            default=False,
-            confidence=0.45,
-            risk_level="medium",
-            decision={"screen_material_policy": "background"},
-            regions=region_ids,
-            preview=preview,
-            reasons=[
-                "near-screen material may be spill or residual screen tint",
-                "single-image evidence cannot prove user intent for this translucent band",
-            ],
-        ),
+        )
+        for candidate_id, label, intent, variant, default, confidence in specs
     ]
 
 
@@ -1540,11 +1706,16 @@ def _semantic_plan_for_route(
             regions = hole_regions + body_regions
             region_masks = {**hole_masks, **body_masks}
     elif route.get("algorithm") == "corridorkey":
-        regions, region_masks = _screen_material_regions(semantic_input, route)
+        screen_regions, screen_masks = _screen_material_regions(semantic_input, route)
+        alpha_regions, alpha_masks = _corridorkey_alpha_structure_regions(semantic_input, route)
+        regions = screen_regions + alpha_regions
+        region_masks = {**screen_masks, **alpha_masks}
 
     if regions:
         region_types = {region.type for region in regions}
-        if "screen_material_or_translucency" in region_types:
+        if "glass_core_transparency" in region_types or "soft_alpha_gradient" in region_types:
+            candidates = _corridorkey_translucency_candidates(regions)
+        elif "screen_material_or_translucency" in region_types:
             candidates = _screen_material_candidates(regions)
         elif (
             "button_body_subject_ownership" in region_types

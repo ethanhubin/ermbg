@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_d11_glass_portal_blue",
+  "sample_id": "I021",
+  "category": "icon",
+  "family": "d_soft_alpha_effect",
+  "screen": "blue",
+  "backgrounds": {
+    "blue": [
+      0,
+      37,
+      252
+    ]
+  },
+  "blue": "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png",
+  "image_size": [
+    512,
+    512
+  ],
+  "subject_color_family": "purple_gold_white",
+  "primary_ambiguity": "magic portal icon with central glass/energy transparency and outer soft-alpha purple gradient on blue screen",
+  "target_route": "corridorkey_glass_effect_icon_review",
+  "source_review_id": "ICON-D11",
+  "source_batch": "manual_user_sample_20260607"
+}

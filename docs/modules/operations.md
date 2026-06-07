@@ -89,9 +89,11 @@ curl -sS "http://192.168.0.8:7871/health"
 2. 请求 `/api/runtime-capabilities`，确认 Direct Worker URL、health、GPU/CPU 能力。
 3. 用真实图片调用 `/api/preprocess-analysis`。
 4. 用真实图片调用 `/api/analyze-candidates`，确认 Analyze 不执行完整 matte。
-5. 用 Analyze payload 或兼容层 `/api/matte-candidates?backend=auto` 跑真实执行。
+5. 用 Analyze payload 调用 `/api/execute-candidate` 跑真实执行。
 6. 检查 `execution_backend`、`execution_server_url`、`server_elapsed_sec`。
 7. 对显式 Execute request，检查 Direct Worker `timings.route_sec` 为 `0.0` 或接近 0。
+
+`/api/matte-candidates` 仅用于旧调用方兼容，不作为新候选路径的质量验证入口。
 
 ## Eval 产物
 

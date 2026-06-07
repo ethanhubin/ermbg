@@ -75,6 +75,68 @@ def _rgb_param(params: dict[str, Any], key: str, fallback: tuple[int, int, int])
     return fallback
 
 
+def _mask_param_to_bool(mask: Any, shape: tuple[int, int], *, field: str) -> np.ndarray | None:
+    if mask is None:
+        return None
+    arr = np.asarray(mask)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.shape != shape:
+        raise ValueError(f"{field} shape must match image shape")
+    if arr.dtype == bool:
+        return arr.astype(bool)
+    values = arr.astype(np.float32)
+    if float(values.max(initial=0.0)) > 1.5:
+        values = values / 255.0
+    return values >= 0.5
+
+
+def _corridorkey_execution_masks(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    del background_color
+    shape = image_srgb.shape[:2]
+    keep_floor = np.zeros(shape, dtype=np.float32)
+    alpha_cap = np.ones(shape, dtype=np.float32)
+    remove_mask = np.zeros(shape, dtype=bool)
+    semantic_decision = params.get("semantic_decision")
+
+    user_keep = _mask_param_to_bool(params.get("user_keep_mask"), shape, field="user_keep_mask")
+    user_remove = _mask_param_to_bool(params.get("user_remove_mask"), shape, field="user_remove_mask")
+    user_keep_pixels = 0
+    user_remove_pixels = 0
+    if user_keep is not None:
+        user_keep_pixels = int(user_keep.sum())
+        keep_floor[user_keep] = 1.0
+    if user_remove is not None:
+        user_remove_pixels = int(user_remove.sum())
+        remove_mask |= user_remove
+    if remove_mask.any():
+        keep_floor[remove_mask] = 0.0
+
+    info = {
+        "semantic_decision": dict(semantic_decision) if isinstance(semantic_decision, dict) else {},
+        "semantic_decision_applied": False,
+        "semantic_decision_reason": (
+            "corridorkey_semantic_hint_variants_apply_before_model_not_as_post_alpha_constraints"
+            if isinstance(semantic_decision, dict) and semantic_decision.get("corridorkey_hint_variant")
+            else "corridorkey_semantic_candidates_do_not_apply_post_alpha_constraints"
+        ),
+        "semantic_hint_variant": str(semantic_decision.get("corridorkey_hint_variant"))
+        if isinstance(semantic_decision, dict) and semantic_decision.get("corridorkey_hint_variant")
+        else None,
+        "user_keep_pixels": user_keep_pixels,
+        "user_remove_pixels": user_remove_pixels,
+        "keep_floor_pixels": int((keep_floor > 0.0).sum()),
+        "alpha_cap_pixels": int((alpha_cap < 0.999).sum()),
+        "remove_pixels": int(remove_mask.sum()),
+        "remove_overrides_keep": True,
+    }
+    return keep_floor, alpha_cap, remove_mask, info
+
+
 def matte_known_bg_glow_direct(
     rgb: np.ndarray,
     *,
@@ -241,11 +303,31 @@ def matte_corridorkey_direct(
 
     client = corridorkey_client if corridorkey_client is not None else DirectCorridorKeyClient()
     hint_source = None
+    hint_plan_metadata: dict[str, Any] | None = None
     solid_interior_mask: np.ndarray | None = None
     material_alpha_floor: np.ndarray | None = None
     solid_interior_info: dict[str, Any] = {}
+    semantic_decision = params.get("semantic_decision")
+    semantic_hint_variant = (
+        semantic_decision.get("corridorkey_hint_variant")
+        if isinstance(semantic_decision, dict)
+        else None
+    )
     if hint_alpha is not None:
         hint_source = "provided_corridorkey_hint_mask"
+    elif isinstance(semantic_hint_variant, str) and semantic_hint_variant:
+        from .corridorkey_hint import build_corridorkey_hint_plan, corridorkey_hint_variants
+
+        if semantic_hint_variant not in corridorkey_hint_variants():
+            raise ValueError(f"unsupported corridorkey_hint_variant: {semantic_hint_variant}")
+        plan = build_corridorkey_hint_plan(
+            rgb,
+            selected_bg_color,
+            variant=semantic_hint_variant,  # type: ignore[arg-type]
+        )
+        hint_alpha = plan.hint
+        hint_source = f"semantic_corridorkey_hint_variant:{semantic_hint_variant}"
+        hint_plan_metadata = plan.metadata
     elif not auto_mask or hard_ui_hint_mode == "all_white":
         hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
         hint_source = "all_white_alpha_hint"
@@ -301,6 +383,31 @@ def matte_corridorkey_direct(
     subject_alpha = remote.alpha
     subject_foreground_srgb = remote.foreground_srgb
     subject_rgba = remote.rgba
+    execution_keep_floor, execution_alpha_cap, execution_remove_mask, execution_decision_info = _corridorkey_execution_masks(
+        rgb,
+        selected_bg_color,
+        params,
+    )
+    execution_keep_mask = execution_keep_floor > 0.0
+    execution_cap_mask = execution_alpha_cap < 0.999
+    if execution_keep_mask.any() or execution_cap_mask.any() or execution_remove_mask.any():
+        subject_alpha = subject_alpha.copy()
+        subject_foreground_srgb = subject_foreground_srgb.copy()
+        if execution_keep_mask.any():
+            subject_alpha = np.maximum(subject_alpha, execution_keep_floor).astype(np.float32)
+            subject_foreground_srgb[execution_keep_mask] = rgb[execution_keep_mask]
+        if execution_cap_mask.any():
+            subject_alpha = np.minimum(subject_alpha, execution_alpha_cap).astype(np.float32)
+            subject_foreground_srgb[execution_cap_mask] = rgb[execution_cap_mask]
+        if execution_remove_mask.any():
+            subject_alpha[execution_remove_mask] = 0.0
+            subject_foreground_srgb[execution_remove_mask] = rgb[execution_remove_mask]
+        subject_rgba = np.dstack(
+            [
+                subject_foreground_srgb,
+                (np.clip(subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
+            ]
+        )
     solid_interior_pixels = 0
     material_floor_lift_pixels = 0
     if solid_interior_mask is not None and solid_interior_mask.any():
@@ -347,6 +454,23 @@ def matte_corridorkey_direct(
         background_color=selected_bg_color,
         shadow_mode=shadow_mode,
     )
+    if execution_keep_mask.any():
+        alpha = np.maximum(alpha, execution_keep_floor).astype(np.float32)
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        rgba_rgb_srgb[execution_keep_mask] = rgb[execution_keep_mask]
+    if execution_cap_mask.any():
+        alpha = np.minimum(alpha, execution_alpha_cap).astype(np.float32)
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        rgba_rgb_srgb[execution_cap_mask] = rgb[execution_cap_mask]
+    if execution_remove_mask.any():
+        alpha = alpha.copy()
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        shadow_alpha = shadow_alpha.copy()
+        shadow_alpha_physical = shadow_alpha_physical.copy()
+        alpha[execution_remove_mask] = 0.0
+        rgba_rgb_srgb[execution_remove_mask] = rgb[execution_remove_mask]
+        shadow_alpha[execution_remove_mask] = 0.0
+        shadow_alpha_physical[execution_remove_mask] = 0.0
     rgba = np.dstack(
         [
             rgba_rgb_srgb,
@@ -371,9 +495,10 @@ def matte_corridorkey_direct(
             "used": True,
             "source": remote.debug.get("hint", {}).get("source") or hint_source or "known_bg_chromatic_key_alpha_hint",
             "hint": remote.debug.get("hint", {}),
+            "semantic_hint_plan": hint_plan_metadata,
         },
         "shadow": shadow_info,
-        "semantic_prior": {},
+        "semantic_prior": execution_decision_info,
         "strategy": {
             "name": "direct_corridorkey",
             "bg_type": bg_type,
@@ -404,12 +529,14 @@ def matte_corridorkey_direct(
         "subject_alpha": subject_alpha,
         "corridorkey_subject_rgba": subject_rgba,
         "corridorkey_hint": remote.hint_alpha,
+        "corridorkey_hint_plan": hint_plan_metadata,
         "corridorkey_raw_alpha": remote.raw_alpha,
         "key_color_protection": remote.color_protection_alpha,
         "shadow_alpha": shadow_alpha,
         "shadow_alpha_physical": shadow_alpha_physical,
         "shadow_layer_rgba": shadow_rgba,
         "shadow": shadow_info,
+        "semantic_execution": execution_decision_info,
         "hard_ui_hint": {
             "mode": hard_ui_hint_mode,
             "execution_profile": execution_profile,

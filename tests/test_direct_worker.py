@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from PIL import Image
 
 import ermbg.direct_worker as direct_worker
 from ermbg.api import MatteResponse
@@ -136,6 +138,197 @@ def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():
     assert calls[0]["hint_alpha"] is None
     assert calls[0]["hint_source"] is None
     assert calls[0]["execution_profile"] == "corridorkey-shaped-icon"
+
+
+def test_matte_corridorkey_direct_applies_user_masks_after_model():
+    rgb = np.full((8, 8, 3), (0, 200, 0), dtype=np.uint8)
+    alpha = np.full(rgb.shape[:2], 0.25, dtype=np.float32)
+    keep_mask = np.zeros(rgb.shape[:2], dtype=np.float32)
+    remove_mask = np.zeros(rgb.shape[:2], dtype=np.float32)
+    keep_mask[1:3, 1:3] = 1.0
+    remove_mask[5:7, 5:7] = 1.0
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha.copy(),
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=np.ones(alpha.shape, dtype=np.float32),
+                raw_alpha=alpha.copy(),
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    result = direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "green",
+            "background_color": [0, 200, 0],
+            "parameter_profile": "key_color_material",
+        },
+        params={
+            "corridorkey_auto_mask": False,
+            "user_keep_mask": keep_mask,
+            "user_remove_mask": remove_mask,
+        },
+        bg_color=(0, 200, 0),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert np.all(result.alpha[1:3, 1:3] == 1.0)
+    assert np.all(result.alpha[5:7, 5:7] == 0.0)
+    info = result.debug["semantic_execution"]
+    assert info["user_keep_pixels"] == 4
+    assert info["user_remove_pixels"] == 4
+
+
+def test_matte_corridorkey_direct_does_not_apply_screen_material_alpha_constraints():
+    rgb = np.full((8, 8, 3), (0, 200, 0), dtype=np.uint8)
+    rgb[2:6, 2:6] = (120, 180, 120)
+    alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha.copy(),
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=np.ones(alpha.shape, dtype=np.float32),
+                raw_alpha=alpha.copy(),
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    result = direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "green",
+            "background_color": [0, 200, 0],
+            "parameter_profile": "screen_tinted_translucency",
+        },
+        params={
+            "corridorkey_auto_mask": True,
+            "semantic_decision": {"screen_material_policy": "background"},
+        },
+        bg_color=(0, 200, 0),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert np.all(result.alpha == 1.0)
+    info = result.debug["semantic_execution"]
+    assert info["semantic_decision"] == {"screen_material_policy": "background"}
+    assert info["semantic_decision_applied"] is False
+    assert info["keep_floor_pixels"] == 0
+    assert info["remove_pixels"] == 0
+
+
+def test_matte_corridorkey_direct_does_not_apply_glass_core_and_gradient_alpha_constraints():
+    image_path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png"
+    )
+    rgb = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+    alpha = np.full(rgb.shape[:2], 0.95, dtype=np.float32)
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha.copy(),
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=np.ones(alpha.shape, dtype=np.float32),
+                raw_alpha=alpha.copy(),
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    result = direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "blue",
+            "background_color": [0, 37, 252],
+            "parameter_profile": "balanced",
+        },
+        params={
+            "corridorkey_auto_mask": True,
+            "semantic_decision": {
+                "glass_core_policy": "transparent",
+                "soft_alpha_gradient_policy": "preserve",
+            },
+        },
+        bg_color=(0, 37, 252),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert np.allclose(result.alpha, alpha)
+    info = result.debug["semantic_execution"]
+    assert info["semantic_decision"] == {
+        "glass_core_policy": "transparent",
+        "soft_alpha_gradient_policy": "preserve",
+    }
+    assert info["semantic_decision_applied"] is False
+    assert info["keep_floor_pixels"] == 0
+    assert info["alpha_cap_pixels"] == 0
+    assert info["remove_pixels"] == 0
+
+
+def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
+    image_path = (
+        Path(__file__).resolve().parents[1]
+        / "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png"
+    )
+    rgb = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+    alpha = np.full(rgb.shape[:2], 0.5, dtype=np.float32)
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha.copy(),
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=kwargs["hint_alpha"],
+                raw_alpha=alpha.copy(),
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    result = direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "blue",
+            "background_color": [0, 37, 252],
+            "parameter_profile": "balanced",
+        },
+        params={
+            "corridorkey_auto_mask": True,
+            "semantic_decision": {
+                "policy": "corridorkey_hint_variant",
+                "corridorkey_hint_variant": "feature_internal_opaque",
+            },
+        },
+        bg_color=(0, 37, 252),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert calls[0]["hint_source"] == "semantic_corridorkey_hint_variant:feature_internal_opaque"
+    hint = calls[0]["hint_alpha"]
+    assert isinstance(hint, np.ndarray)
+    assert hint.shape == rgb.shape[:2]
+    assert 0.0 <= float(hint.min()) <= float(hint.max()) <= 1.0
+    assert result.debug["corridorkey_hint_plan"]["variant"] == "feature_internal_opaque"
+    info = result.debug["semantic_execution"]
+    assert info["semantic_hint_variant"] == "feature_internal_opaque"
+    assert info["semantic_decision_applied"] is False
+    assert info["keep_floor_pixels"] == 0
+    assert info["alpha_cap_pixels"] == 0
+    assert info["remove_pixels"] == 0
 
 
 def test_direct_matte_from_decision_passes_semantic_decision(monkeypatch):

@@ -45,7 +45,7 @@
   case manifest 路径和输出文件路径，保证 Web 后台列表稳定发现。最终
   `rgba` 是通用输出；`trimap`、`alpha`、`shadow` 等诊断图只在该后端实际
   产出时写入并列入 manifest，不作为所有 backend 的强制要求。
-- 当前 game eval manifest 全量为 86 个样本；标准流程不要继续按旧 85 样本口径汇报。
+- 当前 game eval manifest 全量为 87 个样本；标准流程不要继续按旧 85/86 样本口径汇报。
 
 ## 算法相关任务
 
@@ -84,10 +84,13 @@
    `git_sha`/同步标记和 GPU/CPU 能力。
 6. 对 `/api/preprocess-analysis` 和 `/api/analyze-candidates` 跑真实 HTTP smoke，
    确认 Preprocess/Analyze 元数据完整,且 Analyze 不执行完整 matte。
-7. 用 `backend=auto` 对兼容层 `/api/matte-candidates` 跑一次真实 HTTP smoke，
-   确认 HTTP 200、`algorithm`、route/profile 元数据、`execution_backend`、
-   `execution_server_url`、`server_elapsed_sec` 以及兼容层 metadata。
-8. 如果 Web 报告 Direct Worker 连接错误，先检查
+7. 用 Analyze payload 对 `/api/execute-candidate` 跑真实 HTTP smoke，确认
+   HTTP 200、`algorithm`、route/profile 元数据、`execution_backend`、
+   `execution_server_url`、`server_elapsed_sec`；涉及 CorridorKey hint 候选时，
+   还要确认 `semantic_decision.corridorkey_hint_variant` 与 Direct Worker
+   `algorithm_debug.corridorkey_hint_plan.variant` 一致。
+8. `/api/matte-candidates` 只作为旧调用方兼容层，不作为新候选路径质量验证入口。
+9. 如果 Web 报告 Direct Worker 连接错误，先检查
    `<services.direct_worker_url>/health`、远端 `7871` 监听和本机 `.venv`
    import `cv2`，再去改算法代码。
 

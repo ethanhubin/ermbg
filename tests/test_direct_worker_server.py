@@ -59,6 +59,12 @@ def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button"
                 "parameters": {"fg_threshold": 24.0},
             },
             "shadow": {"method": "unknown_domain_same_background_reconstruction"},
+            "hint": {"source": "provided_alpha_hint", "min": 0.0, "max": 1.0, "mean": 0.5},
+            "corridorkey_mask": {"convention": "corridorkey_shaped_foreground_hint", "mean": 0.5},
+            "semantic_execution": {
+                "semantic_decision": {"policy": "review_only"},
+                "semantic_decision_applied": False,
+            },
         },
     )
     return DirectWorkerResult(
@@ -106,6 +112,12 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert payload["execution_profile"] == "pymatting-hard-button"
     assert payload["algorithm_debug"]["git_sha"]
     assert payload["algorithm_debug"]["pymatting_known_b"]["trimap"]["unknown_pixels"] == 6
+    assert payload["algorithm_debug"]["hint"]["source"] == "provided_alpha_hint"
+    assert payload["algorithm_debug"]["corridorkey_mask"]["convention"] == "corridorkey_shaped_foreground_hint"
+    assert payload["algorithm_debug"]["semantic_execution"] == {
+        "semantic_decision": {"policy": "review_only"},
+        "semantic_decision_applied": False,
+    }
     assert "rgba_png_base64" not in payload
     assert "trimap_png_base64" not in payload
     assert payload["server_elapsed_sec"] >= 0.0
@@ -634,6 +646,7 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
             params={
                 "execution_profile": "corridorkey-shaped-icon",
                 "corridorkey_auto_mask": True,
+                "corridorkey_hard_ui_hint_mode": "translucent_button",
                 "corridorkey_protection_bg_max": 4.0,
                 "corridorkey_protection_fg_min": 10.0,
             },
@@ -662,6 +675,9 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
 
     assert response.status_code == 200
     assert captured["params"]["corridorkey_auto_mask"] is True
+    assert captured["params"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    assert "corridorkey_screen_mode" not in captured["params"]
+    assert "corridorkey_preset" not in captured["params"]
     assert captured["params"]["corridorkey_protection_bg_max"] == 4.0
     assert captured["params"]["corridorkey_protection_fg_min"] == 10.0
 

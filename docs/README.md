@@ -43,7 +43,7 @@ input
 - Known-B Analyze 生成 explicit trimap；Execute 可直接消费该 trimap。
 - Known-B 当前语义候选主要是 enclosed near-B holes；shadow 不是候选。
 - 粗 mask 是 keep/remove 语义约束，不是最终 alpha。
-- 旧 `/api/matte-candidates` 是兼容层。
+- 旧 `/api/matte-candidates` 仅用于旧调用方兼容，不作为当前候选质量验证入口。
 
 ## 归档规则
 

@@ -126,7 +126,9 @@ WEB_MATTE_RUN_PREFIX = "web_matte_runs_"
 LEGACY_MATTE_CANDIDATES_COMPAT = {
     "endpoint": "/api/matte-candidates",
     "status": "compatibility_layer",
+    "deprecated": True,
     "replacement_flow": "Preprocess -> Analyze -> Decide -> Execute",
+    "quality_validation_entrypoint": False,
 }
 
 
@@ -4294,11 +4296,21 @@ def _run_web_backend(
     direct_execution_backend = _execution_backend_for_algorithm(execution_backend)
     if direct_execution_backend is not None:
         servers = _direct_worker_servers_for_backend(execution_backend)
-        corridorkey_overrides: dict[str, Any] = {
-            "corridorkey_screen_mode": corridorkey_screen_mode,
-            "corridorkey_preset": corridorkey_preset,
-            "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
-        }
+        has_route_decision = isinstance(kwargs.get("route_decision"), dict)
+        manual_params = (
+            str(parameter_source or "auto").strip().lower() == "manual"
+            or _direct_backend_base(execution_backend) == "direct-corridorkey"
+            or (not requested_auto and direct_execution_backend != "auto")
+        )
+        corridorkey_overrides: dict[str, Any] = {}
+        if not has_route_decision or manual_params:
+            corridorkey_overrides.update(
+                {
+                    "corridorkey_screen_mode": corridorkey_screen_mode,
+                    "corridorkey_preset": corridorkey_preset,
+                    "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
+                }
+            )
         if kwargs.get("corridorkey_hint_mask") is not None:
             corridorkey_overrides["corridorkey_hint_mask"] = kwargs["corridorkey_hint_mask"]
         if isinstance(kwargs.get("semantic_decision"), dict):
@@ -4307,13 +4319,8 @@ def _run_web_backend(
             corridorkey_overrides["user_keep_mask"] = kwargs["user_keep_mask"]
         if kwargs.get("user_remove_mask") is not None:
             corridorkey_overrides["user_remove_mask"] = kwargs["user_remove_mask"]
-        if isinstance(kwargs.get("route_decision"), dict):
+        if has_route_decision:
             corridorkey_overrides["route_decision"] = kwargs["route_decision"]
-        manual_params = (
-            str(parameter_source or "auto").strip().lower() == "manual"
-            or _direct_backend_base(execution_backend) == "direct-corridorkey"
-            or (not requested_auto and direct_execution_backend != "auto")
-        )
         if direct_execution_backend == "direct-corridorkey" and manual_params:
             corridorkey_overrides.update(
                 {
@@ -4805,7 +4812,7 @@ def _execute_matte_candidates_payload(
     return payload
 
 
-@app.post("/api/matte-candidates")
+@app.post("/api/matte-candidates", deprecated=True)
 def matte_candidates_endpoint(
     file: Annotated[UploadFile, File()],
     corridorkey_hint_mask: Annotated[UploadFile | None, File()] = None,

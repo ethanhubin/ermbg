@@ -171,7 +171,7 @@ print(result.debug)
 
 ```
 
-去掉 `--sample-id` 跑完整 86 样本集。回归样本集：`samples/corridorkey_semantic/manifest.json`。
+去掉 `--sample-id` 跑完整 87 样本集。回归样本集：`samples/corridorkey_semantic/manifest.json`。
 
 ---
 

@@ -107,7 +107,17 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
     debug = result.response.debug if isinstance(result.response.debug, dict) else {}
     known_b = debug.get("pymatting_known_b") if isinstance(debug.get("pymatting_known_b"), dict) else None
     known_bg_glow = debug.get("known_bg_glow") if isinstance(debug.get("known_bg_glow"), dict) else None
+    hint = debug.get("hint") if isinstance(debug.get("hint"), dict) else None
+    corridorkey_mask = debug.get("corridorkey_mask") if isinstance(debug.get("corridorkey_mask"), dict) else None
+    corridorkey_hint_plan = (
+        debug.get("corridorkey_hint_plan") if isinstance(debug.get("corridorkey_hint_plan"), dict) else None
+    )
+    settings = debug.get("settings") if isinstance(debug.get("settings"), dict) else None
+    hard_ui_hint = debug.get("hard_ui_hint") if isinstance(debug.get("hard_ui_hint"), dict) else None
     shadow = debug.get("shadow") if isinstance(debug.get("shadow"), dict) else None
+    semantic_execution = (
+        debug.get("semantic_execution") if isinstance(debug.get("semantic_execution"), dict) else None
+    )
     algorithm: dict[str, Any] = {
         "strategy": result.response.strategy_name,
         "execution_backend": result.metadata.get("execution_backend"),
@@ -122,8 +132,20 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
         }
     if known_bg_glow is not None:
         algorithm["known_bg_glow"] = known_bg_glow
+    if hint is not None:
+        algorithm["hint"] = hint
+    if corridorkey_mask is not None:
+        algorithm["corridorkey_mask"] = corridorkey_mask
+    if corridorkey_hint_plan is not None:
+        algorithm["corridorkey_hint_plan"] = corridorkey_hint_plan
+    if settings is not None:
+        algorithm["settings"] = settings
+    if hard_ui_hint is not None:
+        algorithm["hard_ui_hint"] = hard_ui_hint
     if shadow is not None:
         algorithm["shadow"] = shadow
+    if semantic_execution is not None:
+        algorithm["semantic_execution"] = semantic_execution
     return algorithm
 
 
@@ -342,8 +364,12 @@ def _apply_execution_backend_override(
         for key, value in decision.params.items()
         if not key.startswith("pymatting_") and key != "parameter_profile"
     }
-    params["execution_profile"] = "auto"
-    params["corridorkey_execution_profile"] = "auto"
+    if decision.backend == "corridorkey":
+        params["execution_profile"] = params.get("execution_profile") or "auto"
+        params["corridorkey_execution_profile"] = params.get("corridorkey_execution_profile") or params["execution_profile"]
+    else:
+        params["execution_profile"] = "auto"
+        params["corridorkey_execution_profile"] = "auto"
     return replace(
         decision,
         route="corridorkey",
@@ -530,10 +556,16 @@ def _corridorkey_form_params(
     corridorkey_color_protection: bool | None,
     corridorkey_protection_bg_max: float | None,
     corridorkey_protection_fg_min: float | None,
-    corridorkey_screen_mode: str,
-    corridorkey_preset: str,
-    corridorkey_hard_ui_hint_mode: str,
+    corridorkey_screen_mode: str | None,
+    corridorkey_preset: str | None,
+    corridorkey_hard_ui_hint_mode: str | None,
 ) -> dict[str, Any]:
+    def text_or_none(value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
     params = {
         "corridorkey_gamma_space": corridorkey_gamma_space,
         "corridorkey_despill_strength": None
@@ -554,9 +586,9 @@ def _corridorkey_form_params(
         "corridorkey_protection_fg_min": None
         if corridorkey_protection_fg_min is None
         else float(corridorkey_protection_fg_min),
-        "corridorkey_screen_mode": corridorkey_screen_mode,
-        "corridorkey_preset": corridorkey_preset,
-        "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
+        "corridorkey_screen_mode": text_or_none(corridorkey_screen_mode),
+        "corridorkey_preset": text_or_none(corridorkey_preset),
+        "corridorkey_hard_ui_hint_mode": text_or_none(corridorkey_hard_ui_hint_mode),
     }
     return {key: value for key, value in params.items() if value is not None}
 
@@ -690,9 +722,9 @@ async def matte_endpoint(
     corridorkey_color_protection: bool | None = Form(None),
     corridorkey_protection_bg_max: float | None = Form(None),
     corridorkey_protection_fg_min: float | None = Form(None),
-    corridorkey_screen_mode: str = Form("auto"),
-    corridorkey_preset: str = Form("auto"),
-    corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
+    corridorkey_screen_mode: str | None = Form(None),
+    corridorkey_preset: str | None = Form(None),
+    corridorkey_hard_ui_hint_mode: str | None = Form(None),
     known_bg_glow_material_strength: float | None = Form(None),
     pymatting_method: str | None = Form(None),
     pymatting_image_space: str | None = Form(None),
@@ -718,6 +750,9 @@ async def matte_endpoint(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     bg = _parse_bg_color(fallback_bg_color)
+    effective_corridorkey_screen_mode = str(corridorkey_screen_mode or "auto")
+    effective_corridorkey_preset = str(corridorkey_preset or "auto")
+    effective_corridorkey_hard_ui_hint_mode = str(corridorkey_hard_ui_hint_mode or "bbox_2px")
     route_decision_payload = _parse_json_object(route_decision, "route_decision")
     semantic_decision_payload = _parse_semantic_decision(semantic_decision)
     ck_params = _corridorkey_form_params(
@@ -776,8 +811,8 @@ async def matte_endpoint(
                 0,
                 image.filename or "image",
                 data,
-                corridorkey_screen_mode=corridorkey_screen_mode,
-                corridorkey_preset=corridorkey_preset,
+                corridorkey_screen_mode=effective_corridorkey_screen_mode,
+                corridorkey_preset=effective_corridorkey_preset,
                 fallback_bg_color=bg,
             )
             decision = prepared.decision
@@ -803,7 +838,7 @@ async def matte_endpoint(
         result = _run_prepared_main(
             prepared,
             shadow_mode=shadow_mode,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+            corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
             corridorkey_hint_mask=hint_mask,
             fallback_bg_color=bg,
         )
@@ -835,15 +870,18 @@ async def batch_matte_endpoint(
     corridorkey_color_protection: bool | None = Form(None),
     corridorkey_protection_bg_max: float | None = Form(None),
     corridorkey_protection_fg_min: float | None = Form(None),
-    corridorkey_screen_mode: str = Form("auto"),
-    corridorkey_preset: str = Form("auto"),
-    corridorkey_hard_ui_hint_mode: str = Form("bbox_2px"),
+    corridorkey_screen_mode: str | None = Form(None),
+    corridorkey_preset: str | None = Form(None),
+    corridorkey_hard_ui_hint_mode: str | None = Form(None),
     known_bg_glow_material_strength: float | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
     include_images: bool = Form(True),
 ) -> dict[str, Any]:
     started = time.perf_counter()
     bg = _parse_bg_color(fallback_bg_color)
+    effective_corridorkey_screen_mode = str(corridorkey_screen_mode or "auto")
+    effective_corridorkey_preset = str(corridorkey_preset or "auto")
+    effective_corridorkey_hard_ui_hint_mode = str(corridorkey_hard_ui_hint_mode or "bbox_2px")
     ck_params = _corridorkey_form_params(
         corridorkey_gamma_space=corridorkey_gamma_space,
         corridorkey_despill_strength=corridorkey_despill_strength,
@@ -867,8 +905,8 @@ async def batch_matte_endpoint(
                 index,
                 upload.filename or f"image_{index}",
                 data,
-                corridorkey_screen_mode=corridorkey_screen_mode,
-                corridorkey_preset=corridorkey_preset,
+                corridorkey_screen_mode=effective_corridorkey_screen_mode,
+                corridorkey_preset=effective_corridorkey_preset,
                 fallback_bg_color=bg,
             )
             decision = _apply_execution_backend_override(
@@ -900,7 +938,7 @@ async def batch_matte_endpoint(
                     item.source_alpha,
                     item.decision,
                     shadow_mode=shadow_mode,
-                    corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                    corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
                     fallback_bg_color=bg,
                     route_sec=item.route_sec,
                     include_image=include_images,
@@ -911,7 +949,7 @@ async def batch_matte_endpoint(
             result = _run_prepared_main(
                 item,
                 shadow_mode=shadow_mode,
-                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
+                corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
                 corridorkey_hint_mask=None,
                 fallback_bg_color=bg,
             )

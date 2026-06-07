@@ -141,6 +141,7 @@ class LocalCorridorKeyClient:
         *,
         screen_color: str,
         execution_profile: str,
+        hint_source: str | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         image_to_mask_cls = cls._registry_node_class("ImageToMask")
         if image_to_mask_cls is not None:
@@ -166,7 +167,11 @@ class LocalCorridorKeyClient:
                 pass
 
         hint_min = float(hint.min()) if hint.size else 0.0
-        if hint_min >= 0.999:
+        explicit_hint = str(hint_source or "").startswith("provided")
+        if hint_min >= 0.999 and explicit_hint:
+            corridorkey_mask = np.zeros(hint.shape, dtype=np.float32)
+            convention = "corridorkey_explicit_full_frame_white_inverted_to_black_hint"
+        elif hint_min >= 0.999:
             # Full-frame hints are a route-level control signal, not a literal
             # foreground shape. Keep priors profile-specific so transparent
             # buttons, characters, and effect icons cannot disturb each other.
@@ -236,6 +241,7 @@ class LocalCorridorKeyClient:
             hint,
             screen_color=str(screen_color),
             execution_profile=str(execution_profile),
+            hint_source=hint_source,
         )
         step_start = time.perf_counter()
         loaded_node = self._get_loaded_node() if self.prefer_loaded_node else None
