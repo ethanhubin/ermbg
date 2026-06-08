@@ -1088,13 +1088,23 @@ def build_known_background_trimap(
             }
         else:
             forced_background = ownership.enclosed_bg & ownership.bg_candidate
-            sure_bg[forced_background] = True
-            sure_fg[forced_background] = False
-            unknown[forced_background] = False
+            forced_background_core, hole_unknown_release, hole_unknown_info = _semantic_hole_bg_core_and_unknown(
+                forced_background,
+                sure_fg=sure_fg,
+            )
+            sure_bg[forced_background_core] = True
+            sure_fg[forced_background_core] = False
+            unknown[forced_background_core] = False
+            if bool(hole_unknown_release.any()):
+                unknown[hole_unknown_release] = True
+                sure_bg[hole_unknown_release] = False
+                sure_fg[hole_unknown_release] = False
             semantic_info = {
                 **semantic_info,
                 "applied": True,
-                "forced_background_pixels": int(forced_background.sum()),
+                "forced_background_pixels": int(forced_background_core.sum()),
+                "hole_unknown_release_pixels": int(hole_unknown_release.sum()),
+                "hole_unknown_release": hole_unknown_info,
             }
     keep_only = keep_mask & ~remove_mask
     if keep_only.any():
@@ -1134,6 +1144,64 @@ def build_known_background_trimap(
             "screen_dominant_overlap_pixels": 0,
             "protected_foreground_overlap_pixels": 0,
         },
+    }
+
+
+def _semantic_hole_bg_core_and_unknown(
+    mask: np.ndarray,
+    *,
+    sure_fg: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Return sure-BG hole core and a small subject-side unknown solve ring."""
+
+    mask_bool = np.asarray(mask, dtype=bool)
+    shape = mask_bool.shape
+    bg_core = np.zeros(shape, dtype=bool)
+    unknown_release = np.zeros(shape, dtype=bool)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), connectivity=8)
+    components: list[dict[str, Any]] = []
+    image_release_cap = max(1, min(4, int(round(float(min(shape)) * 0.004))))
+    for label_idx in range(1, n_labels):
+        comp = labels == label_idx
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        width = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+        height = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+        hole_release_cap = max(1, min(4, int(round(float(max(1, min(width, height))) * 0.20))))
+        release_px = max(1, min(image_release_cap, hole_release_cap))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (release_px * 2 + 1, release_px * 2 + 1))
+        eroded = cv2.erode(comp.astype(np.uint8), kernel, iterations=1).astype(bool)
+        if bool(eroded.any()):
+            comp_core = eroded
+            inner_unknown = comp & ~eroded
+        else:
+            comp_core = comp
+            inner_unknown = np.zeros(shape, dtype=bool)
+        outer_unknown = cv2.dilate(comp.astype(np.uint8), kernel, iterations=1).astype(bool) & ~comp & sure_fg
+        release = inner_unknown | outer_unknown
+        bg_core |= comp_core
+        unknown_release |= release
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label_idx, cv2.CC_STAT_LEFT]),
+                    int(stats[label_idx, cv2.CC_STAT_TOP]),
+                    int(stats[label_idx, cv2.CC_STAT_LEFT] + width),
+                    int(stats[label_idx, cv2.CC_STAT_TOP] + height),
+                ],
+                "release_px": int(release_px),
+                "bg_core_pixels": int(comp_core.sum()),
+                "inner_unknown_pixels": int(inner_unknown.sum()),
+                "outer_subject_unknown_pixels": int(outer_unknown.sum()),
+            }
+        )
+    return bg_core, unknown_release, {
+        "method": "adaptive_hole_edge_unknown_release",
+        "image_release_cap_px": int(image_release_cap),
+        "components": components[:24],
+        "omitted_components": max(0, len(components) - 24),
+        "bg_core_pixels": int(bg_core.sum()),
+        "unknown_release_pixels": int(unknown_release.sum()),
     }
 
 

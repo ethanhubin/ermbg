@@ -332,6 +332,87 @@ def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
     assert info["remove_pixels"] == 0
 
 
+def _character_capture_client() -> tuple[type, list[dict[str, object]]]:
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            calls.append(kwargs)
+            alpha = np.ones(image_srgb.shape[:2], dtype=np.float32)
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha.copy(),
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                raw_alpha=alpha.copy(),
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    return FakeClient, calls
+
+
+def test_matte_corridorkey_direct_character_profile_forces_recipe_for_auto_preset():
+    rgb = np.full((8, 8, 3), (0, 200, 0), dtype=np.uint8)
+    client_cls, calls = _character_capture_client()
+
+    direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "green",
+            "background_color": [0, 200, 0],
+            "parameter_profile": "composite_character_corridor_only",
+        },
+        params={
+            # Manual-looking knobs, but no manual preset: the character profile
+            # owns the recipe and must override them on the auto path.
+            "corridorkey_gamma_space": "Linear",
+            "corridorkey_refiner_strength": 2.5,
+            "corridorkey_auto_despeckle": "On",
+        },
+        bg_color=(0, 200, 0),
+        shadow_mode="off",
+        corridorkey_client=client_cls(),
+    )
+
+    assert calls[0]["gamma_space"] == "sRGB"
+    assert calls[0]["refiner_strength"] == 1.0
+    assert calls[0]["auto_despeckle"] == "Off"
+    assert calls[0]["execution_profile"] == "corridorkey-character"
+
+
+def test_matte_corridorkey_direct_manual_preset_honors_form_params():
+    rgb = np.full((8, 8, 3), (0, 200, 0), dtype=np.uint8)
+    client_cls, calls = _character_capture_client()
+
+    direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "green",
+            "background_color": [0, 200, 0],
+            "parameter_profile": "composite_character_corridor_only",
+        },
+        params={
+            "corridorkey_preset": "manual",
+            "corridorkey_gamma_space": "Linear",
+            "corridorkey_refiner_strength": 2.5,
+            "corridorkey_auto_despeckle": "On",
+            "corridorkey_despeckle_size": 256,
+        },
+        bg_color=(0, 200, 0),
+        shadow_mode="off",
+        corridorkey_client=client_cls(),
+    )
+
+    # Manual preset must defer to the supplied form values even on a profile
+    # that would otherwise force its own recipe.
+    assert calls[0]["gamma_space"] == "Linear"
+    assert calls[0]["refiner_strength"] == 2.5
+    assert calls[0]["auto_despeckle"] == "On"
+    assert calls[0]["despeckle_size"] == 256
+    assert calls[0]["execution_profile"] == "corridorkey-character"
+
+
 def test_direct_matte_from_decision_passes_semantic_decision(monkeypatch):
     rgb = np.full((8, 8, 3), (255, 255, 255), dtype=np.uint8)
     captured: dict[str, object] = {}

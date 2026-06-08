@@ -37,7 +37,7 @@ except ImportError as e:  # pragma: no cover - exercised only without web extra
 
 from . import io as ermbg_io
 from .analyze import analyze_candidates
-from .api import MatteResponse, matte_image
+from .api import MatteResponse, classify_image_route, matte_image
 from .artifacts import build_run_manifest, route_from_response, runtime_from_response, write_run_manifest
 from .candidates import MatteCandidate, generate_matte_candidates
 from .direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_direct_worker
@@ -283,6 +283,7 @@ def _execution_backend_for_algorithm(backend: str) -> str | None:
         "corridorkey": "direct-corridorkey",
         "direct-corridorkey": "direct-corridorkey",
         "pymatting_known_b": "direct-pymatting-known-b",
+        "direct-pymatting-known-b": "direct-pymatting-known-b",
         "known-bg-glow": "direct-known-bg-glow",
         "known_bg_glow": "direct-known-bg-glow",
         "direct-known-bg-glow": "direct-known-bg-glow",
@@ -532,15 +533,43 @@ def analyze_candidates_endpoint(
         rgb,
         selected=[BACKGROUND_REPAIR] if background_repair else [],
     )
+    analyze_image = Image.fromarray(preprocess.image_srgb, mode="RGB")
+    effective_preprocess = preprocess.decision
+    known_b_preprocess_info: dict[str, Any] = {"requested": bool(background_repair), "applied": False}
+    if background_repair:
+        pymatting_params = {
+            "pymatting_bg_source": "auto",
+            "pymatting_bg_color": fallback_bg,
+            "pymatting_bg_threshold": 3.5,
+            "pymatting_fg_threshold": 24.0,
+        }
+        route = _known_b_route_for_web_matte(
+            analyze_image,
+            backend="auto-local",
+            pymatting_params=pymatting_params,
+        )
+        if route is not None:
+            route_params = route.get("params") if isinstance(route.get("params"), dict) else {}
+            analyze_image, known_b_preprocess_info, _execution_params, known_b_decision = _apply_known_b_background_repair(
+                analyze_image,
+                route_params=route_params,
+                pymatting_params=pymatting_params,
+            )
+            if known_b_decision is not None:
+                effective_preprocess = _merge_web_preprocess_decisions(effective_preprocess, known_b_decision)
+        else:
+            known_b_preprocess_info = {"requested": True, "applied": False, "reason": "route_is_not_known_b"}
+    analyze_rgb = np.asarray(analyze_image.convert("RGB"), dtype=np.uint8)
     result = analyze_candidates(
-        preprocess.image_srgb,
-        preprocess=preprocess.decision,
+        analyze_rgb,
+        preprocess=effective_preprocess,
         screen_mode=corridorkey_screen_mode,
         preset=corridorkey_preset,
         fallback_background_color=fallback_bg,
     )
     payload = result.to_dict()
     payload["preprocess_analysis"] = preprocess.analysis.to_dict()
+    payload["preprocess_analysis"]["known_background_normalization"] = known_b_preprocess_info
     payload["ambiguities"] = payload.get("ambiguity_regions", [])
     return _json_safe_debug(payload)
 
@@ -684,6 +713,121 @@ def _rgb_color_from_payload(value: Any) -> tuple[int, int, int] | None:
     return tuple(int(np.clip(c, 0, 255)) for c in value)  # type: ignore[return-value]
 
 
+def _merge_web_preprocess_decisions(
+    current: PreprocessDecision | None,
+    addition: PreprocessDecision,
+) -> PreprocessDecision:
+    selected = list(current.selected) if current is not None else []
+    applied = list(current.applied) if current is not None else []
+    metadata = dict(current.metadata) if current is not None else {}
+    for item in addition.selected:
+        if item not in selected:
+            selected.append(item)
+    for item in addition.applied:
+        if item not in applied:
+            applied.append(item)
+    metadata.update(addition.metadata)
+    return PreprocessDecision(
+        selected=selected,
+        applied=applied,
+        metadata=metadata,
+        background_model=addition.background_model or (current.background_model if current is not None else None),
+    )
+
+
+def _known_b_background_from_params(
+    image: Image.Image,
+    route_params: dict[str, Any],
+    pymatting_params: dict[str, object],
+) -> tuple[tuple[int, int, int] | None, dict[str, Any]]:
+    background = _rgb_color_from_payload(route_params.get("pymatting_bg_color"))
+    if background is None:
+        background = _rgb_color_from_payload(pymatting_params.get("pymatting_bg_color"))
+    bg_source = str(route_params.get("pymatting_bg_source", pymatting_params.get("pymatting_bg_source", "custom"))).strip().lower()
+    if background is not None and bg_source in {"", "custom"}:
+        return background, {"source": "known_b_params", "background_color": list(background)}
+    if bg_source == "green":
+        return (0, 200, 0), {"source": "preset_green", "background_color": [0, 200, 0]}
+    if bg_source == "blue":
+        return (0, 0, 200), {"source": "preset_blue", "background_color": [0, 0, 200]}
+    if background is not None and bg_source != "auto":
+        return background, {"source": "known_b_params", "background_color": list(background)}
+
+    from .pymatting_refine import estimate_stable_background_color
+
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    estimated, info = estimate_stable_background_color(rgb)
+    selected = tuple(int(c) for c in estimated)
+    return selected, {"source": "preprocess_estimate_stable_background_color", **info}
+
+
+def _apply_known_b_background_repair(
+    image: Image.Image,
+    *,
+    route_params: dict[str, Any],
+    pymatting_params: dict[str, object],
+) -> tuple[Image.Image, dict[str, Any], dict[str, Any], PreprocessDecision | None]:
+    background, background_info = _known_b_background_from_params(image, route_params, pymatting_params)
+    if background is None:
+        return image, {"skipped": True, "reason": "missing_known_background_color"}, {}, None
+
+    bg_threshold = float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5)))
+    fg_threshold = float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0)))
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    normalized, decision = repair_known_background_preprocess(
+        rgb,
+        background,
+        bg_threshold=bg_threshold,
+        fg_threshold=fg_threshold,
+        adaptive=False,
+    )
+    normalization = dict(decision.metadata.get("known_background_normalization") or {})
+    normalization["background_model"] = background_info
+    execution_params = {
+        "pymatting_input_preprocessed_known_b": True,
+        "pymatting_background_normalization": normalization,
+        "pymatting_bg_source": "custom",
+        "pymatting_bg_color": background,
+        "pymatting_bg_threshold": bg_threshold,
+        "pymatting_fg_threshold": fg_threshold,
+        "pymatting_adapt_bg_threshold": bool(
+            route_params.get("pymatting_adapt_bg_threshold", pymatting_params.get("pymatting_adapt_bg_threshold", False))
+        ),
+        "pymatting_adapt_fg_threshold": bool(
+            route_params.get("pymatting_adapt_fg_threshold", pymatting_params.get("pymatting_adapt_fg_threshold", True))
+        ),
+        "pymatting_adapt_boundary_band": bool(
+            route_params.get(
+                "pymatting_adapt_boundary_band",
+                pymatting_params.get("pymatting_adapt_boundary_band", True),
+            )
+        ),
+    }
+    for key in (
+        "pymatting_method",
+        "pymatting_image_space",
+        "pymatting_boundary_band_px",
+        "pymatting_cg_maxiter",
+        "pymatting_cg_rtol",
+        "pymatting_trimap_mode",
+        "pymatting_unknown_grow_px",
+    ):
+        if key in route_params:
+            execution_params[key] = route_params[key]
+        elif key in pymatting_params:
+            execution_params[key] = pymatting_params[key]
+    info = {
+        "selected": True,
+        "requested": True,
+        "applied": BACKGROUND_REPAIR in decision.applied,
+        "background_color": [int(c) for c in background],
+        "background_model": background_info,
+        "known_background_normalization": normalization,
+        "decision": decision.to_dict(),
+    }
+    return Image.fromarray(normalized, mode="RGB"), info, execution_params, decision
+
+
 def _known_b_preprocess_from_contract(
     image: Image.Image,
     analysis_payload: dict[str, Any] | None,
@@ -706,47 +850,13 @@ def _known_b_preprocess_from_contract(
         background = _rgb_color_from_payload(pymatting_params.get("pymatting_bg_color"))
     if background is None:
         return image, {"skipped": True, "reason": "missing_known_background_color"}, {}
-
-    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    normalized, decision = repair_known_background_preprocess(
-        rgb,
-        background,
-        bg_threshold=float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
-        fg_threshold=float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
-        adaptive=False,
+    route_params = {**route_params, "pymatting_bg_source": "custom", "pymatting_bg_color": background}
+    normalized, info, execution_params, _decision = _apply_known_b_background_repair(
+        image,
+        route_params=route_params,
+        pymatting_params=pymatting_params,
     )
-    normalization = dict(decision.metadata.get("known_background_normalization") or {})
-    execution_params = {
-        "pymatting_input_preprocessed_known_b": True,
-        "pymatting_background_normalization": normalization,
-        "pymatting_bg_source": "custom",
-        "pymatting_bg_color": background,
-        "pymatting_bg_threshold": float(route_params.get("pymatting_bg_threshold", pymatting_params.get("pymatting_bg_threshold", 3.5))),
-        "pymatting_fg_threshold": float(route_params.get("pymatting_fg_threshold", pymatting_params.get("pymatting_fg_threshold", 24.0))),
-        "pymatting_adapt_bg_threshold": bool(route_params.get("pymatting_adapt_bg_threshold", pymatting_params.get("pymatting_adapt_bg_threshold", False))),
-        "pymatting_adapt_fg_threshold": bool(route_params.get("pymatting_adapt_fg_threshold", pymatting_params.get("pymatting_adapt_fg_threshold", True))),
-        "pymatting_adapt_boundary_band": bool(route_params.get("pymatting_adapt_boundary_band", pymatting_params.get("pymatting_adapt_boundary_band", True))),
-    }
-    for key in (
-        "pymatting_method",
-        "pymatting_image_space",
-        "pymatting_boundary_band_px",
-        "pymatting_cg_maxiter",
-        "pymatting_cg_rtol",
-        "pymatting_trimap_mode",
-        "pymatting_unknown_grow_px",
-    ):
-        if key in route_params:
-            execution_params[key] = route_params[key]
-        elif key in pymatting_params:
-            execution_params[key] = pymatting_params[key]
-    info = {
-        "selected": True,
-        "applied": BACKGROUND_REPAIR in decision.applied,
-        "background_color": [int(c) for c in background],
-        "metadata": normalization,
-    }
-    return Image.fromarray(normalized, mode="RGB"), info, execution_params
+    return normalized, info, execution_params
 
 
 def _execute_backend_from_analysis(requested_backend: str, analysis_payload: dict[str, Any] | None) -> str:
@@ -758,6 +868,56 @@ def _execute_backend_from_analysis(requested_backend: str, analysis_payload: dic
     if algorithm == "rgba_passthrough":
         return "passthrough"
     return requested_backend
+
+
+def _known_b_route_for_web_matte(
+    image: Image.Image,
+    *,
+    backend: str,
+    pymatting_params: dict[str, object],
+) -> dict[str, Any] | None:
+    base = _direct_backend_base(backend)
+    if base in {"pymatting_known_b", "pymatting-known-b", "direct-pymatting-known-b"}:
+        return {"algorithm": "pymatting_known_b", "params": dict(pymatting_params)}
+    if base not in {"auto", "auto-local", "direct-worker"}:
+        return None
+
+    fallback = _rgb_color_from_payload(pymatting_params.get("pymatting_bg_color")) or (0, 200, 0)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    route = classify_image_route(rgb, bg_color=fallback).to_dict()
+    algorithm = str(route.get("algorithm") or route.get("route") or "")
+    if algorithm != "pymatting_known_b":
+        return None
+    return route
+
+
+def _apply_web_matte_known_b_background_repair(
+    image: Image.Image,
+    *,
+    backend: str,
+    background_repair: bool,
+    pymatting_params: dict[str, object],
+) -> tuple[Image.Image, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    if not background_repair:
+        return image, {"requested": False, "applied": False}, {}, None
+    route = _known_b_route_for_web_matte(image, backend=backend, pymatting_params=pymatting_params)
+    if route is None:
+        return image, {"requested": True, "applied": False, "reason": "route_is_not_known_b"}, {}, None
+    route_params = route.get("params") if isinstance(route.get("params"), dict) else {}
+    normalized, info, execution_params, _decision = _apply_known_b_background_repair(
+        image,
+        route_params=route_params,
+        pymatting_params=pymatting_params,
+    )
+    if execution_params:
+        route = {
+            **route,
+            "params": {
+                **route_params,
+                **execution_params,
+            },
+        }
+    return normalized, info, execution_params, route
 
 
 def _semantic_execution_summary(
@@ -4280,6 +4440,7 @@ def _run_web_backend(
     # primary direct-worker path is unavailable and Web falls back to a local
     # backend, do not leak those controls into the public local API.
     local_kwargs.pop("known_bg_glow_material_strength", None)
+    local_kwargs.pop("route_decision", None)
     execution_backend = backend
     requested_auto = backend == "auto"
     if backend == "auto":
@@ -4356,7 +4517,6 @@ def _run_web_backend(
             "pymatting_unknown_grow_px",
             "pymatting_input_preprocessed_known_b",
             "pymatting_background_normalization",
-            "pymatting_normalize_known_background",
             "pymatting_explicit_trimap",
         )
         if direct_execution_backend == "direct-pymatting-known-b":
@@ -4567,18 +4727,30 @@ def matte_endpoint(
         pymatting_cg_maxiter=pymatting_cg_maxiter,
         pymatting_cg_rtol=pymatting_cg_rtol,
     )
-    pymatting_params["pymatting_normalize_known_background"] = bool(background_repair)
+    image, known_b_preprocess_info, known_b_execution_params, route_decision = _apply_web_matte_known_b_background_repair(
+        image,
+        backend=backend,
+        background_repair=background_repair,
+        pymatting_params=pymatting_params,
+    )
+    if known_b_execution_params:
+        pymatting_params = {**pymatting_params, **known_b_execution_params}
+    route_kwargs = {"route_decision": route_decision} if route_decision is not None else {}
     try:
         result = _run_web_backend(
             image,
             backend=backend,
             shadow_mode=shadow_mode,
             parameter_source=parameter_source,
+            **route_kwargs,
             **pymatting_params,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"matting failed: {e}") from e
-    result.debug["input_preprocess"] = {"background_repair": preprocess_info}
+    result.debug["input_preprocess"] = {
+        "background_repair": preprocess_info,
+        "known_background_normalization": known_b_preprocess_info,
+    }
 
     effective_backend = _effective_backend(backend, result)
     image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
@@ -4668,7 +4840,6 @@ def _execute_matte_candidates_payload(
         pymatting_cg_maxiter=request.pymatting_cg_maxiter,
         pymatting_cg_rtol=request.pymatting_cg_rtol,
     )
-    pymatting_params["pymatting_normalize_known_background"] = bool(request.background_repair)
     semantic_decision_payload = _json_form_object(request.semantic_decision, "semantic_decision")
     semantic_known_b_overrides = _known_b_execution_overrides_from_semantic_decision(semantic_decision_payload)
     execution_contract = request.execution_request_payload or request.analysis_payload

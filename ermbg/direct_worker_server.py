@@ -434,7 +434,6 @@ def _known_b_form_params(
     pymatting_unknown_grow_px: int | None,
     pymatting_input_preprocessed_known_b: bool | None,
     pymatting_background_normalization: str | None,
-    pymatting_normalize_known_background: bool | None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if pymatting_method is not None:
@@ -474,8 +473,6 @@ def _known_b_form_params(
     )
     if normalization is not None:
         params["pymatting_background_normalization"] = normalization
-    if pymatting_normalize_known_background is not None:
-        params["pymatting_normalize_known_background"] = bool(pymatting_normalize_known_background)
     return params
 
 
@@ -800,7 +797,6 @@ async def matte_endpoint(
     pymatting_unknown_grow_px: int | None = Form(None),
     pymatting_input_preprocessed_known_b: bool | None = Form(None),
     pymatting_background_normalization: str | None = Form(None),
-    pymatting_normalize_known_background: bool | None = Form(None),
     route_decision: str | None = Form(None),
     semantic_decision: str | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
@@ -844,7 +840,6 @@ async def matte_endpoint(
         pymatting_unknown_grow_px=pymatting_unknown_grow_px,
         pymatting_input_preprocessed_known_b=pymatting_input_preprocessed_known_b,
         pymatting_background_normalization=pymatting_background_normalization,
-        pymatting_normalize_known_background=pymatting_normalize_known_background,
     )
     data = await image.read()
     hint_mask = None

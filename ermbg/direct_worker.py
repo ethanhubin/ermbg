@@ -265,6 +265,7 @@ def matte_corridorkey_direct(
             execution_profile = "corridorkey-effect-icon"
         else:
             execution_profile = "corridorkey-shaped-icon"
+    preset = str(params.get("corridorkey_preset") or "auto")
     gamma_space = str(params.get("corridorkey_gamma_space", "sRGB"))
     despill_strength = float(params.get("corridorkey_despill_strength", 1.0))
     refiner_strength = float(params.get("corridorkey_refiner_strength", 1.0))
@@ -275,8 +276,12 @@ def matte_corridorkey_direct(
     color_protection_fg_min = float(params.get("corridorkey_protection_fg_min", 28.0))
     auto_mask = bool(params.get("corridorkey_auto_mask", False))
 
+    # Route profiles own a complete CorridorKey recipe for auto runs. A manual
+    # preset means the caller is steering the form values directly, so the
+    # profile force-rewrite must yield to the supplied params (mirrors the Comfy
+    # path in ``api.py`` which gates this same block on ``preset != "manual"``).
     forced_translucent_hint_settings = False
-    if execution_profile in {
+    if preset != "manual" and execution_profile in {
         "corridorkey-transparent-button",
         "corridorkey-effect-icon",
     }:
@@ -292,7 +297,7 @@ def matte_corridorkey_direct(
         apply_color_protection = False
         color_protection_bg_max = 6.0
         color_protection_fg_min = 14.0
-    if execution_profile == "corridorkey-character":
+    if preset != "manual" and execution_profile == "corridorkey-character":
         gamma_space = "sRGB"
         despill_strength = 1.0
         refiner_strength = 1.0
@@ -637,7 +642,6 @@ def direct_matte_from_decision(
             unknown_grow_px=_route_params(params, "pymatting_unknown_grow_px", 0),
             input_preprocessed_known_b=_route_params(params, "pymatting_input_preprocessed_known_b", False),
             input_background_normalization=_route_params(params, "pymatting_background_normalization", None),
-            normalize_known_background=_route_params(params, "pymatting_normalize_known_background", True),
             semantic_decision=_route_params(params, "semantic_decision", None),
             user_keep_mask=_route_params(params, "user_keep_mask", None),
             user_remove_mask=_route_params(params, "user_remove_mask", None),

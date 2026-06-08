@@ -141,12 +141,24 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert result.ambiguity_regions[0].mask_ref == f"{result.analysis_id}:region_mask:ambiguous_enclosed_bg_0"
     assert result.ambiguity_regions[0].evidence["touches_exterior_background"] is False
     assert [candidate.id for candidate in result.candidates] == [
-        "auto_default",
+        "auto_recommended_holes",
         "protect_near_bg_subject",
         "cut_enclosed_holes",
     ]
-    assert result.candidates[1].decision == {"enclosed_near_bg_policy": "subject"}
-    assert result.candidates[2].decision == {"enclosed_near_bg_policy": "transparent_hole"}
+    assert result.default_candidate_id == "auto_recommended_holes"
+    assert result.candidates[0].decision["candidate_strategy"] == "auto_region_recommendation"
+    assert result.candidates[0].decision["enclosed_near_bg_region_policies"] == {
+        "ambiguous_enclosed_bg_0": "transparent_hole",
+    }
+    assert result.candidates[0].decision["enclosed_near_bg_policy"] == "transparent_hole"
+    assert result.candidates[1].decision == {
+        "enclosed_near_bg_policy": "subject",
+        "enclosed_near_bg_region_policies": {"ambiguous_enclosed_bg_0": "subject"},
+    }
+    assert result.candidates[2].decision == {
+        "enclosed_near_bg_policy": "transparent_hole",
+        "enclosed_near_bg_region_policies": {"ambiguous_enclosed_bg_0": "transparent_hole"},
+    }
     assert result.candidates[1].preview["assets"]["overlay"] == "candidate:protect_near_bg_subject:overlay"
     assert result.preview_assets["schema"] == "ermbg.analysis_preview_assets.v1"
     assert result.preview_assets["region_mask:ambiguous_enclosed_bg_0"]["data_url"].startswith("data:image/png;base64,")
@@ -161,6 +173,34 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert trimap_meta["states"]["sure_fg"]["pixels"] > 0
     assert "hint" not in result.candidates[1].preview["assets"]
     assert "candidate:protect_near_bg_subject:hint" not in result.preview_assets
+
+
+def test_analyze_tight_background_match_allows_smaller_hole_components() -> None:
+    image = np.full((512, 512, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (120, 120), (392, 392), (90, 130, 40), -1)
+    cv2.rectangle(image, (180, 180), (188, 188), (255, 255, 255), -1)
+    cv2.rectangle(image, (225, 170), (236, 179), (255, 255, 255), -1)
+    cv2.rectangle(image, (310, 300), (322, 308), (255, 255, 255), -1)
+
+    result = analyze_candidates(image)
+
+    old_fixed_min_area = int(round(float(image.shape[0] * image.shape[1]) * 0.0005))
+    small_regions = [
+        region
+        for region in result.ambiguity_regions
+        if region.type == "enclosed_near_background" and region.area_px < old_fixed_min_area
+    ]
+    assert len(small_regions) >= 3
+    assert result.status == "needs_decision"
+    assert result.candidates[-1].decision["enclosed_near_bg_policy"] == "transparent_hole"
+    assert set(result.candidates[-1].decision["enclosed_near_bg_region_policies"].values()) == {
+        "transparent_hole",
+    }
+    for region in small_regions:
+        evidence = region.evidence
+        assert evidence["area_gate_source"] == "background_distance_confidence"
+        assert evidence["bg_distance_p95"] <= 0.1
+        assert evidence["min_area_px_effective"] < old_fixed_min_area
 
 
 def test_analyze_hard_button_without_shadow_is_ready() -> None:
@@ -213,15 +253,13 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         "pymatting_known_b",
         "corridorkey",
     }
-    assert {
+    # Temporary strategy: CorridorKey defaults to a full-frame zero hint and
+    # exposes no feature-hint ambiguity regions or candidates.
+    assert [
         region.type
         for region in result.ambiguity_regions
         if region.id.startswith("route_corridorkey__")
-    } == {
-        "screen_material_or_translucency",
-        "glass_core_transparency",
-        "soft_alpha_gradient",
-    }
+    ] == []
     corridorkey_candidates = [
         candidate
         for candidate in result.candidates
@@ -229,26 +267,9 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
     ]
     assert [candidate.id for candidate in corridorkey_candidates] == [
         "route_corridorkey__auto_default",
-        "route_corridorkey__corridorkey_translucent",
-        "route_corridorkey__corridorkey_conservative",
-        "route_corridorkey__corridorkey_internal_opaque",
     ]
     assert corridorkey_candidates[0].default is True
-    assert corridorkey_candidates[0].decision == {
-        "policy": "corridorkey_hint_variant",
-        "corridorkey_hint_variant": "feature_balanced",
-        "review_region_types": [
-            "glass_core_transparency",
-            "soft_alpha_gradient",
-            "screen_material_or_translucency",
-        ],
-    }
-    assert corridorkey_candidates[1].decision["corridorkey_hint_variant"] == "feature_translucent"
-    assert corridorkey_candidates[2].decision["corridorkey_hint_variant"] == "feature_conservative"
-    assert corridorkey_candidates[3].decision["corridorkey_hint_variant"] == "feature_internal_opaque"
-    assert "trimap" not in corridorkey_candidates[1].preview["assets"]
-    assert result.preview_assets["candidate:route_corridorkey__auto_default:hint"]["execution_role"] == "corridorkey_hint_mask"
-    assert result.preview_assets["candidate:route_corridorkey__corridorkey_internal_opaque:hint"]["data_url"].startswith("data:image/png;base64,")
+    assert corridorkey_candidates[0].decision == {"policy": "auto_default"}
 
 
 def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates() -> None:
@@ -266,18 +287,14 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
     assert result.route["algorithm"] == "corridorkey"
     assert result.route["execution_profile"] == "corridorkey-character"
     assert result.default_candidate_id == "route_corridorkey__auto_default"
+    # Temporary strategy: CorridorKey emits no feature-hint regions or candidates;
+    # the default is a plain auto_default that resolves to a full-frame zero hint.
     corridorkey_regions = [
         region
         for region in result.ambiguity_regions
         if region.id.startswith("route_corridorkey__")
     ]
-    assert {region.type for region in corridorkey_regions} == {
-        "screen_material_or_translucency",
-        "glass_core_transparency",
-        "soft_alpha_gradient",
-    }
-    assert sum(region.area_px for region in corridorkey_regions if region.type == "glass_core_transparency") > 7000
-    assert sum(region.area_px for region in corridorkey_regions if region.type == "soft_alpha_gradient") > 4000
+    assert corridorkey_regions == []
     corridorkey_candidates = [
         candidate
         for candidate in result.candidates
@@ -285,24 +302,9 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
     ]
     assert [candidate.id for candidate in corridorkey_candidates] == [
         "route_corridorkey__auto_default",
-        "route_corridorkey__corridorkey_translucent",
-        "route_corridorkey__corridorkey_conservative",
-        "route_corridorkey__corridorkey_internal_opaque",
     ]
     assert corridorkey_candidates[0].default is True
-    assert corridorkey_candidates[0].decision == {
-        "policy": "corridorkey_hint_variant",
-        "corridorkey_hint_variant": "feature_balanced",
-        "review_region_types": [
-            "glass_core_transparency",
-            "soft_alpha_gradient",
-            "screen_material_or_translucency",
-        ],
-    }
-    assert corridorkey_candidates[3].decision["corridorkey_hint_variant"] == "feature_internal_opaque"
-    assert result.preview_assets[
-        "candidate:route_corridorkey__corridorkey_internal_opaque:hint"
-    ]["data_url"].startswith("data:image/png;base64,")
+    assert corridorkey_candidates[0].decision == {"policy": "auto_default"}
 
 
 def test_analyze_button_shadow_is_resolved_by_bg_seed_outline_without_candidates() -> None:
@@ -372,7 +374,8 @@ def test_analyze_b056_uses_hole_candidates_without_shadow_branching() -> None:
     assert cut_meta["source"] == "known_b_bg_seed_outline_candidate_trimap"
     assert cut_meta["region_policy_application"] == "bg_seed_outline_region_overlay_applied"
     assert cut_meta["semantic_forced_bg_pixels"] > 0
-    assert keep_meta["semantic_forced_fg_pixels"] == cut_meta["semantic_forced_bg_pixels"]
+    assert keep_meta["semantic_forced_fg_pixels"] > cut_meta["semantic_forced_bg_pixels"]
+    assert cut_meta["semantic_hole_unknown_pixels"] > 0
     assert cut_meta["states"]["sure_bg"]["pixels"] > keep_meta["states"]["sure_bg"]["pixels"]
     assert cut_meta["states"]["sure_fg"]["pixels"] < keep_meta["states"]["sure_fg"]["pixels"]
 
@@ -418,9 +421,19 @@ def test_analyze_hole_policy_only_changes_hole_region_trimap() -> None:
         result.preview_assets["candidate:use_keep_hole_0:trimap"]["data_url"]
     )
     hole_mask = _decode_preview_luma(result.preview_assets["region_mask:ambiguous_enclosed_bg_0"]["data_url"]) > 0
+    cut_meta = result.preview_assets["candidate:use_cut_hole_0:trimap"]["metadata"]
 
-    assert np.all(cut_hole[hole_mask] == 0)
+    assert np.count_nonzero(cut_hole[hole_mask] == 0) > 0
+    assert np.count_nonzero(cut_hole[hole_mask] == 128) > 0
     assert np.all(keep_hole[hole_mask] == 255)
+    hole_outer_edge = cv2.dilate(
+        hole_mask.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    ).astype(bool) & ~hole_mask
+    assert np.count_nonzero(cut_hole[hole_outer_edge] == 128) > 0
+    assert cut_meta["semantic_hole_unknown_pixels"] > 0
+    assert cut_meta["semantic_hole_unknown"]["components"][0]["release_px"] >= 1
     changed = cut_hole != keep_hole
     assert bool(changed.any())
     hole_boundary_domain = cv2.dilate(

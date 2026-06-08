@@ -1420,12 +1420,24 @@ def test_analyze_candidates_endpoint_returns_enclosed_near_bg_candidates(monkeyp
     assert payload["ambiguities"][0]["type"] == "enclosed_near_background"
     assert payload["ambiguities"][0]["mask_ref"] == f"{payload['analysis_id']}:region_mask:ambiguous_enclosed_bg_0"
     assert [candidate["id"] for candidate in payload["candidates"]] == [
-        "auto_default",
+        "auto_recommended_holes",
         "protect_near_bg_subject",
         "cut_enclosed_holes",
     ]
-    assert payload["candidates"][1]["decision"] == {"enclosed_near_bg_policy": "subject"}
-    assert payload["candidates"][2]["decision"] == {"enclosed_near_bg_policy": "transparent_hole"}
+    assert payload["default_candidate_id"] == "auto_recommended_holes"
+    assert payload["candidates"][0]["decision"]["candidate_strategy"] == "auto_region_recommendation"
+    assert payload["candidates"][0]["decision"]["enclosed_near_bg_region_policies"] == {
+        "ambiguous_enclosed_bg_0": "transparent_hole",
+    }
+    assert payload["candidates"][0]["decision"]["enclosed_near_bg_policy"] == "transparent_hole"
+    assert payload["candidates"][1]["decision"] == {
+        "enclosed_near_bg_policy": "subject",
+        "enclosed_near_bg_region_policies": {"ambiguous_enclosed_bg_0": "subject"},
+    }
+    assert payload["candidates"][2]["decision"] == {
+        "enclosed_near_bg_policy": "transparent_hole",
+        "enclosed_near_bg_region_policies": {"ambiguous_enclosed_bg_0": "transparent_hole"},
+    }
     assert payload["candidates"][1]["preview"]["assets"]["overlay"] == "candidate:protect_near_bg_subject:overlay"
     assert payload["preview_assets"]["schema"] == "ermbg.analysis_preview_assets.v1"
     assert payload["preview_assets"]["candidate:protect_near_bg_subject:overlay"]["data_url"].startswith("data:image/png;base64,")
@@ -2086,6 +2098,48 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
     preprocess_debug = payload["debug"]["input_preprocess"]["known_background_normalization"]
     assert preprocess_debug["selected"] is True
     assert preprocess_debug["background_color"] == [255, 255, 255]
+
+
+def test_matte_endpoint_manual_known_b_background_repair_preprocesses_before_direct_worker(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.dstack([rgb, np.full((h, w), 255, dtype=np.uint8)])
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgb,
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+            },
+        )
+
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "direct-pymatting-known-b",
+            "parameter_source": "manual",
+            "background_repair": "true",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": "0,200,0",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "direct-pymatting-known-b"
+    assert captured["pymatting_input_preprocessed_known_b"] is True
+    assert captured["pymatting_bg_source"] == "custom"
+    assert captured["pymatting_bg_color"] == (0, 200, 0)
+    assert "pymatting_normalize_known_background" not in captured
 
 
 def test_execute_candidate_endpoint_passes_user_masks_to_direct_worker(monkeypatch):

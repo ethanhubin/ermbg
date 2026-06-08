@@ -24,11 +24,38 @@ from ermbg.pymatting_refine import (
     estimate_stable_background_color,
     normalize_known_background_field,
 )
+from ermbg.preprocess import repair_known_background_preprocess
 from ermbg.solid_graphic import analyze_solid_bg_graphic
 
 pytestmark = pytest.mark.core
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _matte_known_b_after_background_repair(
+    image_or_path,
+    *,
+    bg_color: tuple[int, int, int],
+    **kwargs,
+):
+    image = np.asarray(Image.open(image_or_path).convert("RGB"), dtype=np.uint8) if isinstance(image_or_path, Path) else image_or_path
+    normalized, decision = repair_known_background_preprocess(
+        image,
+        bg_color,
+        bg_threshold=float(kwargs.get("pymatting_bg_threshold", 3.5)),
+        fg_threshold=float(kwargs.get("pymatting_fg_threshold", 24.0)),
+        adaptive=False,
+    )
+    normalization = dict(decision.metadata.get("known_background_normalization") or {})
+    return matte_image(
+        normalized,
+        backend="pymatting-known-b",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=bg_color,
+        pymatting_input_preprocessed_known_b=True,
+        pymatting_background_normalization=normalization,
+        **kwargs,
+    )
 
 
 def _aa_disc_case(size: int = 128) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -253,10 +280,17 @@ def test_known_background_trimap_consumes_enclosed_near_bg_semantic_policy():
     assert subject_trimap.sure_fg[clean_center].mean() > 0.95
     assert subject_trimap.sure_bg[clean_center].mean() == 0.0
     assert hole_trimap.sure_bg[clean_center].mean() > 0.95
+    edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    inner_edge = inner & ~cv2.erode(inner.astype(np.uint8), edge_kernel, iterations=1).astype(bool)
+    subject_side_edge = cv2.dilate(inner.astype(np.uint8), edge_kernel, iterations=1).astype(bool) & ~inner
+    assert np.count_nonzero(hole_trimap.unknown[inner_edge]) > 0
+    assert np.count_nonzero(hole_trimap.unknown[subject_side_edge]) > 0
     assert subject_info["semantic_decision"]["enclosed_near_bg_policy"] == "subject"
     assert hole_info["semantic_decision"]["enclosed_near_bg_policy"] == "transparent_hole"
     assert subject_info["semantic_decision"]["forced_subject_pixels"] >= int(clean_center.sum())
     assert hole_info["semantic_decision"]["forced_background_pixels"] >= int(clean_center.sum())
+    assert hole_info["semantic_decision"]["hole_unknown_release_pixels"] > 0
+    assert hole_info["semantic_decision"]["hole_unknown_release"]["components"][0]["release_px"] >= 1
 
 
 def test_known_background_subject_policy_forces_internal_unknown_to_fg():
@@ -870,12 +904,10 @@ def test_pymatting_known_b_adaptive_foreground_threshold_removes_dark_screen_edg
     ]
     for case_id in cases:
         path = PROJECT_ROOT / f"samples/corridorkey_semantic/button/{case_id}/green.png"
-        result = matte_image(
+        result = _matte_known_b_after_background_repair(
             path,
-            backend="pymatting-known-b",
+            bg_color=(0, 200, 0),
             shadow_mode="on",
-            pymatting_bg_source="custom",
-            pymatting_bg_color=(0, 200, 0),
             pymatting_fg_threshold=24.0,
         )
         rgba = result.rgba
@@ -1211,12 +1243,10 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solv
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
     path = PROJECT_ROOT / "samples/corridorkey_semantic/button/button_green_yellow_a_outlined_hard_heavy_shadow/green.png"
     image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
-    result = matte_image(
+    result = _matte_known_b_after_background_repair(
         path,
-        backend="pymatting-known-b",
+        bg_color=(0, 200, 0),
         shadow_mode="on",
-        pymatting_bg_source="custom",
-        pymatting_bg_color=(0, 200, 0),
         pymatting_fg_threshold=24.0,
     )
 

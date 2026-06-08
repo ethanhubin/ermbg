@@ -364,7 +364,6 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
             "pymatting_fg_threshold": "28",
             "pymatting_input_preprocessed_known_b": "true",
             "pymatting_background_normalization": json.dumps({"applied": True, "source": "preprocess"}),
-            "pymatting_normalize_known_background": "false",
         },
     )
 
@@ -375,7 +374,6 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
     assert captured["pymatting_fg_threshold"] == 28.0
     assert captured["pymatting_input_preprocessed_known_b"] is True
     assert captured["pymatting_background_normalization"] == {"applied": True, "source": "preprocess"}
-    assert captured["pymatting_normalize_known_background"] is False
 
 
 def test_direct_worker_server_accepts_explicit_candidate_trimap(monkeypatch):

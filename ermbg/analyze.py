@@ -20,7 +20,6 @@ from .pipeline_contracts import (
     PreprocessDecision,
     SemanticCandidate,
 )
-from .preprocess import BACKGROUND_REPAIR, repair_known_background_preprocess
 from .router import build_route_candidates, select_default_route_candidate
 from .types import Trimap
 
@@ -289,6 +288,64 @@ def _trimap_preview_from_masks(sure_bg: np.ndarray, unknown: np.ndarray, sure_fg
     return trimap
 
 
+def _semantic_hole_bg_core_and_unknown(
+    mask: np.ndarray,
+    *,
+    sure_fg: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Split transparent-hole masks into sure-BG core plus a local solve ring."""
+
+    mask_bool = np.asarray(mask, dtype=bool)
+    shape = mask_bool.shape
+    bg_core = np.zeros(shape, dtype=bool)
+    unknown_release = np.zeros(shape, dtype=bool)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_bool.astype(np.uint8), connectivity=8)
+    components: list[dict[str, Any]] = []
+    image_release_cap = max(1, min(4, int(round(float(min(shape)) * 0.004))))
+    for label_idx in range(1, n_labels):
+        comp = labels == label_idx
+        area = int(stats[label_idx, cv2.CC_STAT_AREA])
+        width = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+        height = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+        hole_release_cap = max(1, min(4, int(round(float(max(1, min(width, height))) * 0.20))))
+        release_px = max(1, min(image_release_cap, hole_release_cap))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (release_px * 2 + 1, release_px * 2 + 1))
+        eroded = cv2.erode(comp.astype(np.uint8), kernel, iterations=1).astype(bool)
+        if bool(eroded.any()):
+            comp_core = eroded
+            inner_unknown = comp & ~eroded
+        else:
+            comp_core = comp
+            inner_unknown = np.zeros(shape, dtype=bool)
+        outer_unknown = cv2.dilate(comp.astype(np.uint8), kernel, iterations=1).astype(bool) & ~comp & sure_fg
+        release = inner_unknown | outer_unknown
+        bg_core |= comp_core
+        unknown_release |= release
+        components.append(
+            {
+                "area": area,
+                "bbox_xyxy": [
+                    int(stats[label_idx, cv2.CC_STAT_LEFT]),
+                    int(stats[label_idx, cv2.CC_STAT_TOP]),
+                    int(stats[label_idx, cv2.CC_STAT_LEFT] + width),
+                    int(stats[label_idx, cv2.CC_STAT_TOP] + height),
+                ],
+                "release_px": int(release_px),
+                "bg_core_pixels": int(comp_core.sum()),
+                "inner_unknown_pixels": int(inner_unknown.sum()),
+                "outer_subject_unknown_pixels": int(outer_unknown.sum()),
+            }
+        )
+    return bg_core, unknown_release, {
+        "method": "adaptive_hole_edge_unknown_release",
+        "image_release_cap_px": int(image_release_cap),
+        "components": components[:24],
+        "omitted_components": max(0, len(components) - 24),
+        "bg_core_pixels": int(bg_core.sum()),
+        "unknown_release_pixels": int(unknown_release.sum()),
+    }
+
+
 def _known_b_trimap_preview(
     image_srgb: np.ndarray,
     route: dict[str, Any],
@@ -313,18 +370,10 @@ def _known_b_trimap_preview(
     decision = candidate.decision or {}
     region_masks = region_masks or {}
     try:
-        from .pymatting_refine import build_known_background_trimap, normalize_known_background_field
-
-        trimap_input, normalization_info = normalize_known_background_field(
-            image_srgb,
-            np.asarray(background, dtype=np.uint8),
-            bg_threshold=float(kwargs["bg_threshold"]),
-            fg_threshold=float(kwargs["fg_threshold"]),
-            adaptive=bool(kwargs["adapt_bg_threshold"]),
-        )
+        from .pymatting_refine import build_known_background_trimap
 
         trimap, assembly_info = build_known_background_trimap(
-            trimap_input,
+            image_srgb,
             background,
             bg_threshold=float(kwargs["bg_threshold"]),
             fg_threshold=float(kwargs["fg_threshold"]),
@@ -341,6 +390,8 @@ def _known_b_trimap_preview(
     hole_policies = decision.get("enclosed_near_bg_region_policies")
     semantic_forced_bg = np.zeros(trimap.sure_bg.shape, dtype=bool)
     semantic_forced_fg = np.zeros(trimap.sure_fg.shape, dtype=bool)
+    semantic_hole_unknown = np.zeros(trimap.unknown.shape, dtype=bool)
+    semantic_hole_unknown_info: dict[str, Any] = {"method": "not_applied", "unknown_release_pixels": 0}
     if isinstance(hole_policies, dict):
         for region_id, policy_value in hole_policies.items():
             mask = region_masks.get(str(region_id))
@@ -357,7 +408,13 @@ def _known_b_trimap_preview(
         elif summary_policy == "subject" and candidate_mask is not None:
             semantic_forced_fg |= np.asarray(candidate_mask, dtype=bool)
 
-    if bool(semantic_forced_bg.any() or semantic_forced_fg.any()):
+    if bool(semantic_forced_bg.any()):
+        semantic_forced_bg, semantic_hole_unknown, semantic_hole_unknown_info = _semantic_hole_bg_core_and_unknown(
+            semantic_forced_bg,
+            sure_fg=trimap.sure_fg,
+        )
+
+    if bool(semantic_forced_bg.any() or semantic_forced_fg.any() or semantic_hole_unknown.any()):
         sure_fg = trimap.sure_fg.copy()
         sure_bg = trimap.sure_bg.copy()
         unknown = trimap.unknown.copy()
@@ -369,6 +426,10 @@ def _known_b_trimap_preview(
             sure_bg[semantic_forced_bg] = True
             sure_fg[semantic_forced_bg] = False
             unknown[semantic_forced_bg] = False
+        if bool(semantic_hole_unknown.any()):
+            unknown[semantic_hole_unknown] = True
+            sure_bg[semantic_hole_unknown] = False
+            sure_fg[semantic_hole_unknown] = False
         trimap = Trimap(sure_fg=sure_fg, sure_bg=sure_bg, unknown=unknown)
 
     preview = _trimap_preview_from_masks(trimap.sure_bg, trimap.unknown, trimap.sure_fg)
@@ -389,7 +450,12 @@ def _known_b_trimap_preview(
         else None,
         "semantic_forced_bg_pixels": int(semantic_forced_bg.sum()),
         "semantic_forced_fg_pixels": int(semantic_forced_fg.sum()),
-        "background_normalization": normalization_info,
+        "semantic_hole_unknown_pixels": int(semantic_hole_unknown.sum()),
+        "semantic_hole_unknown": semantic_hole_unknown_info,
+        "background_normalization": {
+            "source": "preprocess_contract",
+            "analyze_private_normalization": False,
+        },
         "candidate_assembly": assembly_info,
     }
     return preview, metadata
@@ -534,6 +600,7 @@ def _enclosed_near_background_regions(
     subject_distance_min: float = 18.0,
     anchor_dilate_px: int = 2,
     min_area_ratio: float = 0.0005,
+    tight_min_area_ratio: float = 0.00002,
     max_area_ratio: float = 0.25,
     evidence_mode: str = "tight_enclosed_background_match",
 ) -> tuple[list[AmbiguityRegion], dict[str, np.ndarray]]:
@@ -560,16 +627,31 @@ def _enclosed_near_background_regions(
     near_subject = cv2.dilate(subject_support.astype(np.uint8), kernel, iterations=1).astype(bool)
     support = enclosed & near_subject
 
-    min_area = max(1, int(round(float(h * w) * float(min_area_ratio))))
-    max_area = max(min_area, int(round(float(h * w) * float(max_area_ratio))))
+    image_area = float(h * w)
+    loose_min_area_ratio = float(min_area_ratio)
+    tight_area_ratio = min(float(tight_min_area_ratio), loose_min_area_ratio)
+    max_area = max(1, int(round(image_area * float(max_area_ratio))))
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(enclosed.astype(np.uint8), connectivity=8)
     regions: list[AmbiguityRegion] = []
     masks: dict[str, np.ndarray] = {}
     for label_idx in range(1, n_labels):
         area = int(stats[label_idx, cv2.CC_STAT_AREA])
-        if area < min_area or area > max_area:
+        if area > max_area:
             continue
         comp = labels == label_idx
+        comp_distance = distance[comp].astype(np.float32)
+        distance_p50 = float(np.percentile(comp_distance, 50.0)) if comp_distance.size else 0.0
+        distance_p95 = float(np.percentile(comp_distance, 95.0)) if comp_distance.size else 0.0
+        # Use the component core rather than the edge tail for area confidence:
+        # antialiasing around real holes can make p95 look loose even when the
+        # enclosed island has a clean known-B center.
+        distance_fraction = float(np.clip(distance_p50 / max(float(bg_distance_max), 1e-6), 0.0, 1.0))
+        effective_min_area_ratio = tight_area_ratio + (loose_min_area_ratio - tight_area_ratio) * (
+            distance_fraction * distance_fraction
+        )
+        effective_min_area = max(1, int(round(image_area * effective_min_area_ratio)))
+        if area < effective_min_area:
+            continue
         support_pixels = int((comp & support).sum())
         support_fraction = float(support_pixels) / max(float(area), 1.0)
         # The semantic unit is the whole enclosed same-B component. Nearby
@@ -598,8 +680,16 @@ def _enclosed_near_background_regions(
                     "subject_support_fraction": float(support_fraction),
                     "semantic_mask_scope": "full_enclosed_component",
                     "bg_distance_max": float(bg_distance_max),
+                    "bg_distance_p50": distance_p50,
+                    "bg_distance_p95": distance_p95,
                     "subject_distance_min": float(subject_distance_min),
                     "anchor_dilate_px": int(anchor_dilate_px),
+                    "min_area_ratio_loose": float(loose_min_area_ratio),
+                    "min_area_ratio_tight": float(tight_area_ratio),
+                    "min_area_ratio_effective": float(effective_min_area_ratio),
+                    "min_area_px_effective": int(effective_min_area),
+                    "area_gate_source": "background_distance_confidence",
+                    "area_gate_color_stat": "bg_distance_p50",
                     "evidence_mode": evidence_mode,
                 },
                 ambiguity={
@@ -1174,6 +1264,39 @@ def _default_candidate_id(candidates: list[SemanticCandidate]) -> str:
     return candidates[0].id if candidates else "auto_default"
 
 
+def _enclosed_near_bg_region_scores(region: AmbiguityRegion) -> tuple[float, float, list[str]]:
+    evidence = region.evidence
+    evidence_mode = str(evidence.get("evidence_mode") or "")
+    bg_distance_max = max(float(evidence.get("bg_distance_max") or 1.0), 1e-6)
+    bg_distance_p50 = float(evidence.get("bg_distance_p50") or 0.0)
+    distance_confidence = 1.0 - float(np.clip(bg_distance_p50 / bg_distance_max, 0.0, 1.0))
+    support_fraction = float(evidence.get("subject_support_fraction") or 0.0)
+    support_confidence = float(np.clip(support_fraction / 0.25, 0.0, 1.0))
+
+    reasons = [
+        "enclosed region does not touch exterior background",
+        "candidate policy is scored per region before execution",
+    ]
+    if evidence_mode == "tight_enclosed_background_match":
+        transparent_score = 0.58 + 0.26 * distance_confidence + 0.08 * support_confidence
+        subject_score = 0.50 - 0.10 * distance_confidence + 0.05 * (1.0 - support_confidence)
+        reasons.append("tight known-background color match raises transparent-hole confidence")
+    elif evidence_mode == "translucent_known_b_material_band":
+        transparent_score = 0.30 + 0.08 * distance_confidence
+        subject_score = 0.66 + 0.10 * support_confidence
+        reasons.append("wide near-background band is more likely retained translucent material")
+    else:
+        transparent_score = 0.48 + 0.12 * distance_confidence
+        subject_score = 0.52 + 0.06 * support_confidence
+        reasons.append("single-image evidence keeps this region semantically ambiguous")
+
+    return (
+        float(np.clip(transparent_score, 0.05, 0.95)),
+        float(np.clip(subject_score, 0.05, 0.95)),
+        reasons,
+    )
+
+
 def _enclosed_near_bg_candidates(regions: list[AmbiguityRegion]) -> list[SemanticCandidate]:
     region_ids = [region.id for region in regions]
     total_area = sum(region.area_px for region in regions)
@@ -1182,29 +1305,79 @@ def _enclosed_near_bg_candidates(regions: list[AmbiguityRegion]) -> list[Semanti
         "area_px": int(total_area),
         "bbox_xyxy": regions[0].bbox_xyxy if regions else [0, 0, 0, 0],
     }
+    transparent_scores: dict[str, float] = {}
+    subject_scores: dict[str, float] = {}
+    auto_policies: dict[str, str] = {}
+    auto_units: list[dict[str, Any]] = []
+    auto_reasons: list[str] = [
+        "Auto is a recommendation strategy; Execute receives concrete per-region hole policies",
+    ]
+    for region in regions:
+        transparent_score, subject_score, region_reasons = _enclosed_near_bg_region_scores(region)
+        transparent_scores[region.id] = transparent_score
+        subject_scores[region.id] = subject_score
+        policy = "transparent_hole" if transparent_score >= subject_score else "subject"
+        score = transparent_score if policy == "transparent_hole" else subject_score
+        auto_policies[region.id] = policy
+        auto_units.append(
+            {
+                "option_id": f"auto_{region.id}_{policy}",
+                "label": "Transparent hole" if policy == "transparent_hole" else "Subject material",
+                "score": float(score),
+                "regions": [region.id],
+                "evidence_mode": str(region.evidence.get("evidence_mode") or ""),
+            }
+        )
+        for reason in region_reasons:
+            if reason not in auto_reasons:
+                auto_reasons.append(reason)
+
+    auto_score = float(
+        sum(
+            transparent_scores[region_id] if policy == "transparent_hole" else subject_scores[region_id]
+            for region_id, policy in auto_policies.items()
+        )
+        / max(float(len(auto_policies)), 1.0)
+    )
+    auto_decision: dict[str, Any] = {
+        "candidate_strategy": "auto_region_recommendation",
+        "enclosed_near_bg_region_policies": auto_policies,
+        "candidate_score": auto_score,
+        "candidate_rank": 0,
+        "candidate_units": auto_units,
+    }
+    unique_auto_policies = set(auto_policies.values())
+    if len(unique_auto_policies) == 1:
+        auto_decision["enclosed_near_bg_policy"] = next(iter(unique_auto_policies))
+
+    cut_score = float(sum(transparent_scores.values()) / max(float(len(transparent_scores)), 1.0))
+    keep_score = float(sum(subject_scores.values()) / max(float(len(subject_scores)), 1.0))
     return [
         SemanticCandidate(
-            id="auto_default",
-            label="Auto default",
-            intent="Use the current route/profile default interpretation.",
+            id="auto_recommended_holes",
+            label="Auto recommended",
+            intent="Apply the highest-confidence concrete hole/material ownership policy per region.",
             default=True,
-            confidence=0.5,
+            confidence=auto_score,
             risk_level="medium",
-            decision={"policy": "auto_default"},
+            decision=auto_decision,
             regions=region_ids,
-            preview=preview,
-            reasons=["current pipeline executes immediately without semantic confirmation"],
+            preview={**preview, "score": auto_score, "rank": 0, "strategy": "auto_region_recommendation"},
+            reasons=auto_reasons,
         ),
         SemanticCandidate(
             id="protect_near_bg_subject",
             label="Keep internal light material",
             intent="Treat enclosed near-background pixels as subject-owned material.",
             default=False,
-            confidence=0.5,
+            confidence=keep_score,
             risk_level="medium",
-            decision={"enclosed_near_bg_policy": "subject"},
+            decision={
+                "enclosed_near_bg_policy": "subject",
+                "enclosed_near_bg_region_policies": {region_id: "subject" for region_id in region_ids},
+            },
             regions=region_ids,
-            preview=preview,
+            preview={**preview, "score": keep_score},
             reasons=[
                 "near-background region does not touch exterior background",
                 "region is adjacent to strong subject-color support",
@@ -1216,11 +1389,14 @@ def _enclosed_near_bg_candidates(regions: list[AmbiguityRegion]) -> list[Semanti
             label="Transparent internal holes",
             intent="Treat enclosed near-background pixels as transparent holes.",
             default=False,
-            confidence=0.5,
+            confidence=cut_score,
             risk_level="medium",
-            decision={"enclosed_near_bg_policy": "transparent_hole"},
+            decision={
+                "enclosed_near_bg_policy": "transparent_hole",
+                "enclosed_near_bg_region_policies": {region_id: "transparent_hole" for region_id in region_ids},
+            },
             regions=region_ids,
-            preview=preview,
+            preview={**preview, "score": cut_score},
             reasons=[
                 "pixels match the known background color",
                 "enclosed same-background components can be true holes in UI or icons",
@@ -1668,18 +1844,6 @@ def _semantic_plan_for_route(
     semantic_input = image_srgb
     effective_preprocess = preprocess
     if route.get("algorithm") == "pymatting_known_b" and background is not None:
-        selected_preprocess = set(preprocess.selected) if preprocess is not None else set()
-        if BACKGROUND_REPAIR in selected_preprocess:
-            thresholds = _known_b_thresholds_from_route(route)
-            normalized, known_b_preprocess = repair_known_background_preprocess(
-                image_srgb,
-                background,
-                bg_threshold=float(thresholds["bg_threshold"]),
-                fg_threshold=float(thresholds["fg_threshold"]),
-                adaptive=False,
-            )
-            effective_preprocess = _merge_preprocess_decisions(preprocess, known_b_preprocess)
-            semantic_input = normalized
         hole_regions, hole_masks = _enclosed_near_background_regions(
             semantic_input,
             background,
@@ -1706,10 +1870,14 @@ def _semantic_plan_for_route(
             regions = hole_regions + body_regions
             region_masks = {**hole_masks, **body_masks}
     elif route.get("algorithm") == "corridorkey":
-        screen_regions, screen_masks = _screen_material_regions(semantic_input, route)
-        alpha_regions, alpha_masks = _corridorkey_alpha_structure_regions(semantic_input, route)
-        regions = screen_regions + alpha_regions
-        region_masks = {**screen_masks, **alpha_masks}
+        # Temporary strategy: CorridorKey defaults to a literal full-frame zero
+        # (all-black) hint and exposes no feature-hint candidates. The screen /
+        # alpha-structure detectors and feature-hint variants are kept in tree
+        # but are no longer wired into the default analyze path, so Analyze emits
+        # only the plain auto_default candidate and the executor falls through to
+        # ``full_frame_zero_corridorkey_hint``.
+        regions = []
+        region_masks = {}
 
     if regions:
         region_types = {region.type for region in regions}

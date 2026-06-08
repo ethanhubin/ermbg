@@ -334,19 +334,8 @@ def matte_image(
     vlm_prior_mode: str = "shadow",
     comfy_url: str = DEFAULT_COMFY_URL,
     solid_graphic_prepass: bool = True,
-    corridorkey_gamma_space: str = "sRGB",
-    corridorkey_despill_strength: float = 1.0,
-    corridorkey_refiner_strength: float = 1.0,
-    corridorkey_auto_despeckle: str = "On",
-    corridorkey_despeckle_size: int = 400,
-    corridorkey_auto_mask: bool = False,
-    corridorkey_color_protection: bool | None = None,
-    corridorkey_protection_bg_max: float = 12.0,
-    corridorkey_protection_fg_min: float = 28.0,
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
-    corridorkey_hint_mask: MaskLike | None = None,
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     solid_graphic_alpha_refiner: str = "heuristic",
     pymatting_method: str = "cf",
     pymatting_image_space: str = "linear",
@@ -364,7 +353,6 @@ def matte_image(
     pymatting_unknown_grow_px: int = 0,
     pymatting_input_preprocessed_known_b: bool = False,
     pymatting_background_normalization: dict[str, Any] | None = None,
-    pymatting_normalize_known_background: bool = True,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: MaskLike | None = None,
     user_remove_mask: MaskLike | None = None,
@@ -399,36 +387,16 @@ def matte_image(
             routing now performs the maintained path selection.
         solid_graphic_alpha_refiner: deprecated compatibility argument.
         corridorkey_screen_mode: ``auto``, ``green``, or ``blue`` for the
-            CorridorKey path. ``auto`` estimates the key screen from border
-            evidence before submitting the remote workflow.
+            CorridorKey route estimation. ``auto`` estimates the key screen from
+            border evidence during auto routing.
         corridorkey_preset: ``auto``, ``detail_safe``, ``spill_safe``, or
-            ``manual``. Non-manual presets may override the individual
-            CorridorKey knobs with analysis-driven recommendations.
-        corridorkey_color_protection: ``None`` follows the selected preset's
-            recommendation. Explicit ``True`` or ``False`` is a caller override,
-            including when ``corridorkey_preset="auto"``.
-        corridorkey_hint_mask: optional H×W coarse foreground hint for
-            CorridorKey. It is a hint only; CorridorKey still computes the
-            detail alpha.
-        corridorkey_hard_ui_hint_mode: ``bbox_2px`` keeps the current hard-UI
-            path. ``boundary_2px`` is an experimental A/B path that sends only
-            the edge band to CorridorKey and restores solid interiors locally.
-            ``boundary_2px_shadow_safe`` uses the same boundary hint but leaves
-            measured screen-darkening out of local interior restore.
-            ``boundary_2px_shadow_safe_edge_floor`` also applies a soft
-            known-background material floor for unoutlined hard-UI edges.
-            ``translucent_button`` sends a full-frame input hint and disables
-            color protection for glass/translucent UI, leaving the model to
-            solve both material translucency and shadow.
-            ``full_frame_zero`` sends a literal all-black/zero CorridorKey hint
-            as a diagnostic while keeping the same CorridorKey and
-            post-processing path.
+            ``manual``. Forwarded to auto routing for CorridorKey route/profile
+            selection.
         pymatting_*: known-background PyMatting controls.
             The most important knobs are background source, trimap thresholds,
             and unknown-band width; solver knobs are exposed for A/B only.
     """
     rgb, alpha, src_path = _to_rgb_and_alpha(image)
-    corridorkey_hint_alpha = _to_mask(corridorkey_hint_mask, rgb.shape[:2], "corridorkey_hint_mask")
     user_keep_alpha = _to_mask(user_keep_mask, rgb.shape[:2], "user_keep_mask")
     user_remove_alpha = _to_mask(user_remove_mask, rgb.shape[:2], "user_remove_mask")
     if subject_mask is not None:
@@ -467,32 +435,6 @@ def matte_image(
         rgb_lin = ermbg_io.srgb_to_linear(rgb)
         bg_lin = ermbg_io.srgb_to_linear(bg_arr)
         rgb = ermbg_io.linear_to_srgb_u8(a4 * rgb_lin + (1.0 - a4) * bg_lin)
-
-    if backend == "corridorkey":
-        return _matte_image_comfy_corridorkey(
-            rgb,
-            src_path=src_path,
-            output_dir=output_dir,
-            qa=qa,
-            bg_color=bg_color,
-            shadow_mode=shadow_mode,
-            comfy_url=comfy_url,
-            gamma_space=auto_params.get("corridorkey_gamma_space", corridorkey_gamma_space),
-            despill_strength=auto_params.get("corridorkey_despill_strength", corridorkey_despill_strength),
-            refiner_strength=auto_params.get("corridorkey_refiner_strength", corridorkey_refiner_strength),
-            auto_despeckle=auto_params.get("corridorkey_auto_despeckle", corridorkey_auto_despeckle),
-            despeckle_size=auto_params.get("corridorkey_despeckle_size", corridorkey_despeckle_size),
-            auto_mask=auto_params.get("corridorkey_auto_mask", corridorkey_auto_mask),
-            apply_color_protection=auto_params.get("corridorkey_color_protection", corridorkey_color_protection),
-            color_protection_bg_max=auto_params.get("corridorkey_protection_bg_max", corridorkey_protection_bg_max),
-            color_protection_fg_min=auto_params.get("corridorkey_protection_fg_min", corridorkey_protection_fg_min),
-            screen_mode=auto_params.get("corridorkey_screen_mode", corridorkey_screen_mode),
-            preset=auto_params.get("corridorkey_preset", corridorkey_preset),
-            hint_alpha=corridorkey_hint_alpha,
-            hard_ui_hint_mode=auto_params.get("corridorkey_hard_ui_hint_mode", corridorkey_hard_ui_hint_mode),
-            execution_profile=auto_params.get("corridorkey_execution_profile", "auto"),
-            auto_route=auto_route,
-        )
 
     if backend == "comfy-rmbg":
         return _matte_image_comfy_rmbg(
@@ -535,10 +477,6 @@ def matte_image(
             input_background_normalization=auto_params.get(
                 "pymatting_background_normalization",
                 pymatting_background_normalization,
-            ),
-            normalize_known_background=auto_params.get(
-                "pymatting_normalize_known_background",
-                pymatting_normalize_known_background,
             ),
             semantic_decision=semantic_decision,
             user_keep_mask=user_keep_alpha,
@@ -588,10 +526,6 @@ def matte_image(
             input_background_normalization=auto_params.get(
                 "pymatting_background_normalization",
                 pymatting_background_normalization,
-            ),
-            normalize_known_background=auto_params.get(
-                "pymatting_normalize_known_background",
-                pymatting_normalize_known_background,
             ),
             semantic_decision=semantic_decision,
             user_keep_mask=user_keep_alpha,
@@ -854,7 +788,6 @@ def _matte_image_pymatting_known_b(
     unknown_grow_px: int = 0,
     input_preprocessed_known_b: bool = False,
     input_background_normalization: dict[str, Any] | None = None,
-    normalize_known_background: bool = True,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: np.ndarray | None = None,
     user_remove_mask: np.ndarray | None = None,
@@ -867,7 +800,6 @@ def _matte_image_pymatting_known_b(
         build_same_key_opaque_proxy_subject_mask,
         estimate_alpha_with_pymatting,
         estimate_stable_background_color,
-        normalize_known_background_field,
     )
     from .trimap import trimap_to_uint8
 
@@ -961,22 +893,15 @@ def _matte_image_pymatting_known_b(
         background_normalization["executor_skipped"] = True
         background_normalization["skip_reason"] = "already_normalized_by_preprocess"
         background_normalization["background_color"] = [int(c) for c in selected_bg]
-    elif not bool(normalize_known_background):
+    else:
         processing_rgb = solver_rgb
         background_normalization = {
             "enabled": False,
             "applied": False,
-            "source": "background_repair_disabled",
+            "source": "executor_no_private_background_repair",
+            "reason": "Known-B background normalization is only applied by background_repair preprocess",
             "background_color": [int(c) for c in selected_bg],
         }
-    else:
-        processing_rgb, background_normalization = normalize_known_background_field(
-            solver_rgb,
-            selected_bg,
-            bg_threshold=float(bg_threshold),
-            fg_threshold=float(fg_threshold),
-            adaptive=effective_adapt_bg_threshold,
-        )
 
     if explicit_trimap is not None:
         trimap, trimap_info = _known_b_explicit_trimap(
@@ -3006,382 +2931,6 @@ def _matte_image_known_bg_hard_ui_shadow(
         alpha=alpha,
         foreground_srgb=rgba_rgb_srgb,
         strategy_name="known_bg_hard_ui_shadow",
-        background_color=selected_bg_color,
-        report=report,
-        output_dir=out_dir,
-        debug=debug,
-    )
-
-
-def _matte_image_comfy_corridorkey(
-    rgb: np.ndarray,
-    *,
-    src_path: str | None,
-    output_dir: str | Path | None,
-    qa: bool,
-    bg_color: tuple[int, int, int],
-    shadow_mode: str,
-    comfy_url: str,
-    gamma_space: str = "sRGB",
-    despill_strength: float = 1.0,
-    refiner_strength: float = 1.0,
-    auto_despeckle: str = "On",
-    despeckle_size: int = 400,
-    auto_mask: bool = False,
-    apply_color_protection: bool | None = None,
-    color_protection_bg_max: float = 12.0,
-    color_protection_fg_min: float = 28.0,
-    screen_mode: str = "auto",
-    preset: str = "auto",
-    hint_alpha: np.ndarray | None = None,
-    hard_ui_hint_mode: str = "bbox_2px",
-    execution_profile: str = "auto",
-    auto_route: dict[str, Any] | None = None,
-    corridorkey_client: Any | None = None,
-) -> MatteResponse:
-    from .corridorkey import corridorkey_analyze_asset
-    from .probe.comfyui_corridorkey import (
-        ComfyUICorridorKeyClient,
-        build_hard_ui_boundary_corridorkey_hint,
-        build_hard_ui_corridorkey_hint,
-        build_hard_ui_shadow_safe_material_alpha_floor,
-        build_hard_ui_shadow_safe_solid_interior_mask,
-        build_hard_ui_solid_interior_mask,
-    )
-
-    hard_ui_hint_modes = {
-        "full_frame_zero",
-        "bbox_2px",
-        "boundary_2px",
-        "boundary_2px_shadow_safe",
-        "boundary_2px_shadow_safe_edge_floor",
-        "translucent_button",
-    }
-    if hard_ui_hint_mode not in hard_ui_hint_modes:
-        raise ValueError(
-            "corridorkey_hard_ui_hint_mode must be full_frame_zero, bbox_2px, boundary_2px, "
-            "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
-        )
-
-    analysis = corridorkey_analyze_asset(
-        rgb,
-        screen_mode=screen_mode,  # type: ignore[arg-type]
-        preset=preset,  # type: ignore[arg-type]
-        fallback_background_color=bg_color,
-    )
-    selected_bg_color = analysis.background_color
-    explicit_color_protection = apply_color_protection
-    forced_translucent_hint_settings = False
-    if preset != "manual":
-        settings = analysis.recommended_settings
-        gamma_space = settings.gamma_space
-        despill_strength = settings.despill_strength
-        refiner_strength = settings.refiner_strength
-        auto_despeckle = settings.auto_despeckle
-        despeckle_size = settings.despeckle_size
-        # ``corridorkey_color_protection`` is the one CorridorKey knob callers
-        # often need to A/B against the auto preset. Treat None as "use the
-        # preset recommendation"; a real bool is an explicit override so batch
-        # evals can truly disable protection while preserving the rest of auto.
-        apply_color_protection = (
-            settings.color_protection if explicit_color_protection is None else bool(explicit_color_protection)
-        )
-        color_protection_bg_max = settings.protection_bg_max
-        color_protection_fg_min = settings.protection_fg_min
-    elif apply_color_protection is None:
-        apply_color_protection = True
-    if execution_profile == "auto":
-        if hard_ui_hint_mode == "translucent_button":
-            execution_profile = "corridorkey-transparent-button"
-        elif analysis.parameter_profile == "composite_character_corridor_only":
-            execution_profile = "corridorkey-character"
-        elif analysis.parameter_profile == "translucent_button":
-            execution_profile = "corridorkey-transparent-button"
-        elif analysis.parameter_profile == "screen_tinted_translucency":
-            execution_profile = "corridorkey-effect-icon"
-        else:
-            execution_profile = "corridorkey-shaped-icon"
-
-    if preset != "manual" and execution_profile in {
-        "corridorkey-transparent-button",
-        "corridorkey-effect-icon",
-    }:
-        # The router has already decided this asset needs CorridorKey's
-        # translucent/complex-boundary profile. Keep the full recipe here so
-        # button/effect routes cannot inherit key-color material protection.
-        forced_translucent_hint_settings = analysis.parameter_profile not in {
-            "translucent_button",
-            "screen_tinted_translucency",
-        }
-        gamma_space = "sRGB"
-        despill_strength = 1.0
-        refiner_strength = 1.15
-        auto_despeckle = "Off"
-        despeckle_size = 64
-        apply_color_protection = False
-        color_protection_bg_max = 6.0
-        color_protection_fg_min = 14.0
-    if preset != "manual" and execution_profile == "corridorkey-character":
-        # Character is a first-class route profile: full-frame CorridorKey
-        # control, no color-protection ownership, and detail-safe cleanup.
-        gamma_space = "sRGB"
-        despill_strength = 1.0
-        refiner_strength = 1.0
-        auto_despeckle = "Off"
-        despeckle_size = 64
-        apply_color_protection = False
-        color_protection_bg_max = 6.0
-        color_protection_fg_min = 14.0
-
-    client = corridorkey_client if corridorkey_client is not None else ComfyUICorridorKeyClient(url=comfy_url)
-    hint_source = None
-    solid_interior_mask: np.ndarray | None = None
-    material_alpha_floor: np.ndarray | None = None
-    solid_interior_info: dict[str, Any] = {}
-    if hint_alpha is not None:
-        hint_source = "provided_corridorkey_hint_mask"
-    elif not auto_mask or hard_ui_hint_mode == "full_frame_zero":
-        hint_alpha = np.zeros(rgb.shape[:2], dtype=np.float32)
-        hint_source = "full_frame_zero_corridorkey_hint"
-    elif execution_profile == "corridorkey-transparent-button":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
-            execution_profile=execution_profile,
-            screen_mode=screen_mode,
-        )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"glass_full_frame_{prior_kind}_corridorkey_hint"
-    elif execution_profile == "corridorkey-character":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
-            execution_profile=execution_profile,
-            screen_mode=screen_mode,
-        )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"character_full_frame_{prior_kind}_corridorkey_hint"
-    elif execution_profile == "corridorkey-effect-icon":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
-            execution_profile=execution_profile,
-            screen_mode=screen_mode,
-        )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"effect_full_frame_{prior_kind}_corridorkey_hint"
-    elif analysis.parameter_profile.startswith("opaque_hard_ui"):
-        if hard_ui_hint_mode == "boundary_2px":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            solid_interior_mask = build_hard_ui_solid_interior_mask(rgb, selected_bg_color)
-            hint_source = "known_bg_hard_ui_boundary_2px_hint"
-        elif hard_ui_hint_mode == "boundary_2px_shadow_safe":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            solid_interior_mask, solid_interior_info = build_hard_ui_shadow_safe_solid_interior_mask(
-                rgb,
-                selected_bg_color,
-            )
-            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_hint"
-        elif hard_ui_hint_mode == "boundary_2px_shadow_safe_edge_floor":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            material_alpha_floor, solid_interior_info = build_hard_ui_shadow_safe_material_alpha_floor(
-                rgb,
-                selected_bg_color,
-            )
-            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_edge_floor_hint"
-        else:
-            hint_alpha = build_hard_ui_corridorkey_hint(rgb, selected_bg_color)
-            hint_source = "known_bg_hard_ui_bbox_2px_hint"
-    remote = client.matte(
-        rgb,
-        background_color=selected_bg_color,
-        hint_alpha=hint_alpha,
-        hint_source=hint_source,
-        gamma_space=gamma_space,
-        screen_color=analysis.screen_mode if analysis.screen_mode in {"green", "blue"} else "auto",
-        despill_strength=despill_strength,
-        refiner_strength=refiner_strength,
-        auto_despeckle=auto_despeckle,
-        despeckle_size=despeckle_size,
-        apply_color_protection=apply_color_protection,
-        color_protection_bg_max=color_protection_bg_max,
-        color_protection_fg_min=color_protection_fg_min,
-        protect_hint_supported_material=analysis.parameter_profile == "key_color_material",
-        execution_profile=execution_profile,
-    )
-    subject_alpha = remote.alpha
-    subject_foreground_srgb = remote.foreground_srgb
-    subject_rgba = remote.rgba
-    solid_interior_pixels = 0
-    material_floor_lift_pixels = 0
-    if solid_interior_mask is not None and solid_interior_mask.any():
-        interior = solid_interior_mask.astype(bool)
-        solid_interior_pixels = int(interior.sum())
-        subject_alpha = remote.alpha.copy()
-        subject_foreground_srgb = remote.foreground_srgb.copy()
-        subject_alpha[interior] = 1.0
-        subject_foreground_srgb[interior] = rgb[interior]
-    if material_alpha_floor is not None and (material_alpha_floor > 0.0).any():
-        floor = np.clip(material_alpha_floor.astype(np.float32), 0.0, 1.0)
-        lift = floor > (subject_alpha + 1e-4)
-        material_floor_lift_pixels = int(lift.sum())
-        solid_interior_pixels = int(solid_interior_info.get("solid_interior_pixels", int((floor >= 0.999).sum())))
-        if lift.any():
-            subject_alpha = np.maximum(subject_alpha, floor).astype(np.float32)
-            subject_foreground_srgb = subject_foreground_srgb.copy()
-            # Unoutlined hard-UI edges need a local material floor, but using
-            # source RGB directly would keep key-color contribution in the AA
-            # pixels. Recover straight foreground against the known screen
-            # color only where the floor actually lifts CorridorKey alpha.
-            C_lin = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
-            B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg_color, dtype=np.uint8).reshape(1, 1, 3))[
-                0,
-                0,
-            ].astype(np.float32)
-            recovered = C_lin.copy()
-            a = np.maximum(floor[lift, None], 1e-3)
-            recovered[lift] = (C_lin[lift] - (1.0 - floor[lift, None]) * B_lin.reshape(1, 3)) / a
-            recovered = np.clip(recovered, 0.0, 1.0).astype(np.float32)
-            recovered_srgb = ermbg_io.linear_to_srgb_u8(recovered)
-            subject_foreground_srgb[lift] = recovered_srgb[lift]
-    if (
-        (solid_interior_mask is not None and solid_interior_mask.any())
-        or (material_alpha_floor is not None and (material_alpha_floor > 0.0).any())
-    ):
-        subject_rgba = np.dstack(
-            [
-                subject_foreground_srgb,
-                (np.clip(subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-            ]
-        )
-    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _corridorkey_shadow_patch(
-        rgb,
-        subject_alpha=subject_alpha,
-        subject_foreground_srgb=subject_foreground_srgb,
-        background_color=selected_bg_color,
-        shadow_mode=shadow_mode,
-    )
-    rgba = np.dstack(
-        [
-            rgba_rgb_srgb,
-            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-        ]
-    )
-    shadow_rgba = np.dstack(
-        [
-            np.zeros(rgb.shape, dtype=np.uint8),
-            (np.clip(shadow_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-        ]
-    )
-    bg_type = f"saturated_{analysis.screen_mode}" if analysis.screen_mode in {"green", "blue"} else "unknown_screen"
-    image_type = f"ai_{analysis.screen_mode}_asset" if analysis.screen_mode in {"green", "blue"} else "ai_screen_asset"
-    report: dict[str, Any] = {
-        "diagnosis": None,
-        "background_color": list(selected_bg_color),
-        "despill_method": "remote_corridorkey",
-        "matting_model": "CorridorKey",
-        "corridorkey_analysis": analysis.to_dict(),
-        "keyer": {
-            "used": True,
-            "source": remote.debug.get("hint", {}).get("source") or hint_source or "known_bg_chromatic_key_alpha_hint",
-            "hint": remote.debug.get("hint", {}),
-        },
-        "shadow": shadow_info,
-        "semantic_prior": {},
-        "strategy": {
-            "name": "comfy_corridorkey",
-            "bg_type": bg_type,
-            "image_type": image_type,
-            "keyer_mode": "corridorkey",
-            "despill": "remote_corridorkey",
-            "passthrough": False,
-            "notes": "CorridorKey executed by remote ComfyUI using ERMBG screen/color analysis.",
-            "extras": remote.debug,
-        },
-    }
-    if auto_route is not None:
-        report["auto_route"] = auto_route
-
-    out_dir: Path | None = None
-    if output_dir is not None:
-        out_dir = Path(output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stem = Path(src_path).stem if src_path else "matte"
-        ermbg_io.save_rgba(out_dir / f"{stem}_rgba.png", rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_alpha.png", alpha)
-        ermbg_io.save_rgb(out_dir / f"{stem}_foreground.png", subject_foreground_srgb)
-        ermbg_io.save_rgba(out_dir / f"{stem}_corridorkey_subject_rgba.png", subject_rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_subject_alpha.png", subject_alpha)
-        ermbg_io.save_rgba(out_dir / f"{stem}_shadow_layer.png", shadow_rgba)
-        ermbg_io.save_mask(out_dir / f"{stem}_shadow.png", shadow_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", shadow_alpha_physical)
-        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_hint.png", remote.hint_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_raw_alpha.png", remote.raw_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_key_color_protection.png", remote.color_protection_alpha)
-        if qa:
-            qa_dir = out_dir / f"{stem}_qa"
-            qa_metrics = run_qa(
-                image_srgb=rgb,
-                rgba=rgba,
-                soft_mask=alpha,
-                background_color=selected_bg_color,
-                out_dir=qa_dir,
-            )
-            report["qa"] = qa_metrics
-            (qa_dir / "report.json").write_text(json.dumps(qa_metrics, indent=2), encoding="utf-8")
-        report_path = out_dir / f"{stem}.report.json"
-        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        _write_output_manifest(
-            out_dir=out_dir,
-            stem=stem,
-            src_path=src_path,
-            report=report,
-            outputs={
-                "rgba": out_dir / f"{stem}_rgba.png",
-                "alpha": out_dir / f"{stem}_alpha.png",
-                "foreground": out_dir / f"{stem}_foreground.png",
-                "corridorkey_subject_rgba": out_dir / f"{stem}_corridorkey_subject_rgba.png",
-                "corridorkey_hint": out_dir / f"{stem}_corridorkey_hint.png",
-                "corridorkey_raw_alpha": out_dir / f"{stem}_corridorkey_raw_alpha.png",
-                "shadow": out_dir / f"{stem}_shadow.png",
-            },
-            report_path=report_path,
-            requested_backend="corridorkey",
-        )
-    elif qa:
-        qa_metrics = run_qa(
-            image_srgb=rgb,
-            rgba=rgba,
-            soft_mask=alpha,
-            background_color=selected_bg_color,
-            out_dir=Path("/tmp/_ermbg_qa_discard"),
-        )
-        report["qa"] = qa_metrics
-
-    debug = {
-        **remote.debug,
-        "strategy": report["strategy"],
-        "corridorkey_analysis": analysis.to_dict(),
-        "soft_mask": alpha,
-        "subject_alpha": subject_alpha,
-        "corridorkey_subject_rgba": subject_rgba,
-        "corridorkey_hint": remote.hint_alpha,
-        "corridorkey_raw_alpha": remote.raw_alpha,
-        "key_color_protection": remote.color_protection_alpha,
-        "shadow_alpha": shadow_alpha,
-        "shadow_alpha_physical": shadow_alpha_physical,
-        "shadow_layer_rgba": shadow_rgba,
-        "shadow": shadow_info,
-        "hard_ui_hint": {
-            "mode": hard_ui_hint_mode,
-            "execution_profile": execution_profile,
-            "forced_translucent_settings": forced_translucent_hint_settings,
-            "solid_interior_pixels": solid_interior_pixels,
-            "material_floor_lift_pixels": material_floor_lift_pixels,
-            **solid_interior_info,
-        },
-    }
-    if auto_route is not None:
-        debug["auto_route"] = auto_route
-    return MatteResponse(
-        rgba=rgba,
-        alpha=alpha,
-        foreground_srgb=subject_foreground_srgb,
-        strategy_name="comfy_corridorkey",
         background_color=selected_bg_color,
         report=report,
         output_dir=out_dir,

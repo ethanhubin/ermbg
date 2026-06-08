@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from ermbg import MatteResponse, classify_image, matte_image
+from ermbg.preprocess import repair_known_background_preprocess
 
 pytestmark = pytest.mark.core
 
@@ -357,12 +358,22 @@ def test_pymatting_known_b_shadow_patch_arbitrates_subject_edge_aa_before_shadow
         / "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png"
     )
     image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+    normalized, preprocess_decision = repair_known_background_preprocess(
+        image,
+        (1, 94, 246),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=False,
+    )
+    normalization = dict(preprocess_decision.metadata.get("known_background_normalization") or {})
 
     result = matte_image(
-        image,
+        normalized,
         backend="pymatting-known-b",
         pymatting_bg_source="custom",
         pymatting_bg_color=(1, 94, 246),
+        pymatting_input_preprocessed_known_b=True,
+        pymatting_background_normalization=normalization,
         shadow_mode="on",
     )
 

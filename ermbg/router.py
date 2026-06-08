@@ -622,10 +622,12 @@ def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[
         "corridorkey_color_protection": settings.color_protection,
         "corridorkey_protection_bg_max": settings.protection_bg_max,
         "corridorkey_protection_fg_min": settings.protection_fg_min,
-        # Auto routes should let CorridorKey choose useful hints for complex
-        # edges, translucency, and characters. Deterministic hard buttons route
-        # to PyMatting instead, so this no longer risks hard-UI hint fragility.
-        "corridorkey_auto_mask": True,
+        # Temporary strategy: every CorridorKey auto route defaults to a literal
+        # full-frame zero (all-black) hint. auto_mask=False routes the executor
+        # to ``full_frame_zero_corridorkey_hint`` without computing any feature
+        # prior. The per-profile prior and feature-hint code is kept in tree but
+        # is no longer wired into the default path.
+        "corridorkey_auto_mask": False,
     }
 
 

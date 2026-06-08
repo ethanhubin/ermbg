@@ -103,7 +103,7 @@ def apply_input_preprocess(
             "requested": True,
             "applied": bool(info.get("applied", False)),
             "checkerboard_applied": bool(info.get("applied", False)),
-            "known_background_normalization": "deferred_to_analyze_for_known_b",
+            "known_background_normalization": "applied_by_background_repair_when_known_b_background_is_available",
         }
     elif not metadata["checkerboard"].get("requested"):
         metadata["checkerboard"] = {"enabled": True, "requested": False, "applied": False, **analysis.debug.get("checkerboard", {})}
