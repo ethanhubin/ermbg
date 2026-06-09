@@ -3258,6 +3258,7 @@ def _batch_page_html() -> str:
       <label>上传图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple></label>
       <div class="dropzone" id="dropzone">拖拽多张图片到这里，或使用上方文件选择</div>
       <label>后端<select id="backend"><option value="auto" selected>Auto Route</option></select></label>
+      <label class="checkbox-field background-repair-field"><input id="background-repair" name="background_repair" type="checkbox" checked><span>背景修复</span></label>
       <div class="toolbar">
         <button id="start" type="button" disabled>开始全部</button>
         <button id="retry" class="secondary" type="button" disabled>重试失败</button>
@@ -3282,6 +3283,7 @@ def _batch_page_html() -> str:
     const file = document.getElementById("file");
     const dropzone = document.getElementById("dropzone");
     const backend = document.getElementById("backend");
+    const backgroundRepair = document.getElementById("background-repair");
     const startButton = document.getElementById("start");
     const retryButton = document.getElementById("retry");
     const zipButton = document.getElementById("zip");
@@ -3449,6 +3451,7 @@ def _batch_page_html() -> str:
       retryButton.disabled = running || !queue.some((item) => item.status === "failed");
       zipButton.disabled = running || !done;
       clearButton.disabled = running || !queue.length;
+      backgroundRepair.disabled = running;
       if (!queue.length) {
         list.innerHTML = '<div class="empty">批量队列会显示在这里</div>';
         statusEl.textContent = "等待添加图片";
@@ -3517,7 +3520,7 @@ def _batch_page_html() -> str:
       const startedAt = performance.now();
       const analyzeFormData = new FormData();
       analyzeFormData.append("file", item.file);
-      analyzeFormData.append("background_repair", "false");
+      analyzeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       const analyzeResponse = await fetch("/api/analyze-candidates", { method: "POST", body: analyzeFormData });
       if (!analyzeResponse.ok) {
         let message = "处理失败";
@@ -3531,6 +3534,7 @@ def _batch_page_html() -> str:
       const executeFormData = new FormData();
       executeFormData.append("file", item.file);
       executeFormData.append("backend", backend.value || "auto");
+      executeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       executeFormData.append("shadow_mode", "auto");
       executeFormData.append("parameter_source", "auto");
       executeFormData.append("selected_candidate_id", semanticCandidate.id || analysisPayload.default_candidate_id || "auto_default");

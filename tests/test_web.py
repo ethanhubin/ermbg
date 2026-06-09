@@ -573,7 +573,11 @@ def test_batch_page_serves_batch_queue_entry():
     assert "async function loadBatchQueuePayload()" in response.text
     assert "const payload = await getBatchQueueDb(db)" in response.text
     assert '<option value="auto" selected>Auto Route</option>' in response.text
+    assert '<input id="background-repair" name="background_repair" type="checkbox" checked>' in response.text
+    assert 'const backgroundRepair = document.getElementById("background-repair");' in response.text
+    assert 'analyzeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
     assert 'executeFormData.append("backend", backend.value || "auto")' in response.text
+    assert 'executeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
     assert 'id="lightbox"' in response.text
     assert 'id="lightbox-stage"' in response.text
     assert 'function openLightbox(item)' in response.text
