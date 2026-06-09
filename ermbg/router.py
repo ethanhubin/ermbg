@@ -1133,6 +1133,100 @@ def build_route_candidates(
         profile,
         ck.screen_mode if known_corridor_screen else "unknown",
     )
+    same_key_opaque_button_outline: dict[str, Any] = {
+        "enabled": bool(known_corridor_screen and asset_kind == "button"),
+        "accepted": False,
+        "reason": "not a known green/blue same-key button",
+    }
+    same_key_opaque_button = False
+    if known_corridor_screen and stable_info.get("accepted", False) and asset_kind == "button":
+        try:
+            from .pymatting_refine import analyze_same_key_opaque_body_outline
+
+            same_key_opaque_button_outline = analyze_same_key_opaque_body_outline(
+                image_srgb,
+                model_background,
+                bg_threshold=3.5,
+            )
+        except Exception as exc:
+            same_key_opaque_button_outline = {
+                "enabled": True,
+                "accepted": False,
+                "reason": f"same_key_outline_probe_failed: {exc}",
+            }
+        same_key_opaque_button = bool(
+            opaque_known_b_info.get("same_key_plateau", False)
+            and same_key_opaque_button_outline.get("accepted", False)
+        )
+    analysis["same_key_opaque_button_outline"] = same_key_opaque_button_outline
+    analysis["same_key_button_model"] = {
+        "enabled": bool(known_corridor_screen and asset_kind == "button"),
+        "accepted": bool(same_key_opaque_button),
+        "screen_mode": ck.screen_mode,
+        "opaque_plateau": bool(opaque_known_b_info.get("same_key_plateau", False)),
+        "outline_accepted": bool(same_key_opaque_button_outline.get("accepted", False)),
+        "policy": "offer_corridorkey_translucent_and_known_b_opaque_outline"
+        if same_key_opaque_button
+        else "standard_route_candidates",
+    }
+    if same_key_opaque_button:
+        opaque_params = _pymatting_route_params(
+            stable_bg,
+            execution_profile="pymatting-hard-button",
+            parameter_profile="known_b_same_key_opaque_outline",
+            trimap_mode="same_key_opaque_body_outline",
+            unknown_grow_px=0,
+        )
+        translucent_params = _corridorkey_route_params(
+            ck,
+            execution_profile="corridorkey-transparent-button",
+        )
+        translucent_params.update(
+            {
+                "parameter_profile": "corridorkey_same_key_translucent_button",
+                "same_key_button_interpretation": "semi_transparent_corridorkey",
+            }
+        )
+        return [
+            RouteCandidate(
+                id="route_pymatting_known_b_same_key_opaque",
+                default=True,
+                decision=RouteDecision(
+                    route="pymatting_known_b",
+                    asset_kind="button",
+                    backend="pymatting_known_b",
+                    params=opaque_params,
+                    confidence=float(max(0.88, ck.same_key_opaque_plateau_confidence)),
+                    reasons=["same_key_button_outline_uses_known_b_opaque_proxy"],
+                    analysis=analysis,
+                ),
+                evidence={
+                    "background_solvability": stable_info,
+                    "same_key_opaque_button_outline": same_key_opaque_button_outline,
+                },
+            ),
+            RouteCandidate(
+                id="route_corridorkey_same_key_translucent",
+                decision=RouteDecision(
+                    route="corridorkey",
+                    asset_kind="button",
+                    backend="corridorkey",
+                    params=translucent_params,
+                    confidence=0.64,
+                    reasons=["same_key_button_translucent_counter_candidate_uses_corridorkey"],
+                    analysis=analysis,
+                ),
+                evidence={
+                    "background_solvability": stable_info,
+                    "same_key_opaque_button_outline": same_key_opaque_button_outline,
+                    "translucent_interpretation": {
+                        "assumption": "same-key button interior is semi-transparent screen material"
+                    },
+                },
+                risks=["opaque_same_key_counter_candidate"],
+            ),
+        ]
+
     if stable_info.get("accepted", False):
         known_b_reasons: list[str] = []
         if asset_kind == "button":

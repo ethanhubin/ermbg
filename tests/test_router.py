@@ -434,17 +434,29 @@ def test_route_candidates_c006_c009_keep_corridorkey_high_confidence_default():
         assert default.decision.confidence >= 0.79, rel
 
 
-def test_route_candidates_b056_b057_do_not_get_corridorkey_false_positive():
+def test_route_candidates_b056_keeps_known_b_b057_same_key_gets_counter_candidate():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic" / "button"
-    rels = [
-        "button_hole_ornate_plate_blue/blue.png",
-        "button_blue_play_clipped_hard_shadow/blue.png",
+    ornate = np.asarray(Image.open(root / "button_hole_ornate_plate_blue/blue.png").convert("RGB"), dtype=np.uint8)
+    ornate_candidates = build_route_candidates(ornate)
+    assert [candidate.decision.route for candidate in ornate_candidates] == ["pymatting_known_b"]
+    assert ornate_candidates[0].default is True
+
+    same_key = np.asarray(
+        Image.open(root / "button_blue_play_clipped_hard_shadow/blue.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+    same_key_candidates = build_route_candidates(same_key)
+    assert [candidate.id for candidate in same_key_candidates] == [
+        "route_pymatting_known_b_same_key_opaque",
+        "route_corridorkey_same_key_translucent",
     ]
-    for rel in rels:
-        img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
-        candidates = build_route_candidates(img)
-        assert [candidate.decision.route for candidate in candidates] == ["pymatting_known_b"], rel
-        assert candidates[0].default is True, rel
+    assert [candidate.decision.route for candidate in same_key_candidates] == [
+        "pymatting_known_b",
+        "corridorkey",
+    ]
+    assert same_key_candidates[0].default is True
+    assert same_key_candidates[0].decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert same_key_candidates[1].decision.params["same_key_button_interpretation"] == "semi_transparent_corridorkey"
 
 
 def test_route_complex_foreground_is_independent_of_canvas_aspect_ratio():
@@ -488,7 +500,7 @@ def test_route_square_canvas_button_uses_known_b_without_geometry_gate():
     assert decision.analysis["complex_button_boundary"]["reason"] == "below complex-boundary and semi-alpha gates"
 
 
-def test_route_round_same_key_opaque_button_uses_pymatting_without_aspect_gate():
+def test_route_round_same_key_opaque_button_uses_two_simplified_candidates():
     img = np.full((128, 128, 3), (1, 95, 248), dtype=np.uint8)
     cv2.circle(img, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
     cv2.circle(img, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
@@ -499,15 +511,22 @@ def test_route_round_same_key_opaque_button_uses_pymatting_without_aspect_gate()
     assert decision.backend == "pymatting_known_b"
     assert decision.asset_kind == "button"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
-    assert decision.params["pymatting_trimap_mode"] == "standard"
-    assert "same_key_opaque_body_outline" not in decision.analysis
+    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    candidates = build_route_candidates(img)
+    assert [candidate.id for candidate in candidates] == [
+        "route_pymatting_known_b_same_key_opaque",
+        "route_corridorkey_same_key_translucent",
+    ]
+    assert candidates[0].default is True
+    assert candidates[0].decision.params["parameter_profile"] == "known_b_same_key_opaque_outline"
+    assert candidates[1].decision.params["parameter_profile"] == "corridorkey_same_key_translucent_button"
     ck = decision.analysis["corridorkey_analysis"]
     assert ck["foreground_aspect_ratio"] == pytest.approx(1.0)
     assert ck["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
     assert ck["same_key_opaque_plateau_confidence"] >= 0.85
 
 
-def test_route_same_key_opaque_button_uses_outline_trimap_only_when_outline_is_measured():
+def test_route_same_key_opaque_button_uses_outline_trimap_when_outline_is_measured():
     img = np.full((120, 240, 3), (1, 95, 248), dtype=np.uint8)
     cv2.rectangle(img, (20, 12), (220, 98), (112, 160, 248), -1, cv2.LINE_AA)
     cv2.rectangle(img, (20, 12), (220, 98), (70, 118, 210), 2, cv2.LINE_AA)
@@ -518,10 +537,10 @@ def test_route_same_key_opaque_button_uses_outline_trimap_only_when_outline_is_m
 
     assert decision.route == "pymatting_known_b"
     assert decision.params["execution_profile"] == "pymatting-hard-button"
-    assert decision.params["pymatting_trimap_mode"] == "standard"
+    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
     assert decision.params["pymatting_unknown_grow_px"] == 0
     assert decision.analysis["corridorkey_analysis"]["parameter_profile"] == "opaque_hard_ui_same_key_plateau"
-    assert "same_key_opaque_body_outline" not in decision.analysis
+    assert decision.analysis["same_key_opaque_button_outline"]["accepted"] is True
 
 
 def test_route_unknown_unstable_background_uses_pymatting_fallback():

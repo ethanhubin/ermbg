@@ -1174,7 +1174,7 @@ def test_same_key_opaque_body_outline_trimap_supports_closed_plateau_shapes():
     assert not np.any(trimap.sure_fg & trimap.sure_bg)
 
 
-def test_same_key_opaque_body_outline_rejects_internal_known_b_holes():
+def test_same_key_opaque_body_outline_ignores_internal_known_b_holes():
     bg = (0, 200, 0)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
     cv2.circle(image, (64, 64), 44, (235, 202, 28), -1, cv2.LINE_AA)
@@ -1183,9 +1183,9 @@ def test_same_key_opaque_body_outline_rejects_internal_known_b_holes():
 
     outline = analyze_same_key_opaque_body_outline(image, bg, bg_threshold=3.5)
 
-    assert outline["accepted"] is False
-    assert outline["reason"] == "body outline contains enclosed known-background holes"
+    assert outline["accepted"] is True
     assert outline["internal_clean_bg_holes"]["pixels"] > 0
+    assert outline["internal_clean_bg_holes_policy"] == "ignored_for_same_key_opaque_outline"
 
 
 def test_same_key_opaque_proxy_subject_mask_expands_antialias_coverage():

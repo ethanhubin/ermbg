@@ -32,6 +32,13 @@ def _solid_green_button() -> np.ndarray:
     return image
 
 
+def _same_key_blue_button() -> np.ndarray:
+    image = np.full((128, 128, 3), (1, 95, 248), dtype=np.uint8)
+    cv2.circle(image, (64, 64), 39, (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 42, (40, 88, 208), 2, cv2.LINE_AA)
+    return image
+
+
 def _translucent_badge_like_image() -> np.ndarray:
     h, w = 160, 280
     image = np.full((h, w, 3), 253, dtype=np.uint8)
@@ -313,6 +320,21 @@ def test_analyze_hard_button_without_shadow_is_ready() -> None:
     assert [candidate.id for candidate in result.candidates] == ["auto_default"]
     assert result.candidates[0].preview["assets"]["overlay"] == "candidate:auto_default:overlay"
     assert result.preview_assets["candidate:auto_default:overlay"]["data_url"].startswith("data:image/png;base64,")
+
+
+def test_analyze_same_key_button_returns_opaque_and_corridorkey_candidates() -> None:
+    result = analyze_candidates(_same_key_blue_button())
+
+    assert result.status == "needs_decision"
+    assert result.ambiguity_regions == []
+    assert result.default_route_candidate_id == "route_pymatting_known_b_same_key_opaque"
+    assert [candidate.id for candidate in result.candidates] == [
+        "route_pymatting_known_b_same_key_opaque__opaque_outline",
+        "route_corridorkey_same_key_translucent__semi_transparent_corridorkey",
+    ]
+    assert result.candidates[0].decision["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert result.candidates[1].decision["policy"] == "same_key_semi_transparent_corridorkey"
+    assert result.candidates[1].decision["corridorkey_hint_value"] == 0.32
 
 
 def test_analyze_b001_no_shadow_button_has_stable_boundary_trimap() -> None:

@@ -4863,7 +4863,28 @@ def _run_web_backend(
             "pymatting_unknown_grow_px",
             "pymatting_explicit_trimap",
         )
+        route_payload = kwargs.get("route_decision") if isinstance(kwargs.get("route_decision"), dict) else {}
+        route_params = route_payload.get("params") if isinstance(route_payload.get("params"), dict) else {}
+        corridorkey_route_keys = {
+            "corridorkey_gamma_space",
+            "corridorkey_despill_strength",
+            "corridorkey_refiner_strength",
+            "corridorkey_auto_despeckle",
+            "corridorkey_despeckle_size",
+            "corridorkey_auto_mask",
+            "corridorkey_screen_mode",
+            "corridorkey_preset",
+        }
+        if direct_execution_backend == "direct-corridorkey" and route_params:
+            for key in corridorkey_route_keys:
+                if key in route_params:
+                    corridorkey_overrides.setdefault(key, route_params[key])
+        if kwargs.get("pymatting_explicit_trimap") is not None:
+            corridorkey_overrides["pymatting_explicit_trimap"] = kwargs["pymatting_explicit_trimap"]
         if direct_execution_backend == "direct-pymatting-known-b":
+            for key in known_b_keys:
+                if key in route_params:
+                    corridorkey_overrides[key] = route_params[key]
             for key in known_b_keys:
                 if key in kwargs:
                     corridorkey_overrides[key] = kwargs[key]

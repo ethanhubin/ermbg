@@ -1567,6 +1567,63 @@ def _ready_candidate() -> SemanticCandidate:
     )
 
 
+def _same_key_opaque_outline_candidate() -> SemanticCandidate:
+    return SemanticCandidate(
+        id="opaque_outline",
+        label="Opaque outline",
+        intent="Treat the same-key button body as opaque material inside the measured outline.",
+        default=True,
+        confidence=0.9,
+        risk_level="medium",
+        decision={
+            "policy": "same_key_opaque_outline",
+            "button_body_policy": "opaque_subject",
+            "pymatting_trimap_mode": "same_key_opaque_body_outline",
+            "pymatting_unknown_grow_px": 0,
+        },
+        reasons=[
+            "same-key button outline was measured before execution",
+            "opaque interpretation ignores enclosed near-background hole choices",
+        ],
+    )
+
+
+def _same_key_corridorkey_translucent_candidate() -> SemanticCandidate:
+    hint_value = 0.32
+    return SemanticCandidate(
+        id="semi_transparent_corridorkey",
+        label="Semi-transparent CorridorKey",
+        intent="Treat the same-key button interior as semi-transparent screen material and run CorridorKey with a light prior.",
+        default=True,
+        confidence=0.64,
+        risk_level="medium",
+        decision={
+            "policy": "same_key_semi_transparent_corridorkey",
+            "corridorkey_hint_value": hint_value,
+        },
+        reasons=[
+            "same-key green/blue button can also be interpreted as translucent screen material",
+            "near-background material uses a stronger foreground prior so it is not erased too aggressively",
+        ],
+    )
+
+
+def _route_uses_same_key_opaque_outline(route: dict[str, Any]) -> bool:
+    params = route.get("params") if isinstance(route.get("params"), dict) else {}
+    return (
+        route.get("algorithm") == "pymatting_known_b"
+        and str(params.get("pymatting_trimap_mode") or "") == "same_key_opaque_body_outline"
+    )
+
+
+def _route_uses_same_key_corridorkey(route: dict[str, Any]) -> bool:
+    params = route.get("params") if isinstance(route.get("params"), dict) else {}
+    return (
+        route.get("algorithm") == "corridorkey"
+        and str(params.get("same_key_button_interpretation") or "") == "semi_transparent_corridorkey"
+    )
+
+
 def _default_candidate_id(candidates: list[SemanticCandidate]) -> str:
     for candidate in candidates:
         if candidate.default:
@@ -2258,6 +2315,8 @@ def _semantic_plan_for_route(
     semantic_input = image_srgb
     effective_preprocess = preprocess
     if route.get("algorithm") == "pymatting_known_b" and background is not None:
+        if _route_uses_same_key_opaque_outline(route):
+            return semantic_input, effective_preprocess, [], {}, [_same_key_opaque_outline_candidate()]
         hole_regions, hole_masks = _enclosed_near_background_regions(
             semantic_input,
             background,
@@ -2292,6 +2351,8 @@ def _semantic_plan_for_route(
             regions = hole_regions + shadow_regions + body_regions
             region_masks = {**hole_masks, **shadow_masks, **body_masks}
     elif route.get("algorithm") == "corridorkey":
+        if _route_uses_same_key_corridorkey(route):
+            return semantic_input, effective_preprocess, [], {}, [_same_key_corridorkey_translucent_candidate()]
         # CorridorKey is steered only by full-frame constant hint strength here.
         # The feature-hint experiments remain available as helpers, but are not
         # wired into Analyze or Execute.

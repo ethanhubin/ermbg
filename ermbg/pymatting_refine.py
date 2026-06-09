@@ -1641,7 +1641,13 @@ def _reject_same_key_outline_internal_bg_holes(
     *,
     bg_threshold: float,
 ) -> None:
-    """Reject opaque-body tracing when the measured body contains real BG holes."""
+    """Record internal same-B islands without rejecting the opaque outline recipe.
+
+    The same-key opaque route is an explicit user/model interpretation: once
+    the outline is measured, the whole interior is treated as subject material.
+    Enclosed near-background pixels remain observable debug evidence, but they
+    do not create hole semantics or invalidate the route.
+    """
     body = np.asarray(trace.get("body_fill"), dtype=bool)
     if not bool(body.any()):
         return
@@ -1666,9 +1672,7 @@ def _reject_same_key_outline_internal_bg_holes(
         **enclosed_info,
     }
     trace["internal_clean_bg_holes"] = hole_info
-    if hole_pixels > 0:
-        trace["accepted"] = False
-        trace["reason"] = "body outline contains enclosed known-background holes"
+    trace["internal_clean_bg_holes_policy"] = "ignored_for_same_key_opaque_outline"
 
 
 def _same_key_opaque_lower_perimeter_ridge_trace(
