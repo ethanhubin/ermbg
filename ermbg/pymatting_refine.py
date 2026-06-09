@@ -571,6 +571,130 @@ def _known_background_neutral_shadow_subject_evidence_release(
     return release, info
 
 
+def _known_background_light_neutral_shadow_conflict_unknown(
+    background_color: np.ndarray,
+    *,
+    sure_fg: np.ndarray,
+    shadow_mask: np.ndarray,
+    shadow_unknown: np.ndarray,
+    exterior_bg: np.ndarray,
+    bg_candidate: np.ndarray,
+    boundary_info: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Promote connected light-neutral cast-shadow conflicts to unknown.
+
+    On white/gray known-B assets, a real cast shadow can be far enough from B to
+    become an initial sure-FG seed. If a coherent scalar-darkening component is
+    already connected to exterior shadow/background evidence and also touches a
+    separate non-shadow material core, the scalar component is shadow evidence,
+    not subject material. This pass moves only that conflicting component portion
+    out of sure-FG before the BG-seed outline trace runs.
+    """
+
+    h, w = sure_fg.shape
+    release = np.zeros((h, w), dtype=bool)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    info: dict[str, Any] = {
+        "enabled": True,
+        "released_pixels": 0,
+        "reason": "",
+        "components": [],
+        "omitted_components": 0,
+    }
+    if float(bg.min()) < 180.0 or float(bg.max() - bg.min()) > 12.0:
+        info["reason"] = "background is not light neutral"
+        return release, info
+    if not bool(sure_fg.any()) or not bool(shadow_mask.any()):
+        info["reason"] = "missing sure foreground or scalar shadow evidence"
+        return release, info
+
+    conflict = np.asarray(shadow_mask, dtype=bool) & np.asarray(sure_fg, dtype=bool)
+    if not bool(conflict.any()):
+        info["reason"] = "scalar shadow does not overlap sure foreground"
+        return release, info
+
+    image_area = float(max(1, h * w))
+    min_component_area = int(max(96, round(image_area * 0.004)))
+    min_conflict_area = int(max(16, round(image_area * 0.0008)))
+    min_shadow_side_area = int(max(32, round(image_area * 0.001)))
+    boundary_px = float(boundary_info.get("boundary_band_px_effective", 2.0) or 2.0)
+    touch_radius = max(1, int(round(max(2.0, min(6.0, boundary_px + 2.0)))))
+    touch_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (touch_radius * 2 + 1, touch_radius * 2 + 1),
+    )
+    material_core = np.asarray(sure_fg, dtype=bool) & ~np.asarray(shadow_mask, dtype=bool)
+    material_core_pixels = int(material_core.sum())
+    exterior_support = np.asarray(exterior_bg, dtype=bool)
+    bg_side_support = np.asarray(bg_candidate, dtype=bool) & ~np.asarray(sure_fg, dtype=bool)
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        np.asarray(shadow_mask, dtype=np.uint8),
+        8,
+    )
+    components: list[dict[str, Any]] = []
+    for label in range(1, labels_count):
+        comp = labels == label
+        comp_area = int(stats[label, cv2.CC_STAT_AREA])
+        comp_conflict = comp & conflict
+        conflict_area = int(comp_conflict.sum())
+        shadow_side_area = int((comp & shadow_unknown).sum())
+        comp_near = cv2.dilate(comp.astype(np.uint8), touch_kernel, iterations=1).astype(bool)
+        exterior_contact = int((comp_near & exterior_support).sum())
+        bg_side_contact = int((comp_near & bg_side_support).sum())
+        material_contact = int((comp_near & material_core).sum())
+        keep = bool(
+            comp_area >= min_component_area
+            and conflict_area >= min_conflict_area
+            and shadow_side_area >= max(min_shadow_side_area, int(round(conflict_area * 0.50)))
+            and (exterior_contact > 0 or bg_side_contact > 0)
+            and material_contact >= max(24, int(round(conflict_area * 0.10)))
+            and material_core_pixels >= max(64, int(round(conflict_area * 1.5)))
+        )
+        if keep:
+            release |= comp_conflict
+        components.append(
+            {
+                "area": comp_area,
+                "bbox_xyxy": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    int(stats[label, cv2.CC_STAT_LEFT] + stats[label, cv2.CC_STAT_WIDTH]),
+                    int(stats[label, cv2.CC_STAT_TOP] + stats[label, cv2.CC_STAT_HEIGHT]),
+                ],
+                "sure_fg_conflict_pixels": conflict_area,
+                "shadow_side_pixels": shadow_side_area,
+                "exterior_contact_pixels": exterior_contact,
+                "bg_side_contact_pixels": bg_side_contact,
+                "material_contact_pixels": material_contact,
+                "material_core_pixels": material_core_pixels,
+                "keep": keep,
+                "reason": ""
+                if keep
+                else (
+                    "component is not an exterior-connected shadow conflict"
+                    if conflict_area > 0
+                    else "component has no sure-FG conflict"
+                ),
+            }
+        )
+
+    components.sort(key=lambda item: (item["keep"], item["sure_fg_conflict_pixels"], item["area"]), reverse=True)
+    info.update(
+        {
+            "released_pixels": int(release.sum()),
+            "component_min_area": int(min_component_area),
+            "conflict_min_area": int(min_conflict_area),
+            "shadow_side_min_area": int(min_shadow_side_area),
+            "touch_radius_px": int(touch_radius),
+            "material_core_pixels": int(material_core_pixels),
+            "components": components[:12],
+            "omitted_components": max(0, len(components) - 12),
+            "reason": "" if bool(release.any()) else "no exterior-connected neutral shadow conflict",
+        }
+    )
+    return release, info
+
+
 def _build_known_background_ownership(
     image_srgb: np.ndarray,
     background_color: np.ndarray,
@@ -685,6 +809,19 @@ def _build_known_background_ownership(
         subject_seed=sure_fg,
     )
     shadow_unknown = shadow_bg & (~sure_fg | screen_dominant_shadow)
+    neutral_shadow_conflict_unknown, neutral_shadow_conflict_info = (
+        _known_background_light_neutral_shadow_conflict_unknown(
+            bg,
+            sure_fg=sure_fg,
+            shadow_mask=shadow_bg,
+            shadow_unknown=shadow_unknown,
+            exterior_bg=exterior_bg,
+            bg_candidate=bg_candidate,
+            boundary_info=boundary_info,
+        )
+    )
+    if bool(neutral_shadow_conflict_unknown.any()):
+        shadow_unknown |= neutral_shadow_conflict_unknown
     neutral_subject_evidence_release, neutral_subject_evidence_info = (
         _known_background_neutral_shadow_subject_evidence_release(
             bg,
@@ -873,6 +1010,8 @@ def _build_known_background_ownership(
             "anchor_radius_px": int(anchor_radius),
             "source": "min(boundary_plus_margin, subject_and_image_scale_cap)_with_strong_ownership_anchor",
         },
+        "neutral_shadow_conflict_unknown_pixels": int(neutral_shadow_conflict_unknown.sum()),
+        "neutral_shadow_conflict_unknown": neutral_shadow_conflict_info,
         "neutral_shadow_subject_evidence_release_pixels": int(neutral_subject_evidence_release.sum()),
         "neutral_shadow_subject_evidence": neutral_subject_evidence_info,
         "hard_shadow_subject_evidence_release_pixels": int(subject_evidence_release.sum()),

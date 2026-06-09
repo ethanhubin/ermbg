@@ -144,9 +144,10 @@ Known-B Execute 可消费:
 - `semantic_decision`;
 - `user_keep_mask`;
 - `user_remove_mask`;
-- `pymatting_input_preprocessed_known_b`;
-- `pymatting_background_normalization`;
 - Known-B thresholds 和 solver params。
+
+背景场归一化只属于 Preprocess。Execute 收到的图像应已经是 preprocess 后的 RGB；
+executor 不接收归一化开关，也不读取归一化 metadata。
 
 当 `pymatting_explicit_trimap` 存在时，executor 直接使用该三态 trimap，并在其上应用
 user mask。remove mask 覆盖 keep mask。

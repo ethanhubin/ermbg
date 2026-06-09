@@ -111,11 +111,11 @@ hint 特征检测必须保持位置无关，不能假设透明区域在中间。
   提高到接近不透明支持；
 - `feature_translucent`: 缩窄 soft support，并降低半透明/反光区域前景支持。
 
-`full_frame_zero` 是字面全帧黑/零值 CorridorKey hint，仅作为诊断项，必须用探针脚本的
-`--include-full-frame-zero-diagnostic` 显式打开，不作为推荐候选。
+默认 CorridorKey 执行 hint 是全帧常量 `0.32` soft prior，所有默认 profile 都走
+同一个语义。`full_frame_zero` 是字面全帧黑/零值 CorridorKey hint，仅作为诊断项，
+必须用探针脚本的 `--include-full-frame-zero-diagnostic` 显式打开，不作为推荐候选。
 CorridorKey runner 不再对 hint 做来源/白色特殊反转；源头生成的 hint 数值就是送入
-CorridorKey mask 的语义。路由 profile 需要全帧 soft prior 时，源头直接生成常量
-`0.32`；需要 zero prior 时，源头直接生成常量 `0.0`。
+CorridorKey mask 的语义。需要 zero prior 时，源头必须显式生成常量 `0.0`。
 
 `bbox+2` 曾作为大图速度实验项验证。实测没有带来稳定加速，且作为全矩形
 aggressive hint 会改变解的形态，因此不再作为候选输出。若后续要做性能优化，

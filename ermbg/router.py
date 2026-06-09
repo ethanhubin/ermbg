@@ -622,11 +622,10 @@ def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[
         "corridorkey_color_protection": settings.color_protection,
         "corridorkey_protection_bg_max": settings.protection_bg_max,
         "corridorkey_protection_fg_min": settings.protection_fg_min,
-        # Temporary strategy: every CorridorKey auto route defaults to a literal
-        # full-frame zero (all-black) hint. auto_mask=False routes the executor
-        # to ``full_frame_zero_corridorkey_hint`` without computing any feature
-        # prior. The per-profile prior and feature-hint code is kept in tree but
-        # is no longer wired into the default path.
+        # Every CorridorKey auto route defaults to a full-frame 0.32 soft prior.
+        # auto_mask=False keeps the executor on the constant-prior path without
+        # computing any feature hint. Feature-hint code is kept in tree but is no
+        # longer wired into the default path.
         "corridorkey_auto_mask": False,
     }
 

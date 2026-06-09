@@ -127,7 +127,6 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
     }
     if known_b is not None:
         algorithm["pymatting_known_b"] = {
-            "background_normalization": known_b.get("background_normalization"),
             "trimap": known_b.get("trimap"),
             "parameters": known_b.get("parameters"),
             "alpha_pinhole_repair": known_b.get("alpha_pinhole_repair"),
@@ -432,8 +431,6 @@ def _known_b_form_params(
     pymatting_cg_rtol: float | None,
     pymatting_trimap_mode: str | None,
     pymatting_unknown_grow_px: int | None,
-    pymatting_input_preprocessed_known_b: bool | None,
-    pymatting_background_normalization: str | None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if pymatting_method is not None:
@@ -465,14 +462,6 @@ def _known_b_form_params(
         params["pymatting_trimap_mode"] = str(pymatting_trimap_mode)
     if pymatting_unknown_grow_px is not None:
         params["pymatting_unknown_grow_px"] = int(pymatting_unknown_grow_px)
-    if pymatting_input_preprocessed_known_b is not None:
-        params["pymatting_input_preprocessed_known_b"] = bool(pymatting_input_preprocessed_known_b)
-    normalization = _parse_json_object(
-        pymatting_background_normalization,
-        "pymatting_background_normalization",
-    )
-    if normalization is not None:
-        params["pymatting_background_normalization"] = normalization
     return params
 
 
@@ -795,8 +784,6 @@ async def matte_endpoint(
     pymatting_cg_rtol: float | None = Form(None),
     pymatting_trimap_mode: str | None = Form(None),
     pymatting_unknown_grow_px: int | None = Form(None),
-    pymatting_input_preprocessed_known_b: bool | None = Form(None),
-    pymatting_background_normalization: str | None = Form(None),
     route_decision: str | None = Form(None),
     semantic_decision: str | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
@@ -838,8 +825,6 @@ async def matte_endpoint(
         pymatting_cg_rtol=pymatting_cg_rtol,
         pymatting_trimap_mode=pymatting_trimap_mode,
         pymatting_unknown_grow_px=pymatting_unknown_grow_px,
-        pymatting_input_preprocessed_known_b=pymatting_input_preprocessed_known_b,
-        pymatting_background_normalization=pymatting_background_normalization,
     )
     data = await image.read()
     hint_mask = None

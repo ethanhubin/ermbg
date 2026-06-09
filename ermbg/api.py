@@ -316,6 +316,59 @@ def _pymatting_known_b_auto_background_fallback_info(
     }
 
 
+def prepare_known_b_preprocessed_input(
+    image_srgb: np.ndarray,
+    *,
+    bg_source: str,
+    bg_color: tuple[int, int, int] | None,
+    bg_threshold: float,
+    fg_threshold: float,
+    adaptive: bool = False,
+) -> tuple[np.ndarray, tuple[int, int, int], dict[str, Any], dict[str, Any]]:
+    """Resolve Known-B background and run the preprocess-owned normalization."""
+
+    from .preprocess import repair_known_background_preprocess
+    from .pymatting_refine import estimate_stable_background_color
+
+    bg_source_key = str(bg_source or "auto").strip().lower()
+    if bg_source_key == "auto":
+        selected_bg, bg_info = estimate_stable_background_color(image_srgb)
+        if not bg_info.get("accepted", False):
+            bg_info = _pymatting_known_b_auto_background_fallback_info(
+                selected_bg=selected_bg,
+                auto_bg_info=bg_info,
+            )
+    elif bg_source_key == "green":
+        selected_bg = (0, 200, 0)
+        bg_info = {"accepted": True, "source": "preset_green", "reason": "preset"}
+    elif bg_source_key == "blue":
+        selected_bg = (0, 0, 200)
+        bg_info = {"accepted": True, "source": "preset_blue", "reason": "preset"}
+    elif bg_source_key == "custom":
+        if bg_color is None:
+            raise ValueError("pymatting_bg_color is required when pymatting_bg_source='custom'")
+        selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
+        bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
+    else:
+        raise ValueError("pymatting_bg_source must be auto, green, blue, or custom")
+
+    normalized, decision = repair_known_background_preprocess(
+        image_srgb,
+        selected_bg,
+        bg_threshold=float(bg_threshold),
+        fg_threshold=float(fg_threshold),
+        adaptive=bool(adaptive),
+    )
+    normalization = dict(decision.metadata.get("known_background_normalization") or {})
+    preprocess_info = {
+        "selected": decision.selected,
+        "applied": decision.applied,
+        "metadata": decision.metadata,
+        "known_background_normalization": normalization,
+    }
+    return normalized, selected_bg, bg_info, preprocess_info
+
+
 def matte_image(
     image: ImageLike,
     output_dir: str | Path | None = None,
@@ -351,8 +404,6 @@ def matte_image(
     pymatting_cg_rtol: float = 1e-6,
     pymatting_trimap_mode: str = "standard",
     pymatting_unknown_grow_px: int = 0,
-    pymatting_input_preprocessed_known_b: bool = False,
-    pymatting_background_normalization: dict[str, Any] | None = None,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: MaskLike | None = None,
     user_remove_mask: MaskLike | None = None,
@@ -450,16 +501,27 @@ def matte_image(
     if backend in {"pymatting_known_b", "pymatting_fallback"}:
         if vlm_prior:
             raise ValueError("PyMatting Known-B does not support local vlm_prior")
-        return _matte_image_pymatting_known_b(
+        known_b_rgb, known_b_bg, known_b_bg_info, preprocess_info = prepare_known_b_preprocessed_input(
             rgb,
+            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
+            fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
+            adaptive=False,
+        )
+        return _matte_image_pymatting_known_b(
+            known_b_rgb,
             src_path=src_path,
             output_dir=output_dir,
             qa=qa,
             shadow_mode=shadow_mode,
             method=auto_params.get("pymatting_method", pymatting_method),
             image_space=auto_params.get("pymatting_image_space", pymatting_image_space),
-            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
-            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_source="custom",
+            bg_color=known_b_bg,
+            bg_info_override=known_b_bg_info,
+            requested_bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            preprocess_info=preprocess_info,
             bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
             fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
             boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
@@ -470,14 +532,6 @@ def matte_image(
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
             trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
             unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", pymatting_unknown_grow_px),
-            input_preprocessed_known_b=auto_params.get(
-                "pymatting_input_preprocessed_known_b",
-                pymatting_input_preprocessed_known_b,
-            ),
-            input_background_normalization=auto_params.get(
-                "pymatting_background_normalization",
-                pymatting_background_normalization,
-            ),
             semantic_decision=semantic_decision,
             user_keep_mask=user_keep_alpha,
             user_remove_mask=user_remove_alpha,
@@ -499,16 +553,27 @@ def matte_image(
     if backend == "pymatting-known-b":
         if vlm_prior:
             raise ValueError("backend='pymatting-known-b' does not support local vlm_prior")
-        return _matte_image_pymatting_known_b(
+        known_b_rgb, known_b_bg, known_b_bg_info, preprocess_info = prepare_known_b_preprocessed_input(
             rgb,
+            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
+            fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
+            adaptive=False,
+        )
+        return _matte_image_pymatting_known_b(
+            known_b_rgb,
             src_path=src_path,
             output_dir=output_dir,
             qa=qa,
             shadow_mode=shadow_mode,
             method=auto_params.get("pymatting_method", pymatting_method),
             image_space=auto_params.get("pymatting_image_space", pymatting_image_space),
-            bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
-            bg_color=auto_params.get("pymatting_bg_color", pymatting_bg_color),
+            bg_source="custom",
+            bg_color=known_b_bg,
+            bg_info_override=known_b_bg_info,
+            requested_bg_source=auto_params.get("pymatting_bg_source", pymatting_bg_source),
+            preprocess_info=preprocess_info,
             bg_threshold=auto_params.get("pymatting_bg_threshold", pymatting_bg_threshold),
             fg_threshold=auto_params.get("pymatting_fg_threshold", pymatting_fg_threshold),
             boundary_band_px=auto_params.get("pymatting_boundary_band_px", pymatting_boundary_band_px),
@@ -519,14 +584,6 @@ def matte_image(
             cg_rtol=auto_params.get("pymatting_cg_rtol", pymatting_cg_rtol),
             trimap_mode=auto_params.get("pymatting_trimap_mode", pymatting_trimap_mode),
             unknown_grow_px=auto_params.get("pymatting_unknown_grow_px", pymatting_unknown_grow_px),
-            input_preprocessed_known_b=auto_params.get(
-                "pymatting_input_preprocessed_known_b",
-                pymatting_input_preprocessed_known_b,
-            ),
-            input_background_normalization=auto_params.get(
-                "pymatting_background_normalization",
-                pymatting_background_normalization,
-            ),
             semantic_decision=semantic_decision,
             user_keep_mask=user_keep_alpha,
             user_remove_mask=user_remove_alpha,
@@ -786,8 +843,9 @@ def _matte_image_pymatting_known_b(
     cg_rtol: float,
     trimap_mode: str = "standard",
     unknown_grow_px: int = 0,
-    input_preprocessed_known_b: bool = False,
-    input_background_normalization: dict[str, Any] | None = None,
+    bg_info_override: dict[str, Any] | None = None,
+    requested_bg_source: str | None = None,
+    preprocess_info: dict[str, Any] | None = None,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: np.ndarray | None = None,
     user_remove_mask: np.ndarray | None = None,
@@ -845,6 +903,8 @@ def _matte_image_pymatting_known_b(
             raise ValueError("pymatting_bg_color is required when pymatting_bg_source='custom'")
         selected_bg = tuple(int(np.clip(c, 0, 255)) for c in bg_color)
         bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
+    if bg_info_override is not None:
+        bg_info = dict(bg_info_override)
 
     requested_trimap_mode = str(trimap_mode or "standard")
     semantic_decision_payload = dict(semantic_decision or {})
@@ -885,23 +945,7 @@ def _matte_image_pymatting_known_b(
             "solver_trimap_mode": requested_trimap_mode,
         }
 
-    if input_preprocessed_known_b:
-        processing_rgb = solver_rgb
-        background_normalization = dict(input_background_normalization or {})
-        background_normalization.setdefault("applied", False)
-        background_normalization.setdefault("source", "input_preprocess")
-        background_normalization["executor_skipped"] = True
-        background_normalization["skip_reason"] = "already_normalized_by_preprocess"
-        background_normalization["background_color"] = [int(c) for c in selected_bg]
-    else:
-        processing_rgb = solver_rgb
-        background_normalization = {
-            "enabled": False,
-            "applied": False,
-            "source": "executor_no_private_background_repair",
-            "reason": "Known-B background normalization is only applied by background_repair preprocess",
-            "background_color": [int(c) for c in selected_bg],
-        }
+    processing_rgb = solver_rgb
 
     if explicit_trimap is not None:
         trimap, trimap_info = _known_b_explicit_trimap(
@@ -1056,7 +1100,6 @@ def _matte_image_pymatting_known_b(
             "notes": "PyMatting alpha on a measured or specified known background.",
             "extras": {
                 "background": bg_info,
-                "background_normalization": background_normalization,
                 "pymatting": pm.debug,
                 "trimap": trimap_info,
                 "alpha_pinhole_repair": alpha_pinhole_repair,
@@ -1065,7 +1108,7 @@ def _matte_image_pymatting_known_b(
                     "method": method,
                     "image_space": image_space,
                     "bg_source": effective_bg_source,
-                    "requested_bg_source": bg_source,
+                    "requested_bg_source": str(requested_bg_source or bg_source),
                     "bg_threshold": float(bg_threshold),
                     "fg_threshold": float(fg_threshold),
                     "boundary_band_px": int(boundary_band_px),
@@ -1088,6 +1131,8 @@ def _matte_image_pymatting_known_b(
     }
     if auto_route is not None:
         report["auto_route"] = auto_route
+    if preprocess_info is not None:
+        report["preprocess"] = preprocess_info
 
     out_dir: Path | None = None
     if output_dir is not None:
@@ -1110,8 +1155,6 @@ def _matte_image_pymatting_known_b(
             ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_mask.png", same_key_inner_opaque_mask.astype(np.float32))
         if same_key_inner_floor_mask is not None:
             ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_floor_mask.png", same_key_inner_floor_mask.astype(np.float32))
-        if background_normalization.get("applied", False):
-            ermbg_io.save_rgb(out_dir / f"{stem}_normalized_input.png", processing_rgb)
         if qa:
             qa_dir = out_dir / f"{stem}_qa"
             qa_metrics = run_qa(
@@ -1187,7 +1230,6 @@ def _matte_image_pymatting_known_b(
         "trimap_u8": trimap_to_uint8(trimap),
         "pymatting_known_b": {
             "background": bg_info,
-            "background_normalization": background_normalization,
             "trimap": trimap_info,
             "pymatting": pm.debug,
             "alpha_pinhole_repair": alpha_pinhole_repair,
@@ -1199,6 +1241,8 @@ def _matte_image_pymatting_known_b(
         },
         "shadow": shadow_info,
     }
+    if preprocess_info is not None:
+        debug["input_preprocess"] = preprocess_info
     if proxy_subject_mask is not None:
         debug["proxy_subject_mask"] = proxy_subject_mask
         debug["proxy_input_srgb"] = proxy_input_rgb

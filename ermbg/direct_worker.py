@@ -20,6 +20,7 @@ from .api import (
     _corridorkey_shadow_patch,
     _matte_image_passthrough,
     _matte_image_pymatting_known_b,
+    prepare_known_b_preprocessed_input,
 )
 from .corridorkey_hint import corridorkey_full_frame_prior_value
 from .corridorkey_runner import LocalCorridorKeyClient
@@ -334,9 +335,23 @@ def matte_corridorkey_direct(
         hint_alpha = plan.hint
         hint_source = f"semantic_corridorkey_hint_variant:{semantic_hint_variant}"
         hint_plan_metadata = plan.metadata
-    elif not auto_mask or hard_ui_hint_mode == "full_frame_zero":
+    elif hard_ui_hint_mode == "full_frame_zero":
         hint_alpha = np.zeros(rgb.shape[:2], dtype=np.float32)
         hint_source = "full_frame_zero_corridorkey_hint"
+    elif not auto_mask:
+        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+            execution_profile=execution_profile,
+            screen_mode=screen_mode,
+        )
+        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
+        if execution_profile == "corridorkey-character":
+            hint_source = f"character_full_frame_{prior_kind}_corridorkey_hint"
+        elif execution_profile == "corridorkey-transparent-button":
+            hint_source = f"glass_full_frame_{prior_kind}_corridorkey_hint"
+        elif execution_profile == "corridorkey-effect-icon":
+            hint_source = f"effect_full_frame_{prior_kind}_corridorkey_hint"
+        else:
+            hint_source = f"default_full_frame_{prior_kind}_corridorkey_hint"
     elif execution_profile == "corridorkey-transparent-button":
         prior_value, prior_kind = corridorkey_full_frame_prior_value(
             execution_profile=execution_profile,
@@ -380,6 +395,14 @@ def matte_corridorkey_direct(
         else:
             hint_alpha = build_hard_ui_corridorkey_hint(rgb, selected_bg_color)
             hint_source = "known_bg_hard_ui_bbox_2px_hint"
+
+    if hint_alpha is None:
+        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+            execution_profile=execution_profile,
+            screen_mode=screen_mode,
+        )
+        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
+        hint_source = f"default_full_frame_{prior_kind}_corridorkey_hint"
 
     remote = client.matte(
         rgb,
@@ -620,18 +643,32 @@ def direct_matte_from_decision(
         response.debug["backend"] = "direct-passthrough"
         execution_backend = "direct-passthrough"
     elif algorithm in {"pymatting_known_b", "pymatting_fallback"}:
-        response = _matte_image_pymatting_known_b(
+        known_b_bg_threshold = _route_params(params, "pymatting_bg_threshold", 3.5)
+        known_b_fg_threshold = _route_params(params, "pymatting_fg_threshold", 24.0)
+        known_b_bg_source = _route_params(params, "pymatting_bg_source", "custom")
+        known_b_rgb, known_b_bg, known_b_bg_info, preprocess_info = prepare_known_b_preprocessed_input(
             rgb,
+            bg_source=known_b_bg_source,
+            bg_color=_route_params(params, "pymatting_bg_color", fallback_bg_color),
+            bg_threshold=known_b_bg_threshold,
+            fg_threshold=known_b_fg_threshold,
+            adaptive=False,
+        )
+        response = _matte_image_pymatting_known_b(
+            known_b_rgb,
             src_path=None,
             output_dir=None,
             qa=False,
             shadow_mode=shadow_mode,
             method=_route_params(params, "pymatting_method", "cf"),
             image_space=_route_params(params, "pymatting_image_space", "linear"),
-            bg_source=_route_params(params, "pymatting_bg_source", "custom"),
-            bg_color=_route_params(params, "pymatting_bg_color", fallback_bg_color),
-            bg_threshold=_route_params(params, "pymatting_bg_threshold", 3.5),
-            fg_threshold=_route_params(params, "pymatting_fg_threshold", 24.0),
+            bg_source="custom",
+            bg_color=known_b_bg,
+            bg_info_override=known_b_bg_info,
+            requested_bg_source=known_b_bg_source,
+            preprocess_info=preprocess_info,
+            bg_threshold=known_b_bg_threshold,
+            fg_threshold=known_b_fg_threshold,
             boundary_band_px=_route_params(params, "pymatting_boundary_band_px", 2),
             adapt_bg_threshold=_route_params(params, "pymatting_adapt_bg_threshold", False),
             adapt_fg_threshold=_route_params(params, "pymatting_adapt_fg_threshold", True),
@@ -640,8 +677,6 @@ def direct_matte_from_decision(
             cg_rtol=_route_params(params, "pymatting_cg_rtol", 1e-6),
             trimap_mode=_route_params(params, "pymatting_trimap_mode", "standard"),
             unknown_grow_px=_route_params(params, "pymatting_unknown_grow_px", 0),
-            input_preprocessed_known_b=_route_params(params, "pymatting_input_preprocessed_known_b", False),
-            input_background_normalization=_route_params(params, "pymatting_background_normalization", None),
             semantic_decision=_route_params(params, "semantic_decision", None),
             user_keep_mask=_route_params(params, "user_keep_mask", None),
             user_remove_mask=_route_params(params, "user_remove_mask", None),

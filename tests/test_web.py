@@ -2080,7 +2080,6 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
 
     assert response.status_code == 200
     assert captured["execution_backend"] == "direct-pymatting-known-b"
-    assert captured["pymatting_input_preprocessed_known_b"] is True
     assert captured["pymatting_bg_source"] == "custom"
     assert captured["pymatting_bg_color"] == (255, 255, 255)
     assert captured["pymatting_bg_threshold"] == 4.5
@@ -2093,7 +2092,8 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
     assert isinstance(route_decision, dict)
     assert route_decision["route"] == "pymatting_known_b"
     assert route_decision["params"]["pymatting_bg_color"] == [255, 255, 255]
-    assert isinstance(captured["pymatting_background_normalization"], dict)
+    assert not any(key.startswith("pymatting_") and "preprocess" in key for key in captured)
+    assert not any(key.startswith("pymatting_") and "normalization" in key for key in captured)
     payload = response.json()
     preprocess_debug = payload["debug"]["input_preprocess"]["known_background_normalization"]
     assert preprocess_debug["selected"] is True
@@ -2136,9 +2136,10 @@ def test_matte_endpoint_manual_known_b_background_repair_preprocesses_before_dir
 
     assert response.status_code == 200
     assert captured["execution_backend"] == "direct-pymatting-known-b"
-    assert captured["pymatting_input_preprocessed_known_b"] is True
     assert captured["pymatting_bg_source"] == "custom"
     assert captured["pymatting_bg_color"] == (0, 200, 0)
+    assert not any(key.startswith("pymatting_") and "preprocess" in key for key in captured)
+    assert not any(key.startswith("pymatting_") and "normalization" in key for key in captured)
     assert "pymatting_normalize_known_background" not in captured
 
 

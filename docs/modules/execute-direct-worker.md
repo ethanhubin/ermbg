@@ -61,17 +61,17 @@ Known-B executor 收到后直接消费，不重建 base trimap。user keep/remov
 
 如果 explicit trimap 缺失或 route 不是 Known-B，执行端才回退到对应路径自己的 builder。
 
-## Known-B Preprocess 传递
+## Known-B Preprocess
 
-Web/Analyze 已应用背景场归一化时，会传入:
+Web/Analyze 在调用 Direct Worker 前完成背景场归一化，并发送归一化后的 RGB 图像。
+Direct Worker 只接收普通 Known-B 执行参数:
 
-- `pymatting_input_preprocessed_known_b=true`;
-- `pymatting_background_normalization={...}`;
 - `pymatting_bg_source=custom`;
 - `pymatting_bg_color`;
 - Known-B thresholds 和 solver params。
 
-Direct Worker executor 必须跳过私有背景归一化。
+Direct Worker executor 不接收、判断或重跑背景归一化。归一化 metadata 只保留在
+preprocess contract / manifest 中。
 
 ## 输出
 

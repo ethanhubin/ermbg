@@ -84,8 +84,6 @@ def matte_image_direct_worker(
     pymatting_cg_rtol: float | None = None,
     pymatting_trimap_mode: str | None = None,
     pymatting_unknown_grow_px: int | None = None,
-    pymatting_input_preprocessed_known_b: bool | None = None,
-    pymatting_background_normalization: dict[str, Any] | None = None,
     route_decision: dict[str, Any] | None = None,
     semantic_decision: dict[str, Any] | None = None,
     user_keep_mask: Any | None = None,
@@ -168,10 +166,6 @@ def matte_image_direct_worker(
         data["pymatting_trimap_mode"] = str(pymatting_trimap_mode)
     if pymatting_unknown_grow_px is not None:
         data["pymatting_unknown_grow_px"] = str(int(pymatting_unknown_grow_px))
-    if pymatting_input_preprocessed_known_b is not None:
-        data["pymatting_input_preprocessed_known_b"] = "true" if pymatting_input_preprocessed_known_b else "false"
-    if pymatting_background_normalization is not None:
-        data["pymatting_background_normalization"] = json.dumps(pymatting_background_normalization)
     if route_decision is not None:
         data["route_decision"] = json.dumps(route_decision)
     if semantic_decision:

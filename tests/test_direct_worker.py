@@ -103,7 +103,7 @@ def test_matte_corridorkey_direct_uses_fake_client_without_comfy():
     assert np.allclose(calls[0]["hint_alpha"], 0.32)
 
 
-def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():
+def test_matte_corridorkey_direct_uses_default_prior_for_shaped_profiles():
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     alpha = np.ones(rgb.shape[:2], dtype=np.float32)
     calls: list[dict[str, object]] = []
@@ -115,9 +115,7 @@ def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():
                 rgba=_rgba(image_srgb, alpha),
                 alpha=alpha,
                 foreground_srgb=image_srgb.copy(),
-                hint_alpha=np.zeros(alpha.shape, dtype=np.float32)
-                if kwargs["hint_alpha"] is None
-                else kwargs["hint_alpha"],
+                hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha,
                 color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
@@ -136,9 +134,85 @@ def test_matte_corridorkey_direct_keeps_known_bg_hint_for_shaped_profiles():
         corridorkey_client=FakeClient(),
     )
 
-    assert calls[0]["hint_alpha"] is None
-    assert calls[0]["hint_source"] is None
+    assert calls[0]["hint_source"] == "default_full_frame_soft_prior_corridorkey_hint"
+    assert np.allclose(calls[0]["hint_alpha"], 0.32)
     assert calls[0]["execution_profile"] == "corridorkey-shaped-icon"
+
+
+def test_matte_corridorkey_direct_uses_character_prior_when_auto_mask_is_disabled_by_auto_profile():
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha,
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=kwargs["hint_alpha"],
+                raw_alpha=alpha,
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "green",
+            "background_color": [0, 200, 0],
+            "parameter_profile": "edge_cleanup",
+        },
+        params={
+            "corridorkey_auto_mask": False,
+            "corridorkey_preset": "auto",
+            "execution_profile": "corridorkey-character",
+        },
+        bg_color=(0, 200, 0),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert calls[0]["hint_source"] == "character_full_frame_soft_prior_corridorkey_hint"
+    assert np.allclose(calls[0]["hint_alpha"], 0.32)
+    assert calls[0]["execution_profile"] == "corridorkey-character"
+
+
+def test_matte_corridorkey_direct_uses_effect_prior_for_effect_profile():
+    rgb = np.full((2, 3, 3), (0, 37, 252), dtype=np.uint8)
+    alpha = np.ones(rgb.shape[:2], dtype=np.float32)
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def matte(self, image_srgb, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                rgba=_rgba(image_srgb, alpha),
+                alpha=alpha,
+                foreground_srgb=image_srgb.copy(),
+                hint_alpha=kwargs["hint_alpha"],
+                raw_alpha=alpha,
+                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
+                debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
+            )
+
+    direct_worker.matte_corridorkey_direct(
+        rgb,
+        corridorkey_analysis={
+            "screen_mode": "blue",
+            "background_color": [0, 37, 252],
+            "parameter_profile": "screen_tinted_translucency",
+        },
+        params={"corridorkey_auto_mask": True},
+        bg_color=(0, 37, 252),
+        shadow_mode="off",
+        corridorkey_client=FakeClient(),
+    )
+
+    assert calls[0]["hint_source"] == "effect_full_frame_soft_prior_corridorkey_hint"
+    assert np.allclose(calls[0]["hint_alpha"], 0.32)
+    assert calls[0]["execution_profile"] == "corridorkey-effect-icon"
 
 
 def test_matte_corridorkey_direct_applies_user_masks_after_model():

@@ -51,6 +51,27 @@ def _translucent_badge_like_image() -> np.ndarray:
     return np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
 
 
+def _white_bg_colored_badge_with_shadow() -> np.ndarray:
+    h = w = 160
+    image = np.full((h, w, 3), 253, dtype=np.uint8)
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx = cy = 80
+    dist = np.sqrt((xx - (cx + 6)) ** 2 + (yy - (cy + 8)) ** 2)
+    strength = np.clip((58.0 - dist) / 18.0, 0.0, 1.0) * 0.55
+    shadow = strength > 0.04
+    image[shadow] = np.clip(
+        image[shadow].astype(np.float32) * (1.0 - strength[shadow, None]),
+        0,
+        255,
+    ).astype(np.uint8)
+    r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    ring = (r2 <= 45**2) & (r2 >= 38**2)
+    body = r2 < 38**2
+    image[ring] = (245, 112, 4)
+    image[body] = (20, 155, 38)
+    return image
+
+
 def _decode_preview_luma(data_url: str) -> np.ndarray:
     raw = base64.b64decode(data_url.split(",", 1)[1])
     return np.asarray(Image.open(io.BytesIO(raw)).convert("L"), dtype=np.uint8)
@@ -175,6 +196,31 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert "candidate:protect_near_bg_subject:hint" not in result.preview_assets
 
 
+def test_analyze_known_b_connected_shadow_is_resolved_by_default_trimap() -> None:
+    result = analyze_candidates(_white_bg_colored_badge_with_shadow())
+
+    assert result.status == "ready"
+    assert result.default_candidate_id == "auto_default"
+    assert [candidate.id for candidate in result.candidates] == ["auto_default"]
+    assert result.candidates[0].decision == {"policy": "auto_default"}
+    assert all(region.type != "connected_known_b_shadow_ownership" for region in result.ambiguity_regions)
+
+    default_meta = result.preview_assets[result.candidates[0].preview["assets"]["trimap"]]["metadata"]
+    assembly = default_meta["candidate_assembly"]
+    assert assembly["neutral_shadow_conflict_unknown_pixels"] > 0
+    assert assembly["shadow_background"]["unknown_ownership_pixels"] == assembly["shadow_background"]["pixels"]
+    assert assembly["bg_seed_outline"]["shadow_inward_unknown_pixels"] > 0
+
+
+def test_analyze_dark_subject_on_white_is_not_connected_shadow_candidate() -> None:
+    image = np.full((128, 192, 3), 253, dtype=np.uint8)
+    cv2.putText(image, "A", (45, 90), cv2.FONT_HERSHEY_SIMPLEX, 2.2, (40, 40, 40), 8, cv2.LINE_AA)
+
+    result = analyze_candidates(image)
+
+    assert all(region.type != "connected_known_b_shadow_ownership" for region in result.ambiguity_regions)
+
+
 def test_analyze_tight_background_match_allows_smaller_hole_components() -> None:
     image = np.full((512, 512, 3), 255, dtype=np.uint8)
     cv2.rectangle(image, (120, 120), (392, 392), (90, 130, 40), -1)
@@ -253,8 +299,8 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         "pymatting_known_b",
         "corridorkey",
     }
-    # Temporary strategy: CorridorKey defaults to a full-frame zero hint and
-    # exposes no feature-hint ambiguity regions or candidates.
+    # CorridorKey defaults to a full-frame 0.32 soft prior and exposes no
+    # feature-hint ambiguity regions or candidates.
     assert [
         region.type
         for region in result.ambiguity_regions
@@ -287,8 +333,8 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
     assert result.route["algorithm"] == "corridorkey"
     assert result.route["execution_profile"] == "corridorkey-character"
     assert result.default_candidate_id == "route_corridorkey__auto_default"
-    # Temporary strategy: CorridorKey emits no feature-hint regions or candidates;
-    # the default is a plain auto_default that resolves to a full-frame zero hint.
+    # CorridorKey emits no feature-hint regions or candidates; the default is a
+    # plain auto_default that resolves to a full-frame 0.32 soft prior.
     corridorkey_regions = [
         region
         for region in result.ambiguity_regions

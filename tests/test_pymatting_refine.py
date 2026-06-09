@@ -39,21 +39,11 @@ def _matte_known_b_after_background_repair(
     **kwargs,
 ):
     image = np.asarray(Image.open(image_or_path).convert("RGB"), dtype=np.uint8) if isinstance(image_or_path, Path) else image_or_path
-    normalized, decision = repair_known_background_preprocess(
-        image,
-        bg_color,
-        bg_threshold=float(kwargs.get("pymatting_bg_threshold", 3.5)),
-        fg_threshold=float(kwargs.get("pymatting_fg_threshold", 24.0)),
-        adaptive=False,
-    )
-    normalization = dict(decision.metadata.get("known_background_normalization") or {})
     return matte_image(
-        normalized,
+        image,
         backend="pymatting-known-b",
         pymatting_bg_source="custom",
         pymatting_bg_color=bg_color,
-        pymatting_input_preprocessed_known_b=True,
-        pymatting_background_normalization=normalization,
         **kwargs,
     )
 
@@ -510,6 +500,47 @@ def test_known_background_trimap_keeps_weak_known_b_shadow_tail_unknown():
     assert trimap.unknown[weak_tail].mean() > 0.95
     assert trimap.sure_bg[weak_tail].mean() == 0.0
     assert trimap.sure_fg[weak_tail].mean() == 0.0
+
+
+def test_known_background_trimap_promotes_light_neutral_connected_shadow_conflict_to_unknown():
+    bg = np.array([253, 253, 253], dtype=np.uint8)
+    h = w = 160
+    image = np.full((h, w, 3), bg, dtype=np.uint8)
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx = cy = 80
+    dist = np.sqrt((xx - (cx + 6)) ** 2 + (yy - (cy + 8)) ** 2)
+    strength = np.clip((58.0 - dist) / 18.0, 0.0, 1.0) * 0.55
+    cast_shadow = strength > 0.04
+    image[cast_shadow] = np.clip(
+        image[cast_shadow].astype(np.float32) * (1.0 - strength[cast_shadow, None]),
+        0,
+        255,
+    ).astype(np.uint8)
+    r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    ring = (r2 <= 45**2) & (r2 >= 38**2)
+    body = r2 < 38**2
+    image[ring] = (245, 112, 4)
+    image[body] = (20, 155, 38)
+    visible_shadow = cast_shadow & ~(ring | body)
+
+    trimap, info = build_known_background_trimap(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        boundary_band_px=2,
+    )
+
+    # Mechanism: on light neutral known-B, a connected scalar cast shadow can be
+    # darker than the FG seed threshold. If part of that component is already
+    # exterior shadow and it borders a separate colored material core, the whole
+    # visible scalar component should feed the unknown domain before outline
+    # tracing, not remain sure-FG.
+    assert info["neutral_shadow_conflict_unknown_pixels"] > 0
+    assert info["shadow_background"]["unknown_ownership_pixels"] == info["shadow_background"]["pixels"]
+    assert info["bg_seed_outline"]["shadow_inward_unknown_pixels"] > 0
+    assert trimap.unknown[visible_shadow].mean() > 0.98
+    assert trimap.sure_fg[visible_shadow].mean() == 0.0
 
 
 def test_known_background_subject_transition_requires_strong_shadow_anchor():

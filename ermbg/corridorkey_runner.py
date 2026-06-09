@@ -202,10 +202,14 @@ class LocalCorridorKeyClient:
         execution_profile: str = "auto",
     ) -> Any:
         if hint_alpha is None:
-            from .probe.comfyui_corridorkey import build_corridorkey_hint
+            from .corridorkey_hint import corridorkey_full_frame_prior_value
 
-            hint_alpha = build_corridorkey_hint(image_srgb, background_color)
-            hint_source = hint_source or "known_bg_chromatic_key_eroded_blur"
+            prior_value, prior_kind = corridorkey_full_frame_prior_value(
+                execution_profile=str(execution_profile),
+                screen_mode=str(screen_color),
+            )
+            hint_alpha = np.full(image_srgb.shape[:2], prior_value, dtype=np.float32)
+            hint_source = hint_source or f"default_full_frame_{prior_kind}_corridorkey_hint"
         else:
             hint_source = hint_source or "provided_alpha_hint"
 

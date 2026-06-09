@@ -55,15 +55,10 @@ def corridorkey_full_frame_prior_value(
     execution_profile: str,
     screen_mode: str,
 ) -> tuple[float, str]:
-    """Return the literal full-frame CorridorKey hint value for a route profile."""
+    """Return the default full-frame CorridorKey soft-prior hint value."""
 
-    if execution_profile == "corridorkey-character":
-        return 0.32, "soft_prior"
-    if execution_profile == "corridorkey-transparent-button" and screen_mode != "green":
-        return 0.0, "zero_prior"
-    if screen_mode == "green":
-        return 0.32, "soft_prior"
-    return 0.0, "zero_prior"
+    _ = (execution_profile, screen_mode)
+    return 0.32, "soft_prior"
 
 
 def _smooth_mask(mask: np.ndarray, *, sigma: float = 3.0) -> np.ndarray:

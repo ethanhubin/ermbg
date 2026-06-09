@@ -54,7 +54,6 @@ def _result(rgb: np.ndarray, *, execution_profile: str = "pymatting-hard-button"
         debug={
             "trimap_u8": trimap,
             "pymatting_known_b": {
-                "background_normalization": {"applied": True},
                 "trimap": {"unknown_pixels": int(trimap.size)},
                 "parameters": {"fg_threshold": 24.0},
             },
@@ -362,8 +361,6 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
             "pymatting_bg_color": "1,2,3",
             "pymatting_bg_threshold": "4.5",
             "pymatting_fg_threshold": "28",
-            "pymatting_input_preprocessed_known_b": "true",
-            "pymatting_background_normalization": json.dumps({"applied": True, "source": "preprocess"}),
         },
     )
 
@@ -372,8 +369,8 @@ def test_direct_worker_server_accepts_known_b_preprocess_contract(monkeypatch):
     assert captured["pymatting_bg_color"] == (1, 2, 3)
     assert captured["pymatting_bg_threshold"] == 4.5
     assert captured["pymatting_fg_threshold"] == 28.0
-    assert captured["pymatting_input_preprocessed_known_b"] is True
-    assert captured["pymatting_background_normalization"] == {"applied": True, "source": "preprocess"}
+    assert not any(key.startswith("pymatting_") and "preprocess" in key for key in captured)
+    assert not any(key.startswith("pymatting_") and "normalization" in key for key in captured)
 
 
 def test_direct_worker_server_accepts_explicit_candidate_trimap(monkeypatch):

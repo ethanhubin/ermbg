@@ -5,6 +5,7 @@ import numpy as np
 
 from ermbg.corridorkey_hint import (
     build_corridorkey_hint_plan,
+    corridorkey_full_frame_prior_value,
     corridorkey_hint_diagnostic_variants,
     corridorkey_hint_variants,
     detect_corridorkey_hint_features,
@@ -44,6 +45,24 @@ def test_corridorkey_hint_features_are_position_agnostic() -> None:
     ys, xs = np.nonzero(features.translucent_candidate)
     assert xs.mean() > 70
     assert ys.mean() < 70
+
+
+def test_corridorkey_full_frame_prior_is_global_soft_prior() -> None:
+    profiles = [
+        "auto",
+        "corridorkey-character",
+        "corridorkey-transparent-button",
+        "corridorkey-effect-icon",
+        "corridorkey-shaped-icon",
+    ]
+
+    for profile in profiles:
+        value, kind = corridorkey_full_frame_prior_value(
+            execution_profile=profile,
+            screen_mode="green",
+        )
+        assert value == 0.32
+        assert kind == "soft_prior"
 
 
 def test_corridorkey_hint_variants_have_ordered_translucent_support() -> None:

@@ -784,8 +784,6 @@ def _apply_known_b_background_repair(
     normalization = dict(decision.metadata.get("known_background_normalization") or {})
     normalization["background_model"] = background_info
     execution_params = {
-        "pymatting_input_preprocessed_known_b": True,
-        "pymatting_background_normalization": normalization,
         "pymatting_bg_source": "custom",
         "pymatting_bg_color": background,
         "pymatting_bg_threshold": bg_threshold,
@@ -4515,8 +4513,6 @@ def _run_web_backend(
             "pymatting_cg_rtol",
             "pymatting_trimap_mode",
             "pymatting_unknown_grow_px",
-            "pymatting_input_preprocessed_known_b",
-            "pymatting_background_normalization",
             "pymatting_explicit_trimap",
         )
         if direct_execution_backend == "direct-pymatting-known-b":

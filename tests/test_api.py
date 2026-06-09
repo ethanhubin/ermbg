@@ -112,30 +112,20 @@ def test_matte_image_pymatting_known_b_accepts_parameters():
     assert params["cg_rtol"] == 1e-5
 
 
-def test_matte_image_pymatting_known_b_skips_private_normalization_when_preprocessed(monkeypatch):
-    import ermbg.pymatting_refine as refine
-
+def test_matte_image_pymatting_known_b_runs_preprocess_before_executor():
     img = _solid_green_with_red_subject()
-    normalization = {"applied": True, "source": "test_preprocess"}
-
-    def fail_normalize(*args, **kwargs):
-        raise AssertionError("executor should not rerun Known-B background normalization")
-
-    monkeypatch.setattr(refine, "normalize_known_background_field", fail_normalize)
+    img[0, 0] = (0, 199, 0)
 
     r = matte_image(
         img,
         backend="pymatting-known-b",
         pymatting_bg_source="custom",
         pymatting_bg_color=(0, 200, 0),
-        pymatting_input_preprocessed_known_b=True,
-        pymatting_background_normalization=normalization,
     )
 
-    background_normalization = r.debug["pymatting_known_b"]["background_normalization"]
-    assert background_normalization["source"] == "test_preprocess"
-    assert background_normalization["executor_skipped"] is True
-    assert background_normalization["skip_reason"] == "already_normalized_by_preprocess"
+    preprocess = r.debug["input_preprocess"]["known_background_normalization"]
+    assert preprocess["enabled"] is True
+    assert "background_normalization" not in r.debug["pymatting_known_b"]
 
 
 def test_matte_image_pymatting_known_b_consumes_semantic_decision():
@@ -357,23 +347,11 @@ def test_pymatting_known_b_shadow_patch_arbitrates_subject_edge_aa_before_shadow
         Path(__file__).resolve().parents[1]
         / "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png"
     )
-    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
-    normalized, preprocess_decision = repair_known_background_preprocess(
-        image,
-        (1, 94, 246),
-        bg_threshold=3.5,
-        fg_threshold=24.0,
-        adaptive=False,
-    )
-    normalization = dict(preprocess_decision.metadata.get("known_background_normalization") or {})
-
     result = matte_image(
-        normalized,
+        path,
         backend="pymatting-known-b",
         pymatting_bg_source="custom",
         pymatting_bg_color=(1, 94, 246),
-        pymatting_input_preprocessed_known_b=True,
-        pymatting_background_normalization=normalization,
         shadow_mode="on",
     )
 
