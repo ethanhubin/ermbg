@@ -55,7 +55,6 @@ def main() -> None:
     parser.add_argument("--refiner-strength", type=float, default=1.0)
     parser.add_argument("--auto-despeckle", default="Off")
     parser.add_argument("--despeckle-size", type=int, default=64)
-    parser.add_argument("--color-protection", action="store_true")
     parser.add_argument("--prefer-processor", action="store_true")
     args = parser.parse_args()
 
@@ -82,7 +81,6 @@ def main() -> None:
         refiner_strength=args.refiner_strength,
         auto_despeckle=args.auto_despeckle,
         despeckle_size=args.despeckle_size,
-        apply_color_protection=bool(args.color_protection),
         execution_profile="corridorkey-character",
     )
 
@@ -93,7 +91,6 @@ def main() -> None:
     _save_mask(out_dir / "hint.png", result.hint_alpha)
     _save_mask(out_dir / "alpha.png", result.alpha)
     _save_mask(out_dir / "raw_alpha.png", result.raw_alpha)
-    _save_mask(out_dir / "color_protection_alpha.png", result.color_protection_alpha)
 
     alpha_u8 = result.rgba[..., 3]
     summary: dict[str, Any] = {
@@ -107,7 +104,6 @@ def main() -> None:
             "foreground": "foreground.png",
             "hint": "hint.png",
             "checker": "checker.png",
-            "color_protection_alpha": "color_protection_alpha.png",
         },
         "alpha": {
             "mean": float(result.alpha.mean()),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,6 +166,38 @@ def test_direct_worker_server_matte_endpoint(monkeypatch):
     assert "rgba_png_base64" not in payload
     assert "trimap_png_base64" not in payload
     assert payload["server_elapsed_sec"] >= 0.0
+
+
+def test_direct_worker_server_includes_corridorkey_hint_image(monkeypatch):
+    rgb = np.full((4, 5, 3), (0, 200, 0), dtype=np.uint8)
+    hint = np.zeros(rgb.shape[:2], dtype=np.float32)
+    hint[1:3, 2:4] = 1.0
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        result = _result(prepared.rgb, execution_profile="corridorkey-shaped-icon")
+        result.response.debug["corridorkey_hint"] = hint
+        result.metadata["algorithm"] = "corridorkey"
+        result.metadata["execution_backend"] = "direct-corridorkey"
+        result.metadata["route"] = "corridorkey"
+        return result
+
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={"include_image": "true"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["execution_backend"] == "direct-corridorkey"
+    encoded = payload["corridorkey_hint_png_base64"]
+    decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(encoded))).convert("L"), dtype=np.uint8)
+    assert decoded[1, 2] == 255
+    assert decoded[0, 0] == 0
 
 
 def test_direct_worker_server_routes_with_uploaded_source_alpha(monkeypatch):
@@ -474,11 +508,7 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
             "corridorkey_auto_despeckle": "Off",
             "corridorkey_despeckle_size": "64",
             "corridorkey_auto_mask": "true",
-            "corridorkey_color_protection": "false",
-            "corridorkey_protection_bg_max": "6",
-            "corridorkey_protection_fg_min": "14",
             "corridorkey_preset": "detail_safe",
-            "corridorkey_hard_ui_hint_mode": "translucent_button",
         },
     )
 
@@ -491,11 +521,9 @@ def test_direct_worker_server_matte_endpoint_can_force_corridorkey(monkeypatch):
     assert captured["params"]["corridorkey_auto_despeckle"] == "Off"
     assert captured["params"]["corridorkey_despeckle_size"] == 64
     assert captured["params"]["corridorkey_auto_mask"] is True
-    assert captured["params"]["corridorkey_color_protection"] is False
-    assert captured["params"]["corridorkey_protection_bg_max"] == 6.0
-    assert captured["params"]["corridorkey_protection_fg_min"] == 14.0
     assert captured["params"]["corridorkey_preset"] == "detail_safe"
-    assert captured["params"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    assert "corridorkey_hard_ui_hint_mode" not in captured["params"]
+    assert "corridorkey_color_protection" not in captured["params"]
     payload = response.json()
     assert payload["algorithm"] == "corridorkey"
     assert payload["execution_backend"] == "direct-corridorkey"
@@ -685,9 +713,6 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
             params={
                 "execution_profile": "corridorkey-shaped-icon",
                 "corridorkey_auto_mask": True,
-                "corridorkey_hard_ui_hint_mode": "translucent_button",
-                "corridorkey_protection_bg_max": 4.0,
-                "corridorkey_protection_fg_min": 10.0,
             },
             confidence=1.0,
             reasons=["test"],
@@ -714,11 +739,11 @@ def test_direct_worker_server_omitted_corridorkey_forms_preserve_route_params(mo
 
     assert response.status_code == 200
     assert captured["params"]["corridorkey_auto_mask"] is True
-    assert captured["params"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    assert "corridorkey_hard_ui_hint_mode" not in captured["params"]
     assert "corridorkey_screen_mode" not in captured["params"]
     assert "corridorkey_preset" not in captured["params"]
-    assert captured["params"]["corridorkey_protection_bg_max"] == 4.0
-    assert captured["params"]["corridorkey_protection_fg_min"] == 10.0
+    assert "corridorkey_protection_bg_max" not in captured["params"]
+    assert "corridorkey_protection_fg_min" not in captured["params"]
 
 
 def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):

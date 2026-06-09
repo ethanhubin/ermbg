@@ -40,9 +40,7 @@ def test_direct_worker_client_omits_unspecified_corridorkey_overrides(monkeypatc
     assert captured["url"] == "http://worker.test/matte"
     assert "corridorkey_screen_mode" not in captured["data"]
     assert "corridorkey_preset" not in captured["data"]
-    assert "corridorkey_hard_ui_hint_mode" not in captured["data"]
     assert "corridorkey_auto_mask" not in captured["data"]
-    assert "corridorkey_protection_bg_max" not in captured["data"]
     assert "corridorkey_gamma_space" not in captured["data"]
 
 
@@ -92,16 +90,12 @@ def test_direct_worker_client_sends_explicit_corridorkey_overrides(monkeypatch):
         np.zeros((2, 3, 3), dtype=np.uint8),
         direct_worker_url="http://worker.test",
         corridorkey_auto_mask=False,
-        corridorkey_protection_bg_max=6.0,
         corridorkey_gamma_space="Linear",
         corridorkey_screen_mode="blue",
         corridorkey_preset="detail_safe",
-        corridorkey_hard_ui_hint_mode="translucent_button",
     )
 
     assert captured["data"]["corridorkey_auto_mask"] == "false"
-    assert captured["data"]["corridorkey_protection_bg_max"] == "6.0"
     assert captured["data"]["corridorkey_gamma_space"] == "Linear"
     assert captured["data"]["corridorkey_screen_mode"] == "blue"
     assert captured["data"]["corridorkey_preset"] == "detail_safe"
-    assert captured["data"]["corridorkey_hard_ui_hint_mode"] == "translucent_button"

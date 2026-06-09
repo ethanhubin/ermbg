@@ -73,6 +73,25 @@ def _checker_png_bytes(size: int = 96, tile: int = 12) -> bytes:
     return buf.getvalue()
 
 
+def _transparent_sheet_png_bytes() -> bytes:
+    rgba = np.zeros((64, 96, 4), dtype=np.uint8)
+    yy, xx = np.indices((64, 96))
+    rgba[..., :3] = np.where(
+        (((xx // 8 + yy // 8) & 1).astype(bool))[..., None],
+        np.array([254, 254, 254], dtype=np.uint8),
+        np.array([243, 243, 243], dtype=np.uint8),
+    )
+    rgba[10:28, 12:34, :3] = [220, 30, 30]
+    rgba[10:28, 12:34, 3] = 255
+    rgba[10:28, 11, :3] = [220, 30, 30]
+    rgba[10:28, 11, 3] = 96
+    rgba[34:54, 58:84, :3] = [30, 80, 230]
+    rgba[34:54, 58:84, 3] = 255
+    buf = BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _mask_png_bytes() -> bytes:
     mask = np.zeros((16, 16), dtype=np.uint8)
     mask[4:12, 4:12] = 255
@@ -131,6 +150,10 @@ def test_index_serves_upload_ui():
     assert "height: calc(100vh - 56px)" in response.text
     assert ".preview { min-height: 0; height: 100%; display: grid; grid-template-rows: 48px auto minmax(0, 1fr) 56px;" in response.text
     assert ".candidate-panel { min-height: 0; display: grid; grid-template-columns: 1fr;" in response.text
+    assert ".candidate-list { min-width: 0; display: grid; grid-template-columns: 1fr; grid-auto-rows: 64px;" in response.text
+    assert "max-height: var(--candidate-list-max-height, 50vh)" in response.text
+    assert ".candidate-list { max-height: none; overflow-y: visible; }" in response.text
+    assert ".candidate-tab { width: 100%; min-width: 0; height: 64px; min-height: 64px; max-height: 64px;" in response.text
     assert ".confirm-matte { flex: 0 0 112px; width: 112px; min-width: 112px; max-width: 112px; height: 36px; min-height: 36px; max-height: 36px;" in response.text
     assert ".preview-actions { height: 56px; min-height: 56px; max-height: 56px;" in response.text
     assert ".preview-statuses { min-width: 0; flex: 1 1 auto; overflow: hidden; }" in response.text
@@ -178,6 +201,13 @@ def test_index_serves_upload_ui():
     assert "function serverSemanticPreviewAsset(candidate, mode)" in response.text
     assert "function semanticPreviewKind(candidate)" in response.text
     assert "function semanticCandidateDisplayLabel(candidate, fallback)" in response.text
+    assert "function syncCandidateListHeight()" in response.text
+    assert "window.innerHeight - rect.top - bottomInset" in response.text
+    assert 'window.addEventListener("resize", () => { layoutMaskCanvas(); syncCandidateListHeight(); })' in response.text
+    assert "async function hintOverlayDataUrl(hintDataUrl, maxSide = 0)" in response.text
+    assert "const alpha = Math.min(0.58, value * 0.55);" in response.text
+    assert "const overlayPreview = await hintOverlayDataUrl(serverPreview);" in response.text
+    assert "applySemanticThumbnailPreview(img, candidate);" in response.text
     assert "function executionAnalysisPayload(payload, selectedCandidate)" in response.text
     assert "selectedTrimapAsset ? { [selectedTrimapRef]: selectedTrimapAsset } : {}" in response.text
     assert "copy.preview = { assets: { trimap: selectedTrimapRef } };" in response.text
@@ -231,11 +261,8 @@ def test_index_serves_upload_ui():
     assert 'name="corridorkey_preset"' in response.text
     assert 'name="corridorkey_despill_strength"' in response.text
     assert 'name="corridorkey_auto_mask"' in response.text
-    assert 'id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled' in response.text
-    assert '<option value="full_frame_zero">全黑 hint</option>' in response.text
-    assert '<option value="translucent_button">玻璃/半透明</option>' in response.text
-    assert 'function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }' in response.text
-    assert 'autoMask.addEventListener("change", () => syncAutoMaskControls());' in response.text
+    assert 'name="corridorkey_hard_ui_hint_mode"' not in response.text
+    assert 'name="corridorkey_color_protection"' not in response.text
     assert 'id="sam-mask-button"' in response.text
     assert '<button id="sam-mask-button" type="button">Sam3</button>' in response.text
     assert '"/api/sam-mask"' in response.text
@@ -254,7 +281,7 @@ def test_index_serves_upload_ui():
     assert "loadMaskOverlay(payload.mask)" in response.text
     assert "maskDirty = false;" in response.text
     assert "maskDirty = true;" in response.text
-    assert 'autoMask.addEventListener("change", () => syncAutoMaskControls());' in response.text
+    assert "syncAutoMaskControls" not in response.text
     assert 'samMaskButton.addEventListener("click", () => generateSamMask());' in response.text
     assert 'setPreviewView("mask")' in response.text
     assert 'let activeView = "mask";' in response.text
@@ -266,7 +293,7 @@ def test_index_serves_upload_ui():
     assert "const removePixel = pixels.data[i] > pixels.data[i + 2];" in response.text
     assert 'const shouldUseCustomMask = backend.value === "corridorkey" && !autoMask.checked && userMasks.keep;' in response.text
     assert 'formData.append("corridorkey_hint_mask", userMasks.keep)' in response.text
-    assert 'name="corridorkey_protection_bg_max"' in response.text
+    assert 'name="corridorkey_protection_bg_max"' not in response.text
     assert "syncBackendSettings()" in response.text
     assert 'canvas.addEventListener("wheel"' in response.text
     assert 'canvas.addEventListener("pointerdown"' in response.text
@@ -446,7 +473,11 @@ def test_slice_page_serves_slice_mode_entry():
     assert '"/api/slice-crops"' in response.text
     assert "候选结果" not in response.text
     assert 'sessionStorage.setItem("ermbgPendingSlice"' in response.text
-    assert 'sessionStorage.setItem("ermbgBatchQueue"' in response.text
+    assert "sessionStorage.setItem(BATCH_QUEUE_STORAGE_KEY, JSON.stringify(payload))" in response.text
+    assert 'const BATCH_QUEUE_DB_NAME = "ermbgBatchQueueDb"' in response.text
+    assert "async function saveBatchQueuePayload(payload)" in response.text
+    assert "await putBatchQueueDb(db, payload)" in response.text
+    assert "delete slim.crops;" in response.text
     assert 'id="batch-all"' in response.text
     assert 'id="batch-selected"' not in response.text
     assert 'id="matte-selected"' not in response.text
@@ -454,11 +485,13 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'id="preview-button"' in response.text
     assert '<button id="preview-button" type="button" disabled>预览</button>' in response.text
     assert '<button id="confirm" type="button" disabled>切图</button>' in response.text
+    assert '<button id="download-slices" class="wide-action" type="button" disabled>批量下载切图</button>' in response.text
     assert '<label>边距<input id="padding" type="number" min="0" step="1" value="4"></label>' in response.text
     assert 'data.append("padding", padding.value || "4")' in response.text
     assert ".background-repair-field { grid-column: 1; }" in response.text
     assert ".slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }" in response.text
     assert ".slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }" in response.text
+    assert ".slice-actions-main .wide-action { grid-column: 1 / -1; }" in response.text
     assert 'const SLICE_STATE_KEY = "ermbgSliceWorkspace"' in response.text
     assert "restoreSliceState()" in response.text
     assert ".thumb img { display: block; width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain;" in response.text
@@ -471,11 +504,17 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'padding.addEventListener("change", invalidatePreview)' in response.text
     assert 'minArea.addEventListener("change", invalidatePreview)' in response.text
     assert 'previewButton.addEventListener("click"' in response.text
+    assert 'downloadSlices.addEventListener("click"' in response.text
+    assert 'fetch("/api/slice", { method: "POST", body: formData() })' in response.text
+    assert 'link.download = `${stem}_slices.zip`' in response.text
+    assert "URL.revokeObjectURL(url);" in response.text
+    assert "}, 30000);" in response.text
     assert "function setSliceBusy(isBusy)" in response.text
     assert "function setTransferBusy(isBusy)" in response.text
     assert "setSliceBusy(true)" in response.text
     assert "setTransferBusy(true)" in response.text
     assert "function setBusy(isBusy)" not in response.text
+    assert "downloadSlices.disabled = isBusy || !file.files.length;" in response.text
     assert "batchAll.disabled = isBusy || !currentCrops.length;" in response.text
     assert "previewButton.disabled = isBusy || !file.files.length;" in response.text
     assert "confirmButton.disabled = isBusy || !hasPreview;" in response.text
@@ -526,8 +565,13 @@ def test_batch_page_serves_batch_queue_entry():
     assert 'fetch("/api/execute-candidate"' in response.text
     assert 'executeFormData.append("selected_candidate_id"' in response.text
     assert 'executeFormData.append("analysis_payload", JSON.stringify(executionAnalysisPayload(analysisPayload, semanticCandidate)))' in response.text
+    assert "function executionAnalysisPayload(payload, selectedCandidate)" in response.text
+    assert "delete copy.preview;" in response.text
     assert '"/api/batch-results.zip"' in response.text
-    assert 'sessionStorage.getItem("ermbgBatchQueue")' in response.text
+    assert "sessionStorage.getItem(BATCH_QUEUE_STORAGE_KEY)" in response.text
+    assert 'const BATCH_QUEUE_DB_NAME = "ermbgBatchQueueDb"' in response.text
+    assert "async function loadBatchQueuePayload()" in response.text
+    assert "const payload = await getBatchQueueDb(db)" in response.text
     assert '<option value="auto" selected>Auto Route</option>' in response.text
     assert 'executeFormData.append("backend", backend.value || "auto")' in response.text
     assert 'id="lightbox"' in response.text
@@ -644,6 +688,9 @@ def test_game_eval_page_serves_result_table():
     assert 'class="compare-bg-button bg-black"' in response.text
     assert 'class="compare-bg-button bg-checker"' in response.text
     assert 'compareButton.textContent = "比较"' in response.text
+    assert "function previewUrlForColumn(caseItem, column)" in response.text
+    assert 'caseItem.maskHintUrl || caseItem.trimapUrl || ""' in response.text
+    assert "function previewTagForColumn(caseItem, column)" in response.text
     assert 'Mask Hint' in response.text
     assert 'corridorkey Raw Alpha' in response.text
     assert 'corridorkey Forground' in response.text
@@ -999,6 +1046,75 @@ def test_game_eval_discovers_fixed_direct_execution_backend_summary(monkeypatch,
     assert status["status"] == "complete"
     assert status["progress"]["completed"] == 1
     assert status["progress"]["total"] == 1
+
+
+def test_game_eval_corridorkey_marks_hint_for_trimap_column(monkeypatch, tmp_path):
+    import ermbg.web as web
+
+    sample_root = tmp_path / "samples" / "corridorkey_semantic" / "button" / "case"
+    sample_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (0, 200, 0)).save(sample_root / "green.png")
+    (tmp_path / "samples" / "corridorkey_semantic" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "id": "case",
+                        "sample_id": "B001",
+                        "category": "button",
+                        "green": "samples/corridorkey_semantic/button/case/green.png",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    case_root = tmp_path / "out" / "direct_worker_corridorkey" / "B001_case_green"
+    case_root.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(case_root / "rgba.png")
+    Image.new("L", (8, 8), 128).save(case_root / "trimap.png")
+    Image.new("L", (8, 8), 255).save(case_root / "corridorkey_hint.png")
+    summary_path = case_root.parent / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "backend": "direct-worker",
+                "run_count": 1,
+                "case_count": 1,
+                "ok_count": 1,
+                "runs": [
+                    {
+                        "status": "ok",
+                        "case": "B001_case_green",
+                        "sample_id": "B001",
+                        "input": "samples/corridorkey_semantic/button/case/green.png",
+                        "backend": "direct-corridorkey",
+                        "remote_debug": {
+                            "direct_worker": {
+                                "algorithm": "corridorkey",
+                                "execution_backend": "direct-corridorkey",
+                                "route": "corridorkey",
+                            }
+                        },
+                        "outputs": {
+                            "rgba": "out/direct_worker_corridorkey/B001_case_green/rgba.png",
+                            "trimap": "out/direct_worker_corridorkey/B001_case_green/trimap.png",
+                            "hint": "out/direct_worker_corridorkey/B001_case_green/corridorkey_hint.png",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(web, "PROJECT_ROOT", tmp_path)
+    data = web._game_eval_data_from_comfy_ermbg_summary(case_root.parent, summary_path)
+
+    case = data["cases"][0]
+    assert case["isCorridorKey"] is True
+    assert case["trimapUrl"] == "/eval/game/file/out/direct_worker_corridorkey/B001_case_green/trimap.png"
+    assert case["maskHintUrl"] == "/eval/game/file/out/direct_worker_corridorkey/B001_case_green/corridorkey_hint.png"
 
 
 def test_game_eval_running_progress_counts_partial_summaries(monkeypatch, tmp_path):
@@ -2331,6 +2447,66 @@ def test_slice_preview_checkerboard_preprocess_is_explicit_opt_in():
     assert payload["preprocess"]["checkerboard"]["background_color"] == [254, 254, 254]
 
 
+def test_preprocess_analysis_skips_background_repair_for_source_alpha():
+    client = TestClient(app)
+    response = client.post(
+        "/api/preprocess-analysis",
+        files={"file": ("transparent.png", _transparent_sheet_png_bytes(), "image/png")},
+        data={"background_repair": "true"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected"] == []
+    assert payload["applied"] == []
+    assert payload["checkerboard"]["skipped"] is True
+    assert payload["checkerboard"]["reason"] == "source_alpha_transparent"
+
+
+def test_analyze_skips_known_b_normalization_for_source_alpha():
+    client = TestClient(app)
+    response = client.post(
+        "/api/analyze-candidates",
+        files={"file": ("transparent.png", _transparent_sheet_png_bytes(), "image/png")},
+        data={"background_repair": "true"},
+    )
+
+    assert response.status_code == 200
+    known_b = response.json()["preprocess_analysis"]["known_background_normalization"]
+    assert known_b["skipped"] is True
+    assert known_b["reason"] == "source_alpha_transparent"
+
+
+def test_slice_uses_source_alpha_and_skips_repair_for_transparent_input():
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice-preview",
+        files={"file": ("transparent.png", _transparent_sheet_png_bytes(), "image/png")},
+        data={"min_area": "20", "padding": "1", "background_repair": "true"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["preprocess"]["checkerboard"]["skipped"] is True
+    assert payload["preprocess"]["checkerboard"]["reason"] == "source_alpha_transparent"
+
+    response = client.post(
+        "/api/slice",
+        files={"file": ("transparent.png", _transparent_sheet_png_bytes(), "image/png")},
+        data={"min_area": "20", "padding": "1", "transparent": "true", "background_repair": "true"},
+    )
+    assert response.status_code == 200
+    assert response.headers["x-ermbg-background-repair"] == "0"
+    with zipfile.ZipFile(BytesIO(response.content)) as zf:
+        names = sorted(name for name in zf.namelist() if name.endswith("_rgba.png"))
+        assert len(names) == 2
+        crop = np.asarray(Image.open(BytesIO(zf.read(names[0]))).convert("RGBA"))
+        assert int(crop[..., 3].min()) == 0
+        assert int(crop[..., 3].max()) == 255
+        assert 96 in set(int(value) for value in np.unique(crop[..., 3]))
+
+
 def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -2372,7 +2548,6 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
             "backend": "direct-worker",
             "shadow_enabled": "false",
             "corridorkey_preset": "detail_safe",
-            "corridorkey_hard_ui_hint_mode": "boundary_2px",
         },
     )
 
@@ -2380,7 +2555,7 @@ def test_matte_candidates_endpoint_accepts_direct_worker_backend(monkeypatch):
     assert captured["direct_worker_url"] == "http://direct.example"
     assert captured["shadow_mode"] == "off"
     assert captured["corridorkey_preset"] == "detail_safe"
-    assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px"
+    assert "corridorkey_hard_ui_hint_mode" not in captured
     payload = response.json()
     assert payload["strategy"] == "corridorkey_effect_icon"
     assert payload["backend"] == "direct-worker"
@@ -2484,11 +2659,7 @@ def test_matte_candidates_endpoint_accepts_direct_corridorkey_backend(monkeypatc
             "corridorkey_auto_despeckle": "Off",
             "corridorkey_despeckle_size": "64",
             "corridorkey_auto_mask": "true",
-            "corridorkey_color_protection": "false",
-            "corridorkey_protection_bg_max": "6",
-            "corridorkey_protection_fg_min": "14",
             "corridorkey_preset": "detail_safe",
-            "corridorkey_hard_ui_hint_mode": "translucent_button",
         },
     )
 
@@ -2500,11 +2671,9 @@ def test_matte_candidates_endpoint_accepts_direct_corridorkey_backend(monkeypatc
     assert captured["corridorkey_auto_despeckle"] == "Off"
     assert captured["corridorkey_despeckle_size"] == 64
     assert captured["corridorkey_auto_mask"] is True
-    assert captured["corridorkey_color_protection"] is False
-    assert captured["corridorkey_protection_bg_max"] == 6.0
-    assert captured["corridorkey_protection_fg_min"] == 14.0
     assert captured["corridorkey_preset"] == "detail_safe"
-    assert captured["corridorkey_hard_ui_hint_mode"] == "translucent_button"
+    assert "corridorkey_hard_ui_hint_mode" not in captured
+    assert "corridorkey_color_protection" not in captured
     payload = response.json()
     assert payload["backend"] == "direct-corridorkey"
     assert payload["requested_backend"] == "direct-corridorkey"
@@ -2800,7 +2969,7 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
             foreground_srgb=rgba[..., :3],
             strategy_name="direct_corridorkey",
             background_color=(0, 200, 0),
-            debug={"prompt_id": "prompt-ck", "color_protection": {"enabled": True}},
+            debug={"prompt_id": "prompt-ck"},
         )
 
     import ermbg.web as web
@@ -2819,12 +2988,8 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
             "corridorkey_auto_despeckle": "Off",
             "corridorkey_despeckle_size": "64",
             "corridorkey_auto_mask": "false",
-            "corridorkey_color_protection": "false",
-            "corridorkey_protection_bg_max": "6",
-            "corridorkey_protection_fg_min": "14",
             "corridorkey_screen_mode": "blue",
             "corridorkey_preset": "manual",
-            "corridorkey_hard_ui_hint_mode": "boundary_2px_shadow_safe_edge_floor",
         },
     )
 
@@ -2837,12 +3002,10 @@ def test_matte_candidates_endpoint_passes_corridorkey_settings(monkeypatch):
     assert captured["corridorkey_auto_despeckle"] == "Off"
     assert captured["corridorkey_despeckle_size"] == 64
     assert captured["corridorkey_auto_mask"] is False
-    assert captured["corridorkey_color_protection"] is False
-    assert captured["corridorkey_protection_bg_max"] == 6.0
-    assert captured["corridorkey_protection_fg_min"] == 14.0
     assert captured["corridorkey_screen_mode"] == "blue"
     assert captured["corridorkey_preset"] == "manual"
-    assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px_shadow_safe_edge_floor"
+    assert "corridorkey_hard_ui_hint_mode" not in captured
+    assert "corridorkey_color_protection" not in captured
     payload = response.json()
     assert payload["candidates"][0]["label"] == "CorridorKey"
 
@@ -3038,6 +3201,28 @@ def test_slice_endpoint_returns_zip_of_rectangular_crops():
         assert report["background_color"] == [0, 200, 0]
         assert report["count"] == 2
         assert Image.open(BytesIO(zf.read("sheet_001_rgb.png"))).mode == "RGB"
+
+
+def test_slice_endpoint_accepts_unicode_download_filename():
+    img = np.full((32, 48, 3), [0, 200, 0], dtype=np.uint8)
+    img[8:24, 12:32] = [240, 30, 30]
+    buf = BytesIO()
+    Image.fromarray(img, mode="RGB").save(buf, format="PNG")
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/slice",
+        files={"file": ("春节图.png", buf.getvalue(), "image/png")},
+        data={"min_area": "50", "padding": "1"},
+    )
+
+    assert response.status_code == 200
+    content_disposition = response.headers["content-disposition"]
+    assert 'filename="slices.zip"' in content_disposition
+    assert "filename*=UTF-8''" in content_disposition
+    assert "%E6%98%A5%E8%8A%82%E5%9B%BE_slices.zip" in content_disposition
+    with zipfile.ZipFile(BytesIO(response.content)) as zf:
+        assert "春节图.slices.json" in zf.namelist()
 
 
 def test_slice_preview_endpoint_returns_annotated_boxes():

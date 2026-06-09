@@ -182,6 +182,13 @@ class LocalCorridorKeyClient:
             "mean": float(corridorkey_mask.mean()),
         }
 
+    @staticmethod
+    def _swap_green_blue_channels(image_srgb: np.ndarray) -> np.ndarray:
+        swapped = image_srgb.copy()
+        swapped[..., 1] = image_srgb[..., 2]
+        swapped[..., 2] = image_srgb[..., 1]
+        return swapped
+
     def matte(
         self,
         image_srgb: np.ndarray,
@@ -195,10 +202,6 @@ class LocalCorridorKeyClient:
         auto_despeckle: str = "On",
         despeckle_size: int = 400,
         hint_source: str | None = None,
-        apply_color_protection: bool = True,
-        color_protection_bg_max: float = 12.0,
-        color_protection_fg_min: float = 28.0,
-        protect_hint_supported_material: bool = False,
         execution_profile: str = "auto",
     ) -> Any:
         if hint_alpha is None:
@@ -213,19 +216,24 @@ class LocalCorridorKeyClient:
         else:
             hint_source = hint_source or "provided_alpha_hint"
 
-        from .probe.comfyui_corridorkey import (
-            ComfyCorridorKeyResult,
-            KeyerThresholds,
-            apply_key_color_protection,
-        )
+        from .probe.comfyui_corridorkey import ComfyCorridorKeyResult
 
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
-        image_tensor = _numpy_image_to_tensor(image_srgb)
+        requested_screen_color = str(screen_color)
+        effective_screen_color = requested_screen_color if requested_screen_color in {"green", "blue"} else "auto"
+        model_image_srgb = image_srgb
+        model_background_color = background_color
+        screen_color_supported = False
+        blue_screen_adaptation: dict[str, Any] = {
+            "applied": False,
+            "method": "none",
+            "reason": "not_needed",
+        }
         hint = np.clip(hint_alpha.astype(np.float32), 0.0, 1.0)
         hint_tensor, corridorkey_mask_debug = self._corridorkey_mask_tensor_from_hint(
             hint,
-            screen_color=str(screen_color),
+            screen_color=requested_screen_color,
             execution_profile=str(execution_profile),
             hint_source=hint_source,
         )
@@ -237,6 +245,20 @@ class LocalCorridorKeyClient:
             # so profile parity is not split between two call conventions.
             runner = "loaded_comfy_node"
             runner_module = type(loaded_node).__module__
+            run_signature = inspect.signature(loaded_node.run)
+            screen_color_supported = "screen_color" in run_signature.parameters
+            if requested_screen_color == "blue" and not screen_color_supported:
+                model_image_srgb = self._swap_green_blue_channels(image_srgb)
+                model_background_color = (background_color[0], background_color[2], background_color[1])
+                effective_screen_color = "green"
+                blue_screen_adaptation = {
+                    "applied": True,
+                    "method": "channel_swap_gb",
+                    "reason": "loaded_corridorkey_node_has_no_screen_color_parameter",
+                    "model_screen_color": "green",
+                    "model_background_color": list(model_background_color),
+                }
+            image_tensor = _numpy_image_to_tensor(model_image_srgb)
             node_kwargs = {
                 "image": image_tensor,
                 "mask": hint_tensor,
@@ -247,13 +269,27 @@ class LocalCorridorKeyClient:
                 "despeckle_size": int(despeckle_size),
                 "unique_id": None,
             }
-            if "screen_color" in inspect.signature(loaded_node.run).parameters:
-                node_kwargs["screen_color"] = str(screen_color)
+            if screen_color_supported:
+                node_kwargs["screen_color"] = requested_screen_color
             foreground_tensor, alpha_tensor, _processed, _qc = loaded_node.run(**node_kwargs)
         else:
             self._ensure_import_path()
             from corridor_key import CorridorKeySettings  # type: ignore[import-not-found]
 
+            settings_signature = inspect.signature(CorridorKeySettings)
+            screen_color_supported = "screen_color" in settings_signature.parameters
+            if requested_screen_color == "blue" and not screen_color_supported:
+                model_image_srgb = self._swap_green_blue_channels(image_srgb)
+                model_background_color = (background_color[0], background_color[2], background_color[1])
+                effective_screen_color = "green"
+                blue_screen_adaptation = {
+                    "applied": True,
+                    "method": "channel_swap_gb",
+                    "reason": "corridorkey_settings_has_no_screen_color_parameter",
+                    "model_screen_color": "green",
+                    "model_background_color": list(model_background_color),
+                }
+            image_tensor = _numpy_image_to_tensor(model_image_srgb)
             settings_kwargs = {
                 "gamma_space": str(gamma_space),
                 "despill_strength": float(despill_strength),
@@ -261,8 +297,8 @@ class LocalCorridorKeyClient:
                 "auto_despeckle": str(auto_despeckle),
                 "despeckle_size": int(despeckle_size),
             }
-            if "screen_color" in inspect.signature(CorridorKeySettings).parameters:
-                settings_kwargs["screen_color"] = str(screen_color)
+            if screen_color_supported:
+                settings_kwargs["screen_color"] = requested_screen_color
             settings = CorridorKeySettings(**settings_kwargs)
             runner = "direct_processor_fallback"
             runner_module = "corridor_key.CorridorKeyProcessor"
@@ -279,23 +315,8 @@ class LocalCorridorKeyClient:
             raise RuntimeError("CorridorKey returned no alpha")
 
         alpha = np.clip(raw_alpha.astype(np.float32), 0.0, 1.0)
-        color_protection = np.zeros(alpha.shape, dtype=np.float32)
-        protection_debug: dict[str, Any] = {"enabled": False}
-        if apply_color_protection:
-            step_start = time.perf_counter()
-            foreground, alpha, color_protection, protection_stats = apply_key_color_protection(
-                image_srgb=image_srgb,
-                foreground_srgb=foreground,
-                alpha=alpha,
-                background_color=background_color,
-                thresholds=KeyerThresholds(
-                    bg_max=float(color_protection_bg_max),
-                    fg_min=float(color_protection_fg_min),
-                ),
-                trusted_material_alpha=hint if protect_hint_supported_material else None,
-            )
-            timings["color_protection_sec"] = time.perf_counter() - step_start
-            protection_debug = {"enabled": True, **protection_stats}
+        if blue_screen_adaptation.get("applied"):
+            foreground = self._swap_green_blue_channels(foreground)
         alpha_u8 = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
         rgba = np.dstack([foreground, alpha_u8]).astype(np.uint8)
         timings["total_sec"] = time.perf_counter() - total_start
@@ -305,7 +326,6 @@ class LocalCorridorKeyClient:
             foreground_srgb=foreground.astype(np.uint8),
             hint_alpha=hint,
             raw_alpha=np.clip(raw_alpha, 0.0, 1.0).astype(np.float32),
-            color_protection_alpha=color_protection.astype(np.float32),
             debug={
                 "backend": self.backend_label,
                 "prompt_id": self.prompt_id,
@@ -314,13 +334,14 @@ class LocalCorridorKeyClient:
                 "background_color": list(background_color),
                 "settings": {
                     "gamma_space": gamma_space,
-                    "screen_color": screen_color,
+                    "screen_color": effective_screen_color,
+                    "requested_screen_color": requested_screen_color,
+                    "screen_color_supported": bool(screen_color_supported),
+                    "blue_screen_adaptation": blue_screen_adaptation,
                     "despill_strength": float(despill_strength),
                     "refiner_strength": float(refiner_strength),
                     "auto_despeckle": auto_despeckle,
                     "despeckle_size": int(despeckle_size),
-                    "apply_color_protection": bool(apply_color_protection),
-                    "protect_hint_supported_material": bool(protect_hint_supported_material),
                     "execution_profile": execution_profile,
                     "runner": runner,
                     "runner_module": runner_module,
@@ -332,7 +353,6 @@ class LocalCorridorKeyClient:
                     "mean": float(hint.mean()),
                 },
                 "corridorkey_mask": corridorkey_mask_debug,
-                "color_protection": protection_debug,
                 "timings": timings,
             },
         )

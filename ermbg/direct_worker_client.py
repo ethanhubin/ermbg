@@ -62,13 +62,9 @@ def matte_image_direct_worker(
     corridorkey_auto_despeckle: str | None = None,
     corridorkey_despeckle_size: int | None = None,
     corridorkey_auto_mask: bool | None = None,
-    corridorkey_color_protection: bool | None = None,
-    corridorkey_protection_bg_max: float | None = None,
-    corridorkey_protection_fg_min: float | None = None,
     corridorkey_screen_mode: str | None = None,
     corridorkey_preset: str | None = None,
     corridorkey_hint_mask: Any | None = None,
-    corridorkey_hard_ui_hint_mode: str | None = None,
     known_bg_glow_material_strength: float | None = None,
     pymatting_method: str | None = None,
     pymatting_image_space: str | None = None,
@@ -116,8 +112,6 @@ def matte_image_direct_worker(
         data["corridorkey_screen_mode"] = str(corridorkey_screen_mode)
     if corridorkey_preset is not None:
         data["corridorkey_preset"] = str(corridorkey_preset)
-    if corridorkey_hard_ui_hint_mode is not None:
-        data["corridorkey_hard_ui_hint_mode"] = str(corridorkey_hard_ui_hint_mode)
     if corridorkey_gamma_space is not None:
         data["corridorkey_gamma_space"] = corridorkey_gamma_space
     if corridorkey_despill_strength is not None:
@@ -130,12 +124,6 @@ def matte_image_direct_worker(
         data["corridorkey_despeckle_size"] = str(int(corridorkey_despeckle_size))
     if corridorkey_auto_mask is not None:
         data["corridorkey_auto_mask"] = "true" if corridorkey_auto_mask else "false"
-    if corridorkey_color_protection is not None:
-        data["corridorkey_color_protection"] = "true" if corridorkey_color_protection else "false"
-    if corridorkey_protection_bg_max is not None:
-        data["corridorkey_protection_bg_max"] = str(float(corridorkey_protection_bg_max))
-    if corridorkey_protection_fg_min is not None:
-        data["corridorkey_protection_fg_min"] = str(float(corridorkey_protection_fg_min))
     if known_bg_glow_material_strength is not None:
         data["known_bg_glow_material_strength"] = str(float(known_bg_glow_material_strength))
     if pymatting_method is not None:

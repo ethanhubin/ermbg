@@ -310,6 +310,12 @@ def _cpu_parallel_backend(decision: Any) -> bool:
 
 def _execution_backend_from_decision(decision: Any) -> str:
     selected_backend = str(getattr(decision, "backend", "") or "")
+    if selected_backend == "pymatting_known_b":
+        return "direct-pymatting-known-b"
+    if selected_backend == "corridorkey":
+        return "direct-corridorkey"
+    if selected_backend == "known_bg_glow":
+        return "direct-known-bg-glow"
     if selected_backend == "passthrough":
         return "direct-passthrough"
     return selected_backend
@@ -347,7 +353,6 @@ def _run_prepared_case_in_main(
         rgb,
         decision=prepared.decision,
         shadow_mode=args.shadow_mode,
-        corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
         fallback_bg_color=tuple(args.fallback_bg_color),
         ck_factory=ck_factory,
         route_sec=timings.get("route_sec"),
@@ -396,7 +401,6 @@ def _cpu_case_worker(payload: dict[str, Any]) -> dict[str, Any]:
             rgb,
             decision=payload["decision"],
             shadow_mode=payload["shadow_mode"],
-            corridorkey_hard_ui_hint_mode=payload["corridorkey_hard_ui_hint_mode"],
             fallback_bg_color=tuple(payload["fallback_bg_color"]),
             ck_factory=None,
             route_sec=timings.get("route_sec"),
@@ -483,7 +487,6 @@ def _direct_matte(
     shadow_mode: str,
     corridorkey_screen_mode: str,
     corridorkey_preset: str,
-    corridorkey_hard_ui_hint_mode: str,
     fallback_bg_color: tuple[int, int, int],
     ck_factory: DirectCorridorKeyClientFactory,
 ) -> tuple[Any, dict[str, float], dict[str, Any]]:
@@ -492,7 +495,6 @@ def _direct_matte(
         shadow_mode=shadow_mode,
         corridorkey_screen_mode=corridorkey_screen_mode,
         corridorkey_preset=corridorkey_preset,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         fallback_bg_color=fallback_bg_color,
         ck_factory=ck_factory,
     )
@@ -669,7 +671,7 @@ def _write_case_and_aggregate(
         "ok_count": sum(1 for item in ordered_rows if item.status == "ok"),
         "write_images": bool(args.write_images),
         "fixed_execution_backend": fixed_backend or None,
-        "sample_filter": args.sample_id,
+        "sample_filter": None if bool(getattr(args, "all", False)) else args.sample_id,
         "category_filter": args.category,
         "warmup_sample_id": args.warmup_sample_id or None,
         "compare_summary": _rel(args.compare_summary) if args.compare_summary else None,
@@ -754,7 +756,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             shadow_mode=args.shadow_mode,
             corridorkey_screen_mode=args.corridorkey_screen_mode,
             corridorkey_preset=args.corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
             fallback_bg_color=tuple(args.fallback_bg_color),
             ck_factory=ck_factory,
         )
@@ -826,7 +827,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "decision": prepared.decision,
                     "route_timings": prepared.route_timings,
                     "shadow_mode": args.shadow_mode,
-                    "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
                     "fallback_bg_color": tuple(args.fallback_bg_color),
                     "write_images": bool(args.write_images),
                     "include_debug": bool(args.include_debug),
@@ -969,18 +969,6 @@ def main() -> None:
     parser.add_argument("--shadow-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--corridorkey-screen-mode", choices=("auto", "green", "blue"), default="auto")
     parser.add_argument("--corridorkey-preset", choices=("auto", "detail_safe", "spill_safe", "manual"), default="auto")
-    parser.add_argument(
-        "--corridorkey-hard-ui-hint-mode",
-        choices=(
-            "full_frame_zero",
-            "bbox_2px",
-            "boundary_2px",
-            "boundary_2px_shadow_safe",
-            "boundary_2px_shadow_safe_edge_floor",
-            "translucent_button",
-        ),
-        default="bbox_2px",
-    )
     parser.add_argument("--fallback-bg-color", type=int, nargs=3, default=(0, 200, 0), metavar=("R", "G", "B"))
     parser.add_argument(
         "--cpu-workers",

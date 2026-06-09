@@ -26,14 +26,15 @@
   },
   "category_counts": {
     "button": 57,
-    "icon": 21,
+    "icon": 22,
     "character": 9
   },
   "screen_counts": {
     "green": 58,
-    "blue": 29
+    "blue": 29,
+    "neutral": 1
   },
-  "case_count": 87,
+  "case_count": 88,
   "default_screens": [
     "green",
     "blue"
@@ -1988,6 +1989,31 @@
       "target_route": "corridorkey_glass_effect_icon_review",
       "source_review_id": "ICON-D11",
       "source_batch": "manual_user_sample_20260607"
+    },
+    {
+      "id": "icon_neutral_cartoon_fox_violin",
+      "sample_id": "I022",
+      "category": "icon",
+      "family": "neutral_known_b_cartoon_icon",
+      "screen": "neutral",
+      "backgrounds": {
+        "neutral": [
+          254,
+          253,
+          254
+        ]
+      },
+      "neutral": "samples/corridorkey_semantic/icon/icon_neutral_cartoon_fox_violin/neutral.png",
+      "input": "samples/corridorkey_semantic/icon/icon_neutral_cartoon_fox_violin/neutral.png",
+      "image_size": [
+        386,
+        393
+      ],
+      "subject_color_family": "orange_white_dark_outline",
+      "primary_ambiguity": "flat cartoon character on neutral known-B with internal white subject markings and explicit dark outlines",
+      "target_route": "pymatting_known_b_neutral_cartoon_review",
+      "source_review_id": "ICON-NEUTRAL-001",
+      "source_batch": "manual_user_sample_20260609"
     },
     {
       "id": "character_char_a01_hair_hard_edge_glass_pendant_green",

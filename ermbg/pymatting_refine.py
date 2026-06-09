@@ -81,7 +81,28 @@ def normalize_known_background_field(
     effective_bg_threshold = float(thresholds["bg_threshold_effective"])
     effective_fg_threshold = float(thresholds["fg_threshold_effective"])
     bg_candidate = ownership.bg_candidate
-    sure_bg_normalization = ownership.sure_bg
+    bg_channels = bg.astype(np.float32)
+    dominant = int(np.argmax(bg_channels))
+    others = [idx for idx in range(3) if idx != dominant]
+    screen_colored_background = (
+        float(bg_channels[dominant]) >= 64.0
+        and float(bg_channels[dominant] - np.max(bg_channels[others])) >= 48.0
+    )
+    # Normalization is a lightweight prepass. It may stabilize exterior known-B
+    # drift, but on neutral backgrounds it must not make a semantic decision
+    # for enclosed near-B islands: those can be true holes, highlights, eyes,
+    # belly patches, or same-background subject material. Saturated screen
+    # backgrounds keep the historical behavior because same-screen holes and
+    # their dark edges are part of the screen model, not neutral material.
+    if screen_colored_background:
+        sure_bg_normalization = np.asarray(ownership.sure_bg, dtype=bool)
+        normalization_scope = "screen_colored_sure_bg_including_enclosed"
+        enclosed_sure_bg_excluded = np.zeros_like(sure_bg_normalization, dtype=bool)
+    else:
+        exterior_bg_normalization = _flood_from_border(np.asarray(ownership.sure_bg, dtype=bool))
+        enclosed_sure_bg_excluded = np.asarray(ownership.sure_bg, dtype=bool) & ~exterior_bg_normalization
+        sure_bg_normalization = exterior_bg_normalization
+        normalization_scope = "neutral_exterior_connected_sure_bg_only"
     if int(bg_candidate.sum()) < max(32, int(round(float(bg_candidate.size) * 0.01))):
         return image_srgb, {
             "enabled": True,
@@ -89,6 +110,8 @@ def normalize_known_background_field(
             "reason": "insufficient high-confidence background evidence",
             "high_conf_bg_pixels": int(bg_candidate.sum()),
             "sure_bg_normalization_pixels": int(sure_bg_normalization.sum()),
+            "normalization_scope": normalization_scope,
+            "enclosed_sure_bg_excluded_pixels": int(enclosed_sure_bg_excluded.sum()),
             **thresholds,
         }
 
@@ -137,6 +160,8 @@ def normalize_known_background_field(
             "reason": "sure background already matches known-B",
             "high_conf_bg_pixels": int(bg_candidate.sum()),
             "sure_bg_normalization_pixels": int(sure_bg_normalization.sum()),
+            "normalization_scope": normalization_scope,
+            "enclosed_sure_bg_excluded_pixels": int(enclosed_sure_bg_excluded.sum()),
             "drift_probe_pixels": int(drift_probe.sum()),
             "residual_abs_p95_u8": residual_p95,
             "residual_std_u8": residual_std,
@@ -147,13 +172,11 @@ def normalize_known_background_field(
             **thresholds,
         }
 
-    dominant = int(np.argmax(bgf))
-    others = [idx for idx in range(3) if idx != dominant]
     screen_like_tail = np.zeros((h, w), dtype=bool)
     tail_weight = np.zeros((h, w), dtype=np.float32)
     normalization_connected_domain = sure_bg_normalization.copy()
     disconnected_tail_pixels = 0
-    if float(bgf[dominant]) >= 64.0 and float(bgf[dominant] - np.max(bgf[others])) >= 48.0:
+    if screen_colored_background:
         other_max = np.max(image[..., others], axis=2)
         # Tail normalization is intentionally limited to screen-colored pixels:
         # quiet off-channels and a dominant screen channel. This keeps yellow
@@ -211,6 +234,8 @@ def normalize_known_background_field(
             "reason": "empty normalization support",
             "high_conf_bg_pixels": int(bg_candidate.sum()),
             "sure_bg_normalization_pixels": int(sure_bg_normalization.sum()),
+            "normalization_scope": normalization_scope,
+            "enclosed_sure_bg_excluded_pixels": int(enclosed_sure_bg_excluded.sum()),
             "drift_probe_pixels": int(drift_probe.sum()),
             "residual_abs_p95_u8": residual_p95,
             "residual_std_u8": residual_std,
@@ -244,6 +269,8 @@ def normalize_known_background_field(
         "background_color": [int(c) for c in bg],
         "high_conf_bg_pixels": int(bg_candidate.sum()),
         "sure_bg_normalization_pixels": int(sure_bg_normalization.sum()),
+        "normalization_scope": normalization_scope,
+        "enclosed_sure_bg_excluded_pixels": int(enclosed_sure_bg_excluded.sum()),
         "protected_transition_pixels": int(ownership.protected_transition.sum()),
         "shadow_unknown_pixels": int(ownership.shadow_unknown.sum()),
         "changed_bg_pixels": int(changed_bg_pixels.sum()),

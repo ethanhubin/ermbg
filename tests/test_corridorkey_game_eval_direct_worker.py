@@ -61,6 +61,8 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
         rgba = np.dstack([rgb, np.full(rgb.shape[:2], 255, dtype=np.uint8)])
         trimap_buf = io.BytesIO()
         Image.fromarray(np.full(rgb.shape[:2], 128, dtype=np.uint8), mode="L").save(trimap_buf, format="PNG")
+        hint_buf = io.BytesIO()
+        Image.fromarray(np.full(rgb.shape[:2], 255, dtype=np.uint8), mode="L").save(hint_buf, format="PNG")
         return SimpleNamespace(
             rgba=rgba,
             alpha=np.ones(rgb.shape[:2], dtype=np.float32),
@@ -70,6 +72,7 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
                 "direct_worker": {
                     "execution_backend": "direct-pymatting-known-b",
                     "trimap_png_base64": base64.b64encode(trimap_buf.getvalue()).decode("ascii"),
+                    "corridorkey_hint_png_base64": base64.b64encode(hint_buf.getvalue()).decode("ascii"),
                 },
             },
         )
@@ -87,8 +90,6 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
         direct_worker_url="http://worker.test",
         subject_threshold=35.0,
         corridorkey_preset="detail_safe",
-        corridorkey_color_protection="auto",
-        corridorkey_hard_ui_hint_mode="boundary_2px",
     )
 
     summary = module.run(args)
@@ -102,11 +103,12 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     assert captured["image"] == image_path
     assert captured["direct_worker_url"] == "http://worker.test"
     assert captured["corridorkey_preset"] == "detail_safe"
-    assert captured["corridorkey_hard_ui_hint_mode"] == "boundary_2px"
+    assert "corridorkey_hard_ui_hint_mode" not in captured
     assert (case_dir / "rgba.png").exists()
     assert (case_dir / "alpha.png").exists()
     assert (case_dir / "foreground.png").exists()
     assert (case_dir / "trimap.png").exists()
+    assert (case_dir / "corridorkey_hint.png").exists()
     assert (case_dir / "contact_sheet.png").exists()
     case_summary = json.loads((case_dir / "summary.json").read_text(encoding="utf-8"))
     assert case_summary["status"] == "ok"
@@ -119,6 +121,7 @@ def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     assert case_manifest["outputs"]["alpha"] == "alpha.png"
     assert case_manifest["outputs"]["foreground"] == "foreground.png"
     assert case_manifest["outputs"]["trimap"] == "trimap.png"
+    assert case_manifest["outputs"]["hint"] == "corridorkey_hint.png"
     assert case_manifest["runtime"]["backend"] == "direct-worker"
     batch_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert batch_manifest["schema"] == "ermbg.run.v1"

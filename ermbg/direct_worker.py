@@ -14,10 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from . import io as ermbg_io
 from .api import (
     MatteResponse,
-    _corridorkey_shadow_patch,
     _matte_image_passthrough,
     _matte_image_pymatting_known_b,
     prepare_known_b_preprocessed_input,
@@ -77,66 +75,53 @@ def _rgb_param(params: dict[str, Any], key: str, fallback: tuple[int, int, int])
     return fallback
 
 
-def _mask_param_to_bool(mask: Any, shape: tuple[int, int], *, field: str) -> np.ndarray | None:
-    if mask is None:
+def _corridorkey_default_hint(
+    rgb: np.ndarray,
+    *,
+    selected_bg_color: tuple[int, int, int],
+    execution_profile: str,
+    screen_mode: str,
+    source_prefix: str,
+) -> tuple[np.ndarray, str]:
+    prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        execution_profile=execution_profile,
+        screen_mode=screen_mode,
+    )
+    return (
+        np.full(rgb.shape[:2], prior_value, dtype=np.float32),
+        f"{source_prefix}_full_frame_{prior_kind}_corridorkey_hint",
+    )
+
+
+def _corridorkey_hint_value_from_semantic_decision(semantic_decision: Any) -> float | None:
+    if not isinstance(semantic_decision, dict) or "corridorkey_hint_value" not in semantic_decision:
         return None
-    arr = np.asarray(mask)
-    if arr.ndim == 3:
-        arr = arr[..., 0]
-    if arr.shape != shape:
-        raise ValueError(f"{field} shape must match image shape")
-    if arr.dtype == bool:
-        return arr.astype(bool)
-    values = arr.astype(np.float32)
-    if float(values.max(initial=0.0)) > 1.5:
-        values = values / 255.0
-    return values >= 0.5
+    value = float(semantic_decision["corridorkey_hint_value"])
+    if not np.isfinite(value):
+        raise ValueError("corridorkey_hint_value must be finite")
+    return float(np.clip(value, 0.0, 1.0))
 
 
-def _corridorkey_execution_masks(
-    image_srgb: np.ndarray,
-    background_color: tuple[int, int, int],
-    params: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    del background_color
-    shape = image_srgb.shape[:2]
-    keep_floor = np.zeros(shape, dtype=np.float32)
-    alpha_cap = np.ones(shape, dtype=np.float32)
-    remove_mask = np.zeros(shape, dtype=bool)
+def _corridorkey_disabled_postprocess_info(params: dict[str, Any]) -> dict[str, Any]:
     semantic_decision = params.get("semantic_decision")
-
-    user_keep = _mask_param_to_bool(params.get("user_keep_mask"), shape, field="user_keep_mask")
-    user_remove = _mask_param_to_bool(params.get("user_remove_mask"), shape, field="user_remove_mask")
-    user_keep_pixels = 0
-    user_remove_pixels = 0
-    if user_keep is not None:
-        user_keep_pixels = int(user_keep.sum())
-        keep_floor[user_keep] = 1.0
-    if user_remove is not None:
-        user_remove_pixels = int(user_remove.sum())
-        remove_mask |= user_remove
-    if remove_mask.any():
-        keep_floor[remove_mask] = 0.0
-
-    info = {
+    return {
         "semantic_decision": dict(semantic_decision) if isinstance(semantic_decision, dict) else {},
         "semantic_decision_applied": False,
-        "semantic_decision_reason": (
-            "corridorkey_semantic_hint_variants_apply_before_model_not_as_post_alpha_constraints"
-            if isinstance(semantic_decision, dict) and semantic_decision.get("corridorkey_hint_variant")
-            else "corridorkey_semantic_candidates_do_not_apply_post_alpha_constraints"
-        ),
-        "semantic_hint_variant": str(semantic_decision.get("corridorkey_hint_variant"))
-        if isinstance(semantic_decision, dict) and semantic_decision.get("corridorkey_hint_variant")
-        else None,
-        "user_keep_pixels": user_keep_pixels,
-        "user_remove_pixels": user_remove_pixels,
-        "keep_floor_pixels": int((keep_floor > 0.0).sum()),
-        "alpha_cap_pixels": int((alpha_cap < 0.999).sum()),
-        "remove_pixels": int(remove_mask.sum()),
-        "remove_overrides_keep": True,
+        "semantic_decision_reason": "corridorkey_path_uses_hint_strength_only_no_post_alpha_constraints",
+        "semantic_hint_value": _corridorkey_hint_value_from_semantic_decision(semantic_decision),
+        "keep_floor_pixels": 0,
+        "alpha_cap_pixels": 0,
+        "remove_pixels": 0,
+        "user_masks_applied": False,
     }
-    return keep_floor, alpha_cap, remove_mask, info
+
+
+def _corridorkey_disabled_shadow_info(shadow_mode: str) -> dict[str, Any]:
+    return {
+        "mode": str(shadow_mode or "off"),
+        "applied": False,
+        "reason": "corridorkey_path_returns_raw_model_output_without_shadow_patch",
+    }
 
 
 def matte_known_bg_glow_direct(
@@ -217,7 +202,6 @@ def matte_corridorkey_direct(
     qa: bool = False,
     auto_route: dict[str, Any] | None = None,
     hint_alpha: np.ndarray | None = None,
-    hard_ui_hint_mode: str = "bbox_2px",
     execution_profile: str = "auto",
     corridorkey_client: Any | None = None,
 ) -> MatteResponse:
@@ -228,37 +212,12 @@ def matte_corridorkey_direct(
     analysis single-pass and reuses the route metadata to remove that duplicate
     CPU work before the GPU refine call.
     """
-    from .probe.comfyui_corridorkey import (
-        build_hard_ui_boundary_corridorkey_hint,
-        build_hard_ui_corridorkey_hint,
-        build_hard_ui_shadow_safe_material_alpha_floor,
-        build_hard_ui_shadow_safe_solid_interior_mask,
-        build_hard_ui_solid_interior_mask,
-    )
-
-    hard_ui_hint_modes = {
-        "full_frame_zero",
-        "bbox_2px",
-        "boundary_2px",
-        "boundary_2px_shadow_safe",
-        "boundary_2px_shadow_safe_edge_floor",
-        "translucent_button",
-    }
-    hard_ui_hint_mode = str(params.get("corridorkey_hard_ui_hint_mode", hard_ui_hint_mode))
-    if hard_ui_hint_mode not in hard_ui_hint_modes:
-        raise ValueError(
-            "corridorkey_hard_ui_hint_mode must be full_frame_zero, bbox_2px, boundary_2px, "
-            "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
-        )
-
     selected_bg_color = _ck_background_color(corridorkey_analysis, bg_color)
     screen_mode = str(corridorkey_analysis.get("screen_mode") or params.get("corridorkey_screen_mode") or "auto")
     parameter_profile = str(corridorkey_analysis.get("parameter_profile") or "")
     execution_profile = str(params.get("corridorkey_execution_profile") or params.get("execution_profile") or execution_profile)
     if execution_profile == "auto":
-        if hard_ui_hint_mode == "translucent_button":
-            execution_profile = "corridorkey-transparent-button"
-        elif parameter_profile == "composite_character_corridor_only":
+        if parameter_profile == "composite_character_corridor_only":
             execution_profile = "corridorkey-character"
         elif parameter_profile == "translucent_button":
             execution_profile = "corridorkey-transparent-button"
@@ -272,9 +231,6 @@ def matte_corridorkey_direct(
     refiner_strength = float(params.get("corridorkey_refiner_strength", 1.0))
     auto_despeckle = str(params.get("corridorkey_auto_despeckle", "On"))
     despeckle_size = int(params.get("corridorkey_despeckle_size", 400))
-    apply_color_protection = bool(params.get("corridorkey_color_protection", True))
-    color_protection_bg_max = float(params.get("corridorkey_protection_bg_max", 12.0))
-    color_protection_fg_min = float(params.get("corridorkey_protection_fg_min", 28.0))
     auto_mask = bool(params.get("corridorkey_auto_mask", False))
 
     # Route profiles own a complete CorridorKey recipe for auto runs. A manual
@@ -295,114 +251,94 @@ def matte_corridorkey_direct(
         refiner_strength = 1.15
         auto_despeckle = "Off"
         despeckle_size = 64
-        apply_color_protection = False
-        color_protection_bg_max = 6.0
-        color_protection_fg_min = 14.0
     if preset != "manual" and execution_profile == "corridorkey-character":
         gamma_space = "sRGB"
         despill_strength = 1.0
         refiner_strength = 1.0
         auto_despeckle = "Off"
         despeckle_size = 64
-        apply_color_protection = False
-        color_protection_bg_max = 6.0
-        color_protection_fg_min = 14.0
 
     client = corridorkey_client if corridorkey_client is not None else DirectCorridorKeyClient()
     hint_source = None
     hint_plan_metadata: dict[str, Any] | None = None
-    solid_interior_mask: np.ndarray | None = None
-    material_alpha_floor: np.ndarray | None = None
-    solid_interior_info: dict[str, Any] = {}
     semantic_decision = params.get("semantic_decision")
-    semantic_hint_variant = (
-        semantic_decision.get("corridorkey_hint_variant")
-        if isinstance(semantic_decision, dict)
-        else None
-    )
+    semantic_hint_value = _corridorkey_hint_value_from_semantic_decision(semantic_decision)
     if hint_alpha is not None:
         hint_source = "provided_corridorkey_hint_mask"
-    elif isinstance(semantic_hint_variant, str) and semantic_hint_variant:
-        from .corridorkey_hint import build_corridorkey_hint_plan, corridorkey_hint_variants
-
-        if semantic_hint_variant not in corridorkey_hint_variants():
-            raise ValueError(f"unsupported corridorkey_hint_variant: {semantic_hint_variant}")
-        plan = build_corridorkey_hint_plan(
-            rgb,
-            selected_bg_color,
-            variant=semantic_hint_variant,  # type: ignore[arg-type]
-        )
-        hint_alpha = plan.hint
-        hint_source = f"semantic_corridorkey_hint_variant:{semantic_hint_variant}"
-        hint_plan_metadata = plan.metadata
-    elif hard_ui_hint_mode == "full_frame_zero":
-        hint_alpha = np.zeros(rgb.shape[:2], dtype=np.float32)
-        hint_source = "full_frame_zero_corridorkey_hint"
+    elif semantic_hint_value is not None:
+        hint_alpha = np.full(rgb.shape[:2], semantic_hint_value, dtype=np.float32)
+        hint_source = f"semantic_full_frame_constant_{semantic_hint_value:.2f}_corridorkey_hint"
+        hint_plan_metadata = {
+            "schema": "ermbg.corridorkey_constant_hint.v1",
+            "source": "semantic_corridorkey_hint_value",
+            "value": float(semantic_hint_value),
+            "kind": "full_frame_constant",
+        }
     elif not auto_mask:
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        hint_alpha, hint_source = _corridorkey_default_hint(
+            rgb,
+            selected_bg_color=selected_bg_color,
             execution_profile=execution_profile,
             screen_mode=screen_mode,
+            source_prefix="default",
         )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
         if execution_profile == "corridorkey-character":
-            hint_source = f"character_full_frame_{prior_kind}_corridorkey_hint"
+            hint_alpha, hint_source = _corridorkey_default_hint(
+                rgb,
+                selected_bg_color=selected_bg_color,
+                execution_profile=execution_profile,
+                screen_mode=screen_mode,
+                source_prefix="character",
+            )
         elif execution_profile == "corridorkey-transparent-button":
-            hint_source = f"glass_full_frame_{prior_kind}_corridorkey_hint"
+            hint_alpha, hint_source = _corridorkey_default_hint(
+                rgb,
+                selected_bg_color=selected_bg_color,
+                execution_profile=execution_profile,
+                screen_mode=screen_mode,
+                source_prefix="glass",
+            )
         elif execution_profile == "corridorkey-effect-icon":
-            hint_source = f"effect_full_frame_{prior_kind}_corridorkey_hint"
-        else:
-            hint_source = f"default_full_frame_{prior_kind}_corridorkey_hint"
+            hint_alpha, hint_source = _corridorkey_default_hint(
+                rgb,
+                selected_bg_color=selected_bg_color,
+                execution_profile=execution_profile,
+                screen_mode=screen_mode,
+                source_prefix="effect",
+            )
     elif execution_profile == "corridorkey-transparent-button":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        hint_alpha, hint_source = _corridorkey_default_hint(
+            rgb,
+            selected_bg_color=selected_bg_color,
             execution_profile=execution_profile,
             screen_mode=screen_mode,
+            source_prefix="glass",
         )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"glass_full_frame_{prior_kind}_corridorkey_hint"
     elif execution_profile == "corridorkey-character":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        hint_alpha, hint_source = _corridorkey_default_hint(
+            rgb,
+            selected_bg_color=selected_bg_color,
             execution_profile=execution_profile,
             screen_mode=screen_mode,
+            source_prefix="character",
         )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"character_full_frame_{prior_kind}_corridorkey_hint"
     elif execution_profile == "corridorkey-effect-icon":
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        hint_alpha, hint_source = _corridorkey_default_hint(
+            rgb,
+            selected_bg_color=selected_bg_color,
             execution_profile=execution_profile,
             screen_mode=screen_mode,
+            source_prefix="effect",
         )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"effect_full_frame_{prior_kind}_corridorkey_hint"
-    elif parameter_profile.startswith("opaque_hard_ui"):
-        if hard_ui_hint_mode == "boundary_2px":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            solid_interior_mask = build_hard_ui_solid_interior_mask(rgb, selected_bg_color)
-            hint_source = "known_bg_hard_ui_boundary_2px_hint"
-        elif hard_ui_hint_mode == "boundary_2px_shadow_safe":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            solid_interior_mask, solid_interior_info = build_hard_ui_shadow_safe_solid_interior_mask(
-                rgb,
-                selected_bg_color,
-            )
-            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_hint"
-        elif hard_ui_hint_mode == "boundary_2px_shadow_safe_edge_floor":
-            hint_alpha = build_hard_ui_boundary_corridorkey_hint(rgb, selected_bg_color)
-            material_alpha_floor, solid_interior_info = build_hard_ui_shadow_safe_material_alpha_floor(
-                rgb,
-                selected_bg_color,
-            )
-            hint_source = "known_bg_hard_ui_boundary_2px_shadow_safe_edge_floor_hint"
-        else:
-            hint_alpha = build_hard_ui_corridorkey_hint(rgb, selected_bg_color)
-            hint_source = "known_bg_hard_ui_bbox_2px_hint"
 
     if hint_alpha is None:
-        prior_value, prior_kind = corridorkey_full_frame_prior_value(
+        hint_alpha, hint_source = _corridorkey_default_hint(
+            rgb,
+            selected_bg_color=selected_bg_color,
             execution_profile=execution_profile,
             screen_mode=screen_mode,
+            source_prefix="default",
         )
-        hint_alpha = np.full(rgb.shape[:2], prior_value, dtype=np.float32)
-        hint_source = f"default_full_frame_{prior_kind}_corridorkey_hint"
 
     remote = client.matte(
         rgb,
@@ -415,109 +351,18 @@ def matte_corridorkey_direct(
         refiner_strength=refiner_strength,
         auto_despeckle=auto_despeckle,
         despeckle_size=despeckle_size,
-        apply_color_protection=apply_color_protection,
-        color_protection_bg_max=color_protection_bg_max,
-        color_protection_fg_min=color_protection_fg_min,
-        protect_hint_supported_material=parameter_profile == "key_color_material",
         execution_profile=execution_profile,
     )
-    subject_alpha = remote.alpha
-    subject_foreground_srgb = remote.foreground_srgb
-    subject_rgba = remote.rgba
-    execution_keep_floor, execution_alpha_cap, execution_remove_mask, execution_decision_info = _corridorkey_execution_masks(
-        rgb,
-        selected_bg_color,
-        params,
-    )
-    execution_keep_mask = execution_keep_floor > 0.0
-    execution_cap_mask = execution_alpha_cap < 0.999
-    if execution_keep_mask.any() or execution_cap_mask.any() or execution_remove_mask.any():
-        subject_alpha = subject_alpha.copy()
-        subject_foreground_srgb = subject_foreground_srgb.copy()
-        if execution_keep_mask.any():
-            subject_alpha = np.maximum(subject_alpha, execution_keep_floor).astype(np.float32)
-            subject_foreground_srgb[execution_keep_mask] = rgb[execution_keep_mask]
-        if execution_cap_mask.any():
-            subject_alpha = np.minimum(subject_alpha, execution_alpha_cap).astype(np.float32)
-            subject_foreground_srgb[execution_cap_mask] = rgb[execution_cap_mask]
-        if execution_remove_mask.any():
-            subject_alpha[execution_remove_mask] = 0.0
-            subject_foreground_srgb[execution_remove_mask] = rgb[execution_remove_mask]
-        subject_rgba = np.dstack(
-            [
-                subject_foreground_srgb,
-                (np.clip(subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-            ]
-        )
-    solid_interior_pixels = 0
-    material_floor_lift_pixels = 0
-    if solid_interior_mask is not None and solid_interior_mask.any():
-        interior = solid_interior_mask.astype(bool)
-        solid_interior_pixels = int(interior.sum())
-        subject_alpha = remote.alpha.copy()
-        subject_foreground_srgb = remote.foreground_srgb.copy()
-        subject_alpha[interior] = 1.0
-        subject_foreground_srgb[interior] = rgb[interior]
-    if material_alpha_floor is not None and (material_alpha_floor > 0.0).any():
-        floor = np.clip(material_alpha_floor.astype(np.float32), 0.0, 1.0)
-        lift = floor > (subject_alpha + 1e-4)
-        material_floor_lift_pixels = int(lift.sum())
-        solid_interior_pixels = int(solid_interior_info.get("solid_interior_pixels", int((floor >= 0.999).sum())))
-        if lift.any():
-            subject_alpha = np.maximum(subject_alpha, floor).astype(np.float32)
-            subject_foreground_srgb = subject_foreground_srgb.copy()
-            C_lin = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
-            B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg_color, dtype=np.uint8).reshape(1, 1, 3))[
-                0,
-                0,
-            ].astype(np.float32)
-            recovered = C_lin.copy()
-            a = np.maximum(floor[lift, None], 1e-3)
-            recovered[lift] = (C_lin[lift] - (1.0 - floor[lift, None]) * B_lin.reshape(1, 3)) / a
-            recovered = np.clip(recovered, 0.0, 1.0).astype(np.float32)
-            recovered_srgb = ermbg_io.linear_to_srgb_u8(recovered)
-            subject_foreground_srgb[lift] = recovered_srgb[lift]
-    if (
-        (solid_interior_mask is not None and solid_interior_mask.any())
-        or (material_alpha_floor is not None and (material_alpha_floor > 0.0).any())
-    ):
-        subject_rgba = np.dstack(
-            [
-                subject_foreground_srgb,
-                (np.clip(subject_alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-            ]
-        )
-
-    alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _corridorkey_shadow_patch(
-        rgb,
-        subject_alpha=subject_alpha,
-        subject_foreground_srgb=subject_foreground_srgb,
-        background_color=selected_bg_color,
-        shadow_mode=shadow_mode,
-    )
-    if execution_keep_mask.any():
-        alpha = np.maximum(alpha, execution_keep_floor).astype(np.float32)
-        rgba_rgb_srgb = rgba_rgb_srgb.copy()
-        rgba_rgb_srgb[execution_keep_mask] = rgb[execution_keep_mask]
-    if execution_cap_mask.any():
-        alpha = np.minimum(alpha, execution_alpha_cap).astype(np.float32)
-        rgba_rgb_srgb = rgba_rgb_srgb.copy()
-        rgba_rgb_srgb[execution_cap_mask] = rgb[execution_cap_mask]
-    if execution_remove_mask.any():
-        alpha = alpha.copy()
-        rgba_rgb_srgb = rgba_rgb_srgb.copy()
-        shadow_alpha = shadow_alpha.copy()
-        shadow_alpha_physical = shadow_alpha_physical.copy()
-        alpha[execution_remove_mask] = 0.0
-        rgba_rgb_srgb[execution_remove_mask] = rgb[execution_remove_mask]
-        shadow_alpha[execution_remove_mask] = 0.0
-        shadow_alpha_physical[execution_remove_mask] = 0.0
-    rgba = np.dstack(
-        [
-            rgba_rgb_srgb,
-            (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8),
-        ]
-    )
+    subject_alpha = remote.alpha.astype(np.float32)
+    subject_foreground_srgb = remote.foreground_srgb.astype(np.uint8)
+    subject_rgba = remote.rgba.astype(np.uint8)
+    execution_decision_info = _corridorkey_disabled_postprocess_info(params)
+    alpha = subject_alpha
+    rgba_rgb_srgb = subject_foreground_srgb
+    rgba = subject_rgba
+    shadow_alpha = np.zeros(rgb.shape[:2], dtype=np.float32)
+    shadow_alpha_physical = np.zeros(rgb.shape[:2], dtype=np.float32)
+    shadow_info = _corridorkey_disabled_shadow_info(shadow_mode)
     shadow_rgba = np.dstack(
         [
             np.zeros(rgb.shape, dtype=np.uint8),
@@ -565,6 +410,7 @@ def matte_corridorkey_direct(
     debug = {
         **remote.debug,
         "strategy": report["strategy"],
+        "execution_profile": execution_profile,
         "corridorkey_analysis": corridorkey_analysis,
         "soft_mask": alpha,
         "subject_alpha": subject_alpha,
@@ -572,19 +418,14 @@ def matte_corridorkey_direct(
         "corridorkey_hint": remote.hint_alpha,
         "corridorkey_hint_plan": hint_plan_metadata,
         "corridorkey_raw_alpha": remote.raw_alpha,
-        "key_color_protection": remote.color_protection_alpha,
         "shadow_alpha": shadow_alpha,
         "shadow_alpha_physical": shadow_alpha_physical,
         "shadow_layer_rgba": shadow_rgba,
         "shadow": shadow_info,
         "semantic_execution": execution_decision_info,
-        "hard_ui_hint": {
-            "mode": hard_ui_hint_mode,
+        "profile_settings": {
             "execution_profile": execution_profile,
             "forced_translucent_settings": forced_translucent_hint_settings,
-            "solid_interior_pixels": solid_interior_pixels,
-            "material_floor_lift_pixels": material_floor_lift_pixels,
-            **solid_interior_info,
         },
     }
     if auto_route is not None:
@@ -607,7 +448,6 @@ def direct_matte_from_decision(
     decision: RouteDecision,
     source_alpha: np.ndarray | None = None,
     shadow_mode: str = "auto",
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     corridorkey_hint_mask: np.ndarray | None = None,
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     ck_factory: DirectCorridorKeyClientFactory | None = None,
@@ -705,7 +545,6 @@ def direct_matte_from_decision(
             params=params,
             bg_color=fallback_bg_color,
             shadow_mode=shadow_mode,
-            hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
             hint_alpha=corridorkey_hint_mask,
             execution_profile=_route_params(params, "corridorkey_execution_profile", "auto"),
             corridorkey_client=(ck_factory or DirectCorridorKeyClientFactory()).get(),
@@ -726,9 +565,9 @@ def direct_matte_from_decision(
         "shadow_mode": shadow_mode,
     }
     if execution_backend == "direct-corridorkey":
-        hard_ui_hint = response.debug.get("hard_ui_hint") if isinstance(response.debug, dict) else None
-        if isinstance(hard_ui_hint, dict) and isinstance(hard_ui_hint.get("execution_profile"), str):
-            metadata["execution_profile"] = hard_ui_hint["execution_profile"]
+        profile = response.debug.get("execution_profile") if isinstance(response.debug, dict) else None
+        if isinstance(profile, str) and profile:
+            metadata["execution_profile"] = profile
     return DirectWorkerResult(response=response, timings=timings, metadata=metadata)
 
 
@@ -739,7 +578,6 @@ def direct_matte_auto(
     shadow_mode: str = "auto",
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     fallback_bg_color: tuple[int, int, int] = (0, 200, 0),
     ck_factory: DirectCorridorKeyClientFactory | None = None,
 ) -> DirectWorkerResult:
@@ -758,7 +596,6 @@ def direct_matte_auto(
         decision=decision,
         source_alpha=source_alpha,
         shadow_mode=shadow_mode,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         fallback_bg_color=fallback_bg_color,
         ck_factory=ck_factory,
         route_sec=route_sec,

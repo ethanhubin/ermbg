@@ -89,7 +89,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "shadow_mode": args.shadow_mode,
             "corridorkey_screen_mode": args.corridorkey_screen_mode,
             "corridorkey_preset": args.corridorkey_preset,
-            "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
             "fallback_bg_color": ",".join(str(c) for c in args.fallback_bg_color),
             "include_images": "true" if args.write_images else "false",
         }
@@ -141,18 +140,6 @@ def main() -> None:
     parser.add_argument("--shadow-mode", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--corridorkey-screen-mode", choices=("auto", "green", "blue"), default="auto")
     parser.add_argument("--corridorkey-preset", choices=("auto", "detail_safe", "spill_safe", "manual"), default="auto")
-    parser.add_argument(
-        "--corridorkey-hard-ui-hint-mode",
-        choices=(
-            "full_frame_zero",
-            "bbox_2px",
-            "boundary_2px",
-            "boundary_2px_shadow_safe",
-            "boundary_2px_shadow_safe_edge_floor",
-            "translucent_button",
-        ),
-        default="bbox_2px",
-    )
     parser.add_argument("--fallback-bg-color", type=int, nargs=3, default=(0, 200, 0), metavar=("R", "G", "B"))
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--no-write-images", action="store_false", dest="write_images")

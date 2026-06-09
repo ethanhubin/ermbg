@@ -762,6 +762,33 @@ def test_background_normalization_starts_on_any_sure_bg_mismatch():
     assert tuple(int(c) for c in normalized[0, 0]) == (0, 200, 0)
 
 
+def test_background_normalization_does_not_repaint_enclosed_subject_white_material():
+    bg = np.array([254, 253, 254], dtype=np.uint8)
+    image = np.full((128, 128, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 42, (36, 24, 18), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 38, (245, 130, 20), -1, cv2.LINE_AA)
+    marking_u8 = np.zeros((128, 128), dtype=np.uint8)
+    cv2.ellipse(marking_u8, (55, 66), (18, 12), -20, 0, 360, 255, -1, cv2.LINE_AA)
+    marking = marking_u8 > 0
+    image[marking] = (255, 255, 255)
+    # Add a tiny exterior mismatch so the normalization pass has real exterior
+    # work to do; the enclosed white marking must still stay untouched.
+    image[0, 0] = (253, 253, 254)
+
+    normalized, info = normalize_known_background_field(
+        image,
+        tuple(int(c) for c in bg),
+        bg_threshold=3.5,
+        fg_threshold=24.0,
+        adaptive=True,
+    )
+
+    assert info["normalization_scope"] == "neutral_exterior_connected_sure_bg_only"
+    assert info["enclosed_sure_bg_excluded_pixels"] > 0
+    assert tuple(int(c) for c in normalized[0, 0]) == tuple(int(c) for c in bg)
+    np.testing.assert_array_equal(normalized[marking], image[marking])
+
+
 def test_background_normalization_makes_b055_sure_bg_exact_for_exact_trimap():
     path = (
         PROJECT_ROOT

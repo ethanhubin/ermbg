@@ -2859,7 +2859,6 @@ def _matte_image_known_bg_hard_ui_shadow(
         ]
     )
     hint_alpha = np.ones(rgb.shape[:2], dtype=np.float32)
-    key_color_protection = np.zeros(rgb.shape[:2], dtype=np.float32)
     shadow_info = {
         "mode": "on",
         "source": "known_bg_hard_ui_shadow",
@@ -2911,7 +2910,6 @@ def _matte_image_known_bg_hard_ui_shadow(
         ermbg_io.save_mask(out_dir / f"{stem}_shadow_physical.png", solver_result.shadow_alpha_physical)
         ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_hint.png", hint_alpha)
         ermbg_io.save_mask(out_dir / f"{stem}_corridorkey_raw_alpha.png", solver_result.subject_alpha)
-        ermbg_io.save_mask(out_dir / f"{stem}_key_color_protection.png", key_color_protection)
         if qa:
             qa_dir = out_dir / f"{stem}_qa"
             qa_metrics = run_qa(
@@ -2962,7 +2960,6 @@ def _matte_image_known_bg_hard_ui_shadow(
         "corridorkey_subject_rgba": subject_rgba,
         "corridorkey_hint": hint_alpha,
         "corridorkey_raw_alpha": solver_result.subject_alpha,
-        "key_color_protection": key_color_protection,
         "shadow_alpha": solver_result.shadow_alpha,
         "shadow_alpha_physical": solver_result.shadow_alpha_physical,
         "shadow_layer_rgba": shadow_rgba,

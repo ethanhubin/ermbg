@@ -78,7 +78,6 @@ def test_matte_corridorkey_direct_uses_fake_client_without_comfy():
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha,
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -117,7 +116,6 @@ def test_matte_corridorkey_direct_uses_default_prior_for_shaped_profiles():
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha,
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -153,7 +151,6 @@ def test_matte_corridorkey_direct_uses_character_prior_when_auto_mask_is_disable
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha,
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -193,7 +190,6 @@ def test_matte_corridorkey_direct_uses_effect_prior_for_effect_profile():
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha,
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -215,7 +211,7 @@ def test_matte_corridorkey_direct_uses_effect_prior_for_effect_profile():
     assert calls[0]["execution_profile"] == "corridorkey-effect-icon"
 
 
-def test_matte_corridorkey_direct_applies_user_masks_after_model():
+def test_matte_corridorkey_direct_ignores_user_masks_after_model():
     rgb = np.full((8, 8, 3), (0, 200, 0), dtype=np.uint8)
     alpha = np.full(rgb.shape[:2], 0.25, dtype=np.float32)
     keep_mask = np.zeros(rgb.shape[:2], dtype=np.float32)
@@ -231,7 +227,6 @@ def test_matte_corridorkey_direct_applies_user_masks_after_model():
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=np.ones(alpha.shape, dtype=np.float32),
                 raw_alpha=alpha.copy(),
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -252,11 +247,11 @@ def test_matte_corridorkey_direct_applies_user_masks_after_model():
         corridorkey_client=FakeClient(),
     )
 
-    assert np.all(result.alpha[1:3, 1:3] == 1.0)
-    assert np.all(result.alpha[5:7, 5:7] == 0.0)
+    assert np.allclose(result.alpha, alpha)
     info = result.debug["semantic_execution"]
-    assert info["user_keep_pixels"] == 4
-    assert info["user_remove_pixels"] == 4
+    assert info["user_masks_applied"] is False
+    assert info["keep_floor_pixels"] == 0
+    assert info["remove_pixels"] == 0
 
 
 def test_matte_corridorkey_direct_does_not_apply_screen_material_alpha_constraints():
@@ -272,7 +267,6 @@ def test_matte_corridorkey_direct_does_not_apply_screen_material_alpha_constrain
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=np.ones(alpha.shape, dtype=np.float32),
                 raw_alpha=alpha.copy(),
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -316,7 +310,6 @@ def test_matte_corridorkey_direct_does_not_apply_glass_core_and_gradient_alpha_c
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=np.ones(alpha.shape, dtype=np.float32),
                 raw_alpha=alpha.copy(),
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -351,7 +344,7 @@ def test_matte_corridorkey_direct_does_not_apply_glass_core_and_gradient_alpha_c
     assert info["remove_pixels"] == 0
 
 
-def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
+def test_matte_corridorkey_direct_applies_semantic_hint_value_before_model():
     image_path = (
         Path(__file__).resolve().parents[1]
         / "samples/corridorkey_semantic/icon/icon_icon_d11_glass_portal_blue/blue.png"
@@ -369,7 +362,6 @@ def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=kwargs["hint_alpha"],
                 raw_alpha=alpha.copy(),
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 
@@ -383,8 +375,8 @@ def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
         params={
             "corridorkey_auto_mask": True,
             "semantic_decision": {
-                "policy": "corridorkey_hint_variant",
-                "corridorkey_hint_variant": "feature_internal_opaque",
+                "policy": "corridorkey_constant_hint",
+                "corridorkey_hint_value": 0.7,
             },
         },
         bg_color=(0, 37, 252),
@@ -392,14 +384,15 @@ def test_matte_corridorkey_direct_applies_semantic_hint_variant_before_model():
         corridorkey_client=FakeClient(),
     )
 
-    assert calls[0]["hint_source"] == "semantic_corridorkey_hint_variant:feature_internal_opaque"
+    assert calls[0]["hint_source"] == "semantic_full_frame_constant_0.70_corridorkey_hint"
     hint = calls[0]["hint_alpha"]
     assert isinstance(hint, np.ndarray)
     assert hint.shape == rgb.shape[:2]
-    assert 0.0 <= float(hint.min()) <= float(hint.max()) <= 1.0
-    assert result.debug["corridorkey_hint_plan"]["variant"] == "feature_internal_opaque"
+    assert np.isclose(float(hint.min()), 0.7)
+    assert np.isclose(float(hint.max()), 0.7)
+    assert result.debug["corridorkey_hint_plan"]["value"] == 0.7
     info = result.debug["semantic_execution"]
-    assert info["semantic_hint_variant"] == "feature_internal_opaque"
+    assert info["semantic_hint_value"] == 0.7
     assert info["semantic_decision_applied"] is False
     assert info["keep_floor_pixels"] == 0
     assert info["alpha_cap_pixels"] == 0
@@ -419,7 +412,6 @@ def _character_capture_client() -> tuple[type, list[dict[str, object]]]:
                 foreground_srgb=image_srgb.copy(),
                 hint_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 raw_alpha=alpha.copy(),
-                color_protection_alpha=np.zeros(alpha.shape, dtype=np.float32),
                 debug={"hint": {"source": kwargs["hint_source"]}, "timings": {"total_sec": 0.0}},
             )
 

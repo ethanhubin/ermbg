@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from .colorspace import oklab_distance, srgb_to_oklab
-from .corridorkey_hint import build_corridorkey_hint_plan
+from .corridorkey_hint import corridorkey_hint_strengths
 from .keyer import KeyerThresholds, chromatic_key_alpha
 from .pipeline_contracts import (
     AmbiguityRegion,
@@ -98,6 +98,7 @@ def _known_b_trimap_kwargs_from_route(route: dict[str, Any]) -> dict[str, Any]:
     background = _background_from_route(route)
     return {
         "background_color": background,
+        "bg_source": str(params.get("pymatting_bg_source") or "custom"),
         "bg_threshold": float(params.get("pymatting_bg_threshold", 3.5)),
         "fg_threshold": float(params.get("pymatting_fg_threshold", 24.0)),
         "boundary_band_px": int(params.get("pymatting_boundary_band_px", 2)),
@@ -206,6 +207,29 @@ def _bbox(mask: np.ndarray) -> list[int]:
     if ys.size == 0:
         return [0, 0, 0, 0]
     return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+
+def _dark_outline_mask(image_srgb: np.ndarray, subject_support: np.ndarray) -> np.ndarray:
+    rgb = image_srgb.astype(np.float32)
+    luma = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+    max_channel = np.max(rgb, axis=2)
+    # Cartoon/UI outlines are dark strokes, not simply saturated material such as
+    # a red ring or orange fur. The max-channel gate keeps saturated body color
+    # from being mistaken for an outline.
+    return np.asarray(subject_support, dtype=bool) & (max_channel <= 145.0) & (luma <= 130.0)
+
+
+def _outline_color_similarity(
+    image_srgb: np.ndarray,
+    first_mask: np.ndarray,
+    second_mask: np.ndarray,
+) -> float:
+    if int(first_mask.sum()) < 4 or int(second_mask.sum()) < 4:
+        return 0.0
+    first = np.median(image_srgb[first_mask].astype(np.float32), axis=0)
+    second = np.median(image_srgb[second_mask].astype(np.float32), axis=0)
+    mean_abs_delta = float(np.mean(np.abs(first - second)))
+    return float(np.clip(1.0 - max(0.0, mean_abs_delta - 24.0) / 96.0, 0.0, 1.0))
 
 
 def _png_data_url_rgb(rgb: np.ndarray) -> str:
@@ -353,6 +377,7 @@ def _known_b_trimap_preview(
     *,
     candidate_mask: np.ndarray | None = None,
     region_masks: dict[str, np.ndarray] | None = None,
+    regions: list[AmbiguityRegion] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]] | None:
     """Build the explicit trimap that Analyze will hand to Execute.
 
@@ -367,14 +392,24 @@ def _known_b_trimap_preview(
     background = kwargs.pop("background_color")
     if background is None:
         return None
+    bg_source = str(kwargs.pop("bg_source", "custom"))
     decision = candidate.decision or {}
     region_masks = region_masks or {}
     try:
+        from .api import prepare_known_b_preprocessed_input
         from .pymatting_refine import build_known_background_trimap
 
-        trimap, assembly_info = build_known_background_trimap(
+        trimap_image_srgb, trimap_background, _bg_info, preprocess_info = prepare_known_b_preprocessed_input(
             image_srgb,
-            background,
+            bg_source=bg_source,
+            bg_color=background,
+            bg_threshold=float(kwargs["bg_threshold"]),
+            fg_threshold=float(kwargs["fg_threshold"]),
+            adaptive=False,
+        )
+        trimap, assembly_info = build_known_background_trimap(
+            trimap_image_srgb,
+            trimap_background,
             bg_threshold=float(kwargs["bg_threshold"]),
             fg_threshold=float(kwargs["fg_threshold"]),
             boundary_band_px=int(kwargs["boundary_band_px"]),
@@ -389,11 +424,20 @@ def _known_b_trimap_preview(
         return None
     hole_policies = decision.get("enclosed_near_bg_region_policies")
     shadow_policies = decision.get("known_b_shadow_region_policies")
+    region_by_id = {region.id: region for region in (regions or [])}
     semantic_forced_bg = np.zeros(trimap.sure_bg.shape, dtype=bool)
     semantic_forced_fg = np.zeros(trimap.sure_fg.shape, dtype=bool)
     semantic_hole_unknown = np.zeros(trimap.unknown.shape, dtype=bool)
     semantic_shadow_unknown = np.zeros(trimap.unknown.shape, dtype=bool)
+    semantic_forced_fg_exterior_unknown_overlap = np.zeros(trimap.unknown.shape, dtype=bool)
     semantic_hole_unknown_info: dict[str, Any] = {"method": "not_applied", "unknown_release_pixels": 0}
+    flat_opaque_internal_unknown = np.zeros(trimap.unknown.shape, dtype=bool)
+    flat_opaque_release_enabled = False
+    flat_opaque_info: dict[str, Any] = {
+        "applied": False,
+        "released_pixels": 0,
+        "reason": "not_applicable",
+    }
     if isinstance(hole_policies, dict):
         for region_id, policy_value in hole_policies.items():
             mask = region_masks.get(str(region_id))
@@ -425,12 +469,46 @@ def _known_b_trimap_preview(
             semantic_forced_bg,
             sure_fg=trimap.sure_fg,
         )
+    if isinstance(hole_policies, dict) and any(str(value) == "subject" for value in hole_policies.values()):
+        subject_regions = [
+            region_by_id.get(str(region_id))
+            for region_id, value in hole_policies.items()
+            if str(value) == "subject"
+        ]
+        subject_regions = [region for region in subject_regions if region is not None]
+        max_subject_outline = max(
+            (float(region.evidence.get("subject_outline_confidence") or 0.0) for region in subject_regions),
+            default=0.0,
+        )
+        max_hole_outline = max(
+            (float(region.evidence.get("hole_outline_confidence") or 0.0) for region in subject_regions),
+            default=0.0,
+        )
+        if max_subject_outline >= 0.45 and max_hole_outline < 0.65:
+            flat_opaque_release_enabled = True
+            flat_opaque_info = {
+                "applied": False,
+                "released_pixels": 0,
+                "reason": "pending post-semantic topology pass",
+                "subject_outline_confidence": float(max_subject_outline),
+                "hole_outline_confidence": float(max_hole_outline),
+                "policy": "topological_subject_internal_unknown_to_sure_fg",
+            }
+        else:
+            flat_opaque_info = {
+                "applied": False,
+                "released_pixels": 0,
+                "reason": "missing flat subject outline or matching hole outline is present",
+                "subject_outline_confidence": float(max_subject_outline),
+                "hole_outline_confidence": float(max_hole_outline),
+            }
 
     if bool(
         semantic_forced_bg.any()
         or semantic_forced_fg.any()
         or semantic_hole_unknown.any()
         or semantic_shadow_unknown.any()
+        or flat_opaque_release_enabled
     ):
         sure_fg = trimap.sure_fg.copy()
         sure_bg = trimap.sure_bg.copy()
@@ -443,6 +521,45 @@ def _known_b_trimap_preview(
             sure_bg[semantic_forced_bg] = True
             sure_fg[semantic_forced_bg] = False
             unknown[semantic_forced_bg] = False
+        if bool(flat_opaque_release_enabled):
+            # Run after subject/FG overlays: semantic opaque regions can cut
+            # thin connections that made interior marks look exterior-connected
+            # in the raw builder trimap. Transparent-hole and shadow unknown
+            # overlays are applied afterward so they can still restore their
+            # own explicit solve regions.
+            exterior_bg = _exterior_mask(sure_bg)
+            unknown_seed = unknown & cv2.dilate(
+                exterior_bg.astype(np.uint8),
+                np.ones((3, 3), np.uint8),
+                iterations=1,
+            ).astype(bool)
+            unknown_seed[0, :] |= unknown[0, :]
+            unknown_seed[-1, :] |= unknown[-1, :]
+            unknown_seed[:, 0] |= unknown[:, 0]
+            unknown_seed[:, -1] |= unknown[:, -1]
+            exterior_connected_unknown = _components_touching_seed(unknown, unknown_seed)
+            flat_opaque_internal_unknown = unknown & ~exterior_connected_unknown
+            semantic_forced_fg_exterior_unknown_overlap = semantic_forced_fg & exterior_connected_unknown
+            if bool(flat_opaque_internal_unknown.any()):
+                sure_fg[flat_opaque_internal_unknown] = True
+                sure_bg[flat_opaque_internal_unknown] = False
+                unknown[flat_opaque_internal_unknown] = False
+            flat_opaque_info.update(
+                {
+                    "applied": bool(flat_opaque_internal_unknown.any()),
+                    "released_pixels": int(flat_opaque_internal_unknown.sum()),
+                    "reason": ""
+                    if bool(flat_opaque_internal_unknown.any())
+                    else "no post-semantic topologically internal unknown components",
+                    "exterior_connected_unknown_pixels": int(exterior_connected_unknown.sum()),
+                    "internal_unknown_pixels": int(flat_opaque_internal_unknown.sum()),
+                    "unknown_seed_pixels": int(unknown_seed.sum()),
+                    "semantic_forced_fg_exterior_unknown_overlap_pixels": int(
+                        semantic_forced_fg_exterior_unknown_overlap.sum()
+                    ),
+                    "topology_stage": "after_subject_fg_and_bg_overlays",
+                }
+            )
         if bool(semantic_hole_unknown.any()):
             unknown[semantic_hole_unknown] = True
             sure_bg[semantic_hole_unknown] = False
@@ -474,7 +591,12 @@ def _known_b_trimap_preview(
         "semantic_forced_fg_pixels": int(semantic_forced_fg.sum()),
         "semantic_hole_unknown_pixels": int(semantic_hole_unknown.sum()),
         "semantic_shadow_unknown_pixels": int(semantic_shadow_unknown.sum()),
+        "semantic_forced_fg_exterior_unknown_overlap_pixels": int(
+            semantic_forced_fg_exterior_unknown_overlap.sum()
+        ),
         "semantic_hole_unknown": semantic_hole_unknown_info,
+        "flat_opaque_internal_unknown": flat_opaque_info,
+        "preprocess": preprocess_info,
         "candidate_assembly": assembly_info,
     }
     return preview, metadata
@@ -548,7 +670,14 @@ def _attach_preview_assets(
         mask = _candidate_mask(candidate, region_masks, (h, w))
         refs: dict[str, str] = {}
         trimap_preview = (
-            _known_b_trimap_preview(image_srgb, route, candidate, candidate_mask=mask, region_masks=region_masks)
+            _known_b_trimap_preview(
+                image_srgb,
+                route,
+                candidate,
+                candidate_mask=mask,
+                region_masks=region_masks,
+                regions=regions,
+            )
             if route_algorithm == "pymatting_known_b"
             else None
         )
@@ -572,18 +701,20 @@ def _attach_preview_assets(
         }
         hint_metadata: dict[str, Any] | None = None
         if route_algorithm == "corridorkey":
-            variant = decision.get("corridorkey_hint_variant")
-            background = _corridorkey_background_from_route(route)
-            if isinstance(variant, str) and background is not None:
-                try:
-                    plan = build_corridorkey_hint_plan(image_srgb, background, variant=variant)  # type: ignore[arg-type]
-                    mode_images["hint"] = _png_data_url_rgba(_grayscale_hint_preview(plan.hint))
-                    hint_metadata = plan.metadata
-                except Exception:
-                    hint_metadata = {
-                        "source": "corridorkey_hint_preview_unavailable",
-                        "corridorkey_hint_variant": variant,
-                    }
+            hint_value = decision.get("corridorkey_hint_value")
+            if isinstance(hint_value, (int, float)):
+                value = float(np.clip(float(hint_value), 0.0, 1.0))
+                hint = np.full((h, w), value, dtype=np.float32)
+                mode_images["hint"] = _png_data_url_rgba(_grayscale_hint_preview(hint))
+                hint_metadata = {
+                    "schema": "ermbg.corridorkey_constant_hint.v1",
+                    "source": "semantic_corridorkey_hint_value",
+                    "kind": "full_frame_constant",
+                    "value": value,
+                    "min": value,
+                    "max": value,
+                    "mean": value,
+                }
         for mode in preview_modes:
             data_url = mode_images[mode]
             key = f"candidate:{candidate.id}:{mode}"
@@ -640,10 +771,20 @@ def _enclosed_near_background_regions(
     exterior = _exterior_mask(near_bg)
     enclosed = near_bg & ~exterior
     subject_support = distance >= float(subject_distance_min)
+    outline_support = _dark_outline_mask(image_srgb, subject_support)
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (2 * int(anchor_dilate_px) + 1, 2 * int(anchor_dilate_px) + 1),
     )
+    outline_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    exterior_subject_ring = cv2.dilate(exterior.astype(np.uint8), outline_kernel, iterations=1).astype(bool)
+    exterior_subject_ring &= subject_support
+    exterior_outline = exterior_subject_ring & outline_support
+    exterior_ring_pixels = int(exterior_subject_ring.sum())
+    exterior_outline_pixels = int(exterior_outline.sum())
+    exterior_outline_fraction = float(exterior_outline_pixels) / max(float(exterior_ring_pixels), 1.0)
+    subject_outline_confidence = float(np.clip((exterior_outline_fraction - 0.08) / 0.42, 0.0, 1.0))
     near_subject = cv2.dilate(subject_support.astype(np.uint8), kernel, iterations=1).astype(bool)
     support = enclosed & near_subject
 
@@ -682,6 +823,23 @@ def _enclosed_near_background_regions(
         min_support_pixels = max(4, min(24, int(round(float(area) * 0.03))))
         if support_pixels < min_support_pixels:
             continue
+        outer_ring = cv2.dilate(comp.astype(np.uint8), outline_kernel, iterations=1).astype(bool) & ~comp
+        inner_edge = comp & ~cv2.erode(comp.astype(np.uint8), edge_kernel, iterations=1).astype(bool)
+        hole_outline = outer_ring & outline_support
+        hole_outline_pixels = int(hole_outline.sum())
+        hole_ring_pixels = int(outer_ring.sum())
+        hole_edge_pixels = int(inner_edge.sum())
+        hole_outline_fraction = float(hole_outline_pixels) / max(float(hole_ring_pixels), 1.0)
+        hole_outline_near = cv2.dilate(hole_outline.astype(np.uint8), edge_kernel, iterations=1).astype(bool)
+        hole_outline_continuity = float((inner_edge & hole_outline_near).sum()) / max(float(hole_edge_pixels), 1.0)
+        outline_similarity = _outline_color_similarity(image_srgb, exterior_outline, hole_outline)
+        hole_outline_confidence = float(
+            np.clip(
+                min(hole_outline_fraction / 0.35, hole_outline_continuity / 0.60) * outline_similarity,
+                0.0,
+                1.0,
+            )
+        )
         region_id = f"ambiguous_enclosed_bg_{len(regions)}"
         masks[region_id] = comp.copy()
         regions.append(
@@ -698,6 +856,14 @@ def _enclosed_near_background_regions(
                     "near_background_fraction": float(near_bg[comp].mean()) if area else 0.0,
                     "subject_support_pixels": int(support_pixels),
                     "subject_support_fraction": float(support_fraction),
+                    "subject_outline_pixels": int(exterior_outline_pixels),
+                    "subject_outline_fraction": float(exterior_outline_fraction),
+                    "subject_outline_confidence": float(subject_outline_confidence),
+                    "hole_outline_pixels": int(hole_outline_pixels),
+                    "hole_outline_fraction": float(hole_outline_fraction),
+                    "hole_outline_continuity": float(hole_outline_continuity),
+                    "hole_outline_color_similarity": float(outline_similarity),
+                    "hole_outline_confidence": float(hole_outline_confidence),
                     "semantic_mask_scope": "full_enclosed_component",
                     "bg_distance_max": float(bg_distance_max),
                     "bg_distance_p50": distance_p50,
@@ -1416,15 +1582,32 @@ def _enclosed_near_bg_region_scores(region: AmbiguityRegion) -> tuple[float, flo
     distance_confidence = 1.0 - float(np.clip(bg_distance_p50 / bg_distance_max, 0.0, 1.0))
     support_fraction = float(evidence.get("subject_support_fraction") or 0.0)
     support_confidence = float(np.clip(support_fraction / 0.25, 0.0, 1.0))
+    subject_outline_confidence = float(np.clip(float(evidence.get("subject_outline_confidence") or 0.0), 0.0, 1.0))
+    hole_outline_confidence = float(np.clip(float(evidence.get("hole_outline_confidence") or 0.0), 0.0, 1.0))
 
     reasons = [
         "enclosed region does not touch exterior background",
         "candidate policy is scored per region before execution",
     ]
     if evidence_mode == "tight_enclosed_background_match":
-        transparent_score = 0.58 + 0.26 * distance_confidence + 0.08 * support_confidence
-        subject_score = 0.50 - 0.10 * distance_confidence + 0.05 * (1.0 - support_confidence)
-        reasons.append("tight known-background color match raises transparent-hole confidence")
+        transparent_score = (
+            0.42
+            + 0.17 * distance_confidence
+            + 0.28 * hole_outline_confidence
+            + 0.04 * support_confidence
+        )
+        subject_score = (
+            0.50
+            - 0.04 * distance_confidence
+            + 0.45 * subject_outline_confidence * (1.0 - hole_outline_confidence)
+            + 0.04 * (1.0 - support_confidence)
+        )
+        if hole_outline_confidence >= 0.65:
+            reasons.append("matching enclosed outline raises transparent-hole confidence")
+        elif subject_outline_confidence >= 0.45:
+            reasons.append("flat outlined subject without matching hole outline raises opaque-material confidence")
+        else:
+            reasons.append("tight known-background color match remains ambiguous without hole-outline evidence")
     elif evidence_mode == "translucent_known_b_material_band":
         transparent_score = 0.30 + 0.08 * distance_confidence
         subject_score = 0.66 + 0.10 * support_confidence
@@ -1626,40 +1809,29 @@ def _corridorkey_translucency_candidates(regions: list[AmbiguityRegion]) -> list
         )
         if ids
     ]
-    specs = [
-        (
-            "auto_default",
-            "CorridorKey balanced",
-            "Use the measured feature hint as the default moderate interpretation.",
-            "feature_balanced",
-            True,
-            0.62,
-        ),
-        (
-            "corridorkey_translucent",
-            "CorridorKey translucent",
-            "Bias disputed same-screen material toward a more transparent interpretation.",
-            "feature_translucent",
-            False,
-            0.48,
-        ),
-        (
-            "corridorkey_conservative",
-            "CorridorKey conservative",
-            "Bias disputed same-screen material toward stronger foreground retention.",
-            "feature_conservative",
-            False,
-            0.5,
-        ),
-        (
-            "corridorkey_internal_opaque",
-            "CorridorKey internal opaque",
-            "Treat the enclosed hard-edge internal transparency domain as mostly opaque material.",
-            "feature_internal_opaque",
-            False,
-            0.46,
-        ),
-    ]
+    def spec_for(value: float) -> tuple[str, str, str, float, bool, float]:
+        value = float(value)
+        suffix = f"{int(round(value * 100)):03d}"
+        candidate_id = "auto_default" if np.isclose(value, 0.32) else f"corridorkey_hint_{suffix}"
+        label = f"CorridorKey hint {value:.2f}"
+        if np.isclose(value, 0.0):
+            intent = "Run CorridorKey with no foreground prior."
+            confidence = 0.42
+        elif np.isclose(value, 0.16):
+            intent = "Run CorridorKey with a light full-frame foreground prior."
+            confidence = 0.5
+        elif np.isclose(value, 0.32):
+            intent = "Run CorridorKey with the default full-frame soft prior."
+            confidence = 0.62
+        elif value < 0.7:
+            intent = "Run CorridorKey with a stronger full-frame foreground prior."
+            confidence = 0.5
+        else:
+            intent = "Run CorridorKey with a high full-frame foreground prior."
+            confidence = 0.46
+        return candidate_id, label, intent, value, bool(np.isclose(value, 0.32)), confidence
+
+    specs = [spec_for(value) for value in corridorkey_hint_strengths()]
     return [
         SemanticCandidate(
             id=candidate_id,
@@ -1669,18 +1841,18 @@ def _corridorkey_translucency_candidates(regions: list[AmbiguityRegion]) -> list
             confidence=confidence,
             risk_level="medium",
             decision={
-                "policy": "corridorkey_hint_variant",
-                "corridorkey_hint_variant": variant,
+                "policy": "corridorkey_constant_hint",
+                "corridorkey_hint_value": value,
                 "review_region_types": region_types,
             },
             regions=all_ids,
             preview=preview,
             reasons=[
-                "CorridorKey ambiguity is controlled by hint image variants, not post-alpha hard constraints",
-                "single-image evidence cannot produce one mathematically exact translucent solution",
+                "CorridorKey ambiguity is controlled by full-frame hint strength, not post-alpha hard constraints",
+                "single-image evidence cannot choose one stable hint strength for every screen asset",
             ],
         )
-        for candidate_id, label, intent, variant, default, confidence in specs
+        for candidate_id, label, intent, value, default, confidence in specs
     ]
 
 
@@ -1878,14 +2050,9 @@ def _button_candidate_units(regions: list[AmbiguityRegion]) -> list[_CandidateUn
 
     if len(hole_regions) > 1:
         hole_ids = [region.id for region in hole_regions]
-        tight_count = sum(
-            1
-            for region in hole_regions
-            if str(region.evidence.get("evidence_mode") or "") == "tight_enclosed_background_match"
-        )
-        tight_fraction = float(tight_count) / max(float(len(hole_regions)), 1.0)
-        cut_score = 0.42 + 0.24 * tight_fraction
-        keep_score = 0.64 - 0.12 * tight_fraction
+        region_scores = [_enclosed_near_bg_region_scores(region) for region in hole_regions]
+        cut_score = float(sum(score[0] for score in region_scores) / max(float(len(region_scores)), 1.0))
+        keep_score = float(sum(score[1] for score in region_scores) / max(float(len(region_scores)), 1.0))
         units.append(
             _CandidateUnit(
                 id="holes",
@@ -1926,15 +2093,7 @@ def _button_candidate_units(regions: list[AmbiguityRegion]) -> list[_CandidateUn
         )
     else:
         for index, region in enumerate(hole_regions):
-            evidence_mode = str(region.evidence.get("evidence_mode") or "")
-            tight_known_b = evidence_mode == "tight_enclosed_background_match"
-            # A clean enclosed known-B island is more likely a real hole;
-            # translucent material bands get the opposite prior. A single hole
-            # remains independently selectable; multiple repeated holes are
-            # grouped above so the useful all-cut/all-keep alternatives do not
-            # disappear behind beam pruning.
-            cut_score = 0.66 if tight_known_b else 0.42
-            keep_score = 0.52 if tight_known_b else 0.64
+            cut_score, keep_score, _reasons = _enclosed_near_bg_region_scores(region)
             units.append(
                 _CandidateUnit(
                     id=f"hole_{index}",
@@ -2133,11 +2292,9 @@ def _semantic_plan_for_route(
             regions = hole_regions + shadow_regions + body_regions
             region_masks = {**hole_masks, **shadow_masks, **body_masks}
     elif route.get("algorithm") == "corridorkey":
-        # CorridorKey defaults to a full-frame 0.32 soft prior and exposes no
-        # feature-hint candidates. The screen / alpha-structure detectors and
-        # feature-hint variants are kept in tree but are no longer wired into the
-        # default analyze path, so Analyze emits only the plain auto_default
-        # candidate and the executor applies the default soft-prior hint.
+        # CorridorKey is steered only by full-frame constant hint strength here.
+        # The feature-hint experiments remain available as helpers, but are not
+        # wired into Analyze or Execute.
         regions = []
         region_masks = {}
 
@@ -2156,6 +2313,8 @@ def _semantic_plan_for_route(
             candidates = _known_b_connected_shadow_candidates(regions)
         else:
             candidates = _enclosed_near_bg_candidates(regions)
+    elif route.get("algorithm") == "corridorkey":
+        candidates = _corridorkey_translucency_candidates([])
     else:
         candidates = [_ready_candidate()]
     return semantic_input, effective_preprocess, regions, region_masks, candidates

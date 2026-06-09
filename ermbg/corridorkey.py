@@ -25,9 +25,6 @@ class CorridorKeyRecommendedSettings:
     refiner_strength: float = 1.0
     auto_despeckle: str = "On"
     despeckle_size: int = 400
-    color_protection: bool = True
-    protection_bg_max: float = 12.0
-    protection_fg_min: float = 28.0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -194,10 +191,6 @@ def _key_color_material_stats(
     # catches same-hue UI material that a strong keyer/despill pass may erase,
     # without counting the stable screen itself as subject.
     subject_key_color_risk = float(near_count / max(1, int(candidate_subject.sum())))
-    # Color protection should only become strong when near-key evidence is
-    # anchored in hard/solid subject support. Broad soft ownership is usually
-    # screen tint passing through translucent material, and CorridorKey should
-    # own that alpha instead of an alpha floor rescuing it as solid subject.
     solid_fraction = float(near_hard.sum() / max(1, near_count))
     hard_density = float(near_hard.sum() / max(1, int(hard_subject.sum())))
     return subject_key_color_risk, solid_fraction, hard_density, compact_fill, compact_fraction
@@ -288,35 +281,10 @@ def _hard_screen_residue_risk(subject_key_color_risk: float, key_transition_frac
     return float(subject_key_color_risk * transition_factor)
 
 
-def _color_protection_endpoints(subject_key_color_risk: float, screen_mode: str) -> tuple[float, float, str]:
-    """Generate color-protection thresholds from same-hue subject evidence.
-
-    The feature is the fraction of candidate foreground that remains in the
-    key-color a/b family. Low values mean any near-key soft edge is more likely
-    screen mixing or spill, so protection starts farther from the background.
-    High values mean actual subject material overlaps the screen hue family,
-    so protection must start earlier and the model path becomes detail-safe.
-    The middle band is interpolated to avoid sample-specific cliff behavior.
-    """
+def _same_key_material_profile(subject_key_color_risk: float, screen_mode: str) -> str:
     if screen_mode == "blue":
-        # Blue screens overlap common purple/cyan game materials more often
-        # than green screens. Sparse blue-family evidence is treated as possible
-        # screen mixing, dominant same-family evidence gets material protection,
-        # and the broad middle band interpolates so purple soft layers are not
-        # stripped just because they are near the blue key family.
-        low_risk = 0.08
-        high_risk = 0.45
-    else:
-        low_risk = 0.015
-        high_risk = 0.06
-    if subject_key_color_risk <= low_risk:
-        return 12.0, 28.0, "edge_cleanup"
-    if subject_key_color_risk >= high_risk:
-        return 6.0, 14.0, "key_color_material"
-    t = float(np.clip((subject_key_color_risk - low_risk) / (high_risk - low_risk), 0.0, 1.0))
-    bg_max = 12.0 * (1.0 - t) + 6.0 * t
-    fg_min = 28.0 * (1.0 - t) + 14.0 * t
-    return round(bg_max * 2.0) / 2.0, round(fg_min * 2.0) / 2.0, "balanced"
+        return "key_color_material" if subject_key_color_risk >= 0.45 else "balanced"
+    return "key_color_material" if subject_key_color_risk >= 0.06 else "balanced"
 
 
 def _has_explicit_solid_key_material(
@@ -327,11 +295,9 @@ def _has_explicit_solid_key_material(
 ) -> bool:
     """Return whether same-key-family color is likely real solid subject.
 
-    This is the semantic gate for color protection. Solid UI/character material
-    has near-key color anchored in opaque support; translucent ribbons, hair,
-    smoke, and glass often have lots of near-key pixels but mostly in soft
-    transitions. Those should be left to CorridorKey and foreground recovery,
-    not rescued by a color-protection alpha floor.
+    Solid UI/character material has near-key color anchored in opaque support;
+    translucent ribbons, hair, smoke, and glass often have lots of near-key
+    pixels but mostly in soft transitions.
     """
     hard_supported = (solid_fraction >= 0.25 and hard_density >= 0.08) or hard_density >= 0.12
     compact_same_color_region = compact_fill >= 0.85 and compact_fraction >= 0.35
@@ -351,9 +317,6 @@ def _with_common_adjustments(
             refiner_strength=settings.refiner_strength,
             auto_despeckle="Off",
             despeckle_size=64,
-            color_protection=settings.color_protection,
-            protection_bg_max=settings.protection_bg_max,
-            protection_fg_min=settings.protection_fg_min,
         )
     if purity_sigma >= 8.0:
         settings = CorridorKeyRecommendedSettings(
@@ -362,9 +325,6 @@ def _with_common_adjustments(
             refiner_strength=min(settings.refiner_strength, 0.9),
             auto_despeckle=settings.auto_despeckle,
             despeckle_size=settings.despeckle_size,
-            color_protection=settings.color_protection,
-            protection_bg_max=settings.protection_bg_max,
-            protection_fg_min=settings.protection_fg_min,
         )
     return settings
 
@@ -424,8 +384,8 @@ def _opaque_hard_ui_profile_candidates(
     """Return hard opaque UI shadow-profile candidates from screen evidence.
 
     The split is intentionally semantic: no-shadow, hard-shadow, and soft-shadow
-    buttons need different color-protection behavior even though all are opaque
-    UI. Current aggregate color/alpha features cannot yet separate every
+    buttons need different CorridorKey profile settings even though all are
+    opaque UI. Current aggregate color/alpha features cannot yet separate every
     translucent C-button collision, so local-diffusion recognition must later
     outrank these candidates.
     """
@@ -557,12 +517,10 @@ def _semantic_decision_candidates(
     The candidates here are intentionally based only on observable ownership
     semantics: whether same-key-family pixels look like solid subject material,
     screen-tinted translucency, or ordinary edge cleanup. Concrete CorridorKey
-    strengths and color-protection thresholds are assigned later by
-    _settings_for_profile(), so path-recognition tests can fail independently
-    from parameter-tuning tests.
+    strengths are assigned later by _settings_for_profile(), so
+    path-recognition tests can fail independently from parameter-tuning tests.
     """
-    bg_max, fg_min, profile_from_distance = _color_protection_endpoints(subject_key_color_risk, screen_mode)
-    del bg_max, fg_min
+    profile_from_distance = _same_key_material_profile(subject_key_color_risk, screen_mode)
     material_conf, translucent_conf, cleanup_conf = _candidate_confidences(
         subject_key_color_risk=subject_key_color_risk,
         key_color_solid_fraction=key_color_solid_fraction,
@@ -615,7 +573,7 @@ def _semantic_decision_candidates(
                 settings=CorridorKeyRecommendedSettings(),
                 reason=(
                     "UI material has broad near-screen transition ownership; "
-                    "color protection is unreliable for globally translucent material."
+                    "treat it as globally translucent material."
                 ),
             )
         )
@@ -626,7 +584,7 @@ def _semantic_decision_candidates(
             label="清理近幕色边缘",
             confidence=cleanup_conf,
             settings=CorridorKeyRecommendedSettings(),
-            reason="Near-key evidence is weak or ambiguous; keep color protection narrow and let CorridorKey own soft edges.",
+            reason="Near-key evidence is weak or ambiguous; let CorridorKey own soft edges.",
         )
     )
 
@@ -637,7 +595,7 @@ def _semantic_decision_candidates(
                 label="半透明层交给 CorridorKey",
                 confidence=translucent_conf,
                 settings=CorridorKeyRecommendedSettings(),
-                reason="Near-key color is mostly in soft/transparent support; avoid alpha-floor protection.",
+                reason="Near-key color is mostly in soft/transparent support.",
             )
         )
 
@@ -694,23 +652,17 @@ def _settings_for_profile(
             refiner_strength=1.15,
             auto_despeckle="On",
             despeckle_size=400,
-            color_protection=True,
-            protection_bg_max=8.0,
-            protection_fg_min=18.0,
         )
     elif profile == "opaque_hard_ui_same_key_plateau":
         del confidence
-        # Same-screen-family material is the opposite of translucent tint: keep
-        # color protection on and route-level logic will hand the case to
-        # Known-B when a stable background exists.
+        # Same-screen-family material is the opposite of translucent tint:
+        # route-level logic will hand the case to Known-B when a stable
+        # background exists.
         settings = CorridorKeyRecommendedSettings(
             despill_strength=1.0,
             refiner_strength=1.15,
             auto_despeckle="On",
             despeckle_size=400,
-            color_protection=True,
-            protection_bg_max=8.0,
-            protection_fg_min=18.0,
         )
     elif profile == "opaque_hard_ui_hard_shadow":
         del confidence
@@ -724,9 +676,6 @@ def _settings_for_profile(
             refiner_strength=1.15,
             auto_despeckle="On",
             despeckle_size=400,
-            color_protection=True,
-            protection_bg_max=8.0,
-            protection_fg_min=18.0,
         )
     elif profile == "opaque_hard_ui_soft_shadow":
         del confidence
@@ -738,9 +687,6 @@ def _settings_for_profile(
             refiner_strength=1.15,
             auto_despeckle="On",
             despeckle_size=400,
-            color_protection=True,
-            protection_bg_max=8.0,
-            protection_fg_min=18.0,
         )
     elif profile == "edge_cleanup":
         del confidence
@@ -749,71 +695,45 @@ def _settings_for_profile(
         # proving what the subject is, so Stage 2 stays stable instead of
         # pushing refiner/protection hard and risking loss of ordinary details.
         settings = CorridorKeyRecommendedSettings(
-            color_protection=True,
-            protection_bg_max=12.0,
-            protection_fg_min=28.0,
         )
     elif profile == "screen_tinted_translucency":
-        # Translucent tint is not protected by alpha floor. A confident route
-        # pushes CorridorKey/refinement harder because the near-key color is
-        # judged to be screen contamination rather than solid subject paint.
+        # A confident route pushes CorridorKey/refinement harder because the
+        # near-key color is judged to be screen contamination rather than solid
+        # subject paint.
         settings = CorridorKeyRecommendedSettings(
             refiner_strength=1.15 if confidence >= 0.75 else 1.0,
             auto_despeckle="Off",
             despeckle_size=64,
-            color_protection=False,
-            protection_bg_max=6.0,
-            protection_fg_min=14.0,
         )
     elif profile == "translucent_button":
         del confidence
         # Whole-button translucency mixes subject and screen color throughout
-        # the material. A color-protection alpha floor has no stable foreground
-        # color to protect there, so it turns screen tint into dirty subject
-        # residue. Let CorridorKey own the translucent subject and let the
-        # source-reprojection shadow repair recover any cast shadow underneath.
+        # the material. Let CorridorKey own the translucent subject.
         settings = CorridorKeyRecommendedSettings(
             despill_strength=1.0,
             refiner_strength=1.15,
             auto_despeckle="Off",
             despeckle_size=64,
-            color_protection=False,
-            protection_bg_max=6.0,
-            protection_fg_min=14.0,
         )
     elif profile == "composite_character_corridor_only":
         del confidence
         # Composite characters can contain opaque armor/skin, hair strands,
         # glow, fabric, and transparent accessories in the same connected
-        # subject. A color-protection floor is not smart enough to own those
-        # materials safely; use this profile as a clean CorridorKey-capability
-        # experiment with a full-frame hint and no color protection.
+        # subject.
         settings = CorridorKeyRecommendedSettings(
             despill_strength=1.0,
             refiner_strength=1.0,
             auto_despeckle="Off",
             despeckle_size=64,
-            color_protection=False,
-            protection_bg_max=6.0,
-            protection_fg_min=14.0,
         )
     elif profile == "key_color_material":
-        # Once same-key hue is anchored in hard/compact subject support, protect
-        # it aggressively; this is the opposite of the translucent path.
         aggressive = confidence >= 0.85 and explicit_solid_material
         settings = CorridorKeyRecommendedSettings(
             despill_strength=0.45 if aggressive else 0.65,
             refiner_strength=0.70 if aggressive else 0.85,
-            color_protection=True,
-            protection_bg_max=4.0 if aggressive else 6.0,
-            protection_fg_min=10.0 if aggressive else 14.0,
         )
     elif profile == "balanced":
-        bg_max, fg_min, _ = _color_protection_endpoints(subject_key_color_risk, screen_mode)
         settings = CorridorKeyRecommendedSettings(
-            color_protection=True,
-            protection_bg_max=bg_max,
-            protection_fg_min=fg_min,
         )
     else:
         settings = CorridorKeyRecommendedSettings()
@@ -830,9 +750,6 @@ def _settings_for_profile(
             refiner_strength=max(settings.refiner_strength, 1.5),
             auto_despeckle=settings.auto_despeckle,
             despeckle_size=settings.despeckle_size,
-            color_protection=settings.color_protection,
-            protection_bg_max=settings.protection_bg_max,
-            protection_fg_min=settings.protection_fg_min,
         )
     return _with_common_adjustments(
         settings,
@@ -877,8 +794,6 @@ def _recommend_settings(
                 refiner_strength=1.15,
                 auto_despeckle="On",
                 despeckle_size=400,
-                protection_bg_max=8.0,
-                protection_fg_min=18.0,
             ),
             reason="Preset favors stronger screen-spill cleanup.",
             selected=True,
@@ -894,8 +809,6 @@ def _recommend_settings(
                 refiner_strength=0.85,
                 auto_despeckle="Off",
                 despeckle_size=64,
-                protection_bg_max=6.0,
-                protection_fg_min=14.0,
             ),
             reason="Preset protects small ornaments and key-color subject material.",
             selected=True,
@@ -920,7 +833,7 @@ def _recommend_settings(
     parameter_profile = selected.profile
     notes.append(f"stage1 selected {selected.profile} semantic path at confidence {selected.confidence:.2f}")
     if parameter_profile == "key_color_material":
-        notes.append("stage2 key-color material tuning reduced despill/refiner and tightened color protection")
+        notes.append("stage2 key-color material tuning reduced despill/refiner")
     if hard_screen_residue_risk >= 0.04 and parameter_profile != "screen_tinted_translucency":
         notes.append("stage2 hard screen-family residue tuning increased refiner strength")
     if parameter_profile == "opaque_hard_ui_no_shadow":
@@ -928,19 +841,19 @@ def _recommend_settings(
     elif parameter_profile == "opaque_hard_ui_same_key_plateau":
         notes.append("stage2 same-key opaque plateau tuning keeps the deterministic hard-UI path")
     elif parameter_profile == "opaque_hard_ui_hard_shadow":
-        notes.append("stage2 opaque-hard-UI hard-shadow tuning uses conservative color protection for the shadow band")
+        notes.append("stage2 opaque-hard-UI hard-shadow tuning keeps cleanup conservative around the shadow band")
     elif parameter_profile == "opaque_hard_ui_soft_shadow":
-        notes.append("stage2 opaque-hard-UI soft-shadow tuning keeps broad soft ownership out of material protection")
+        notes.append("stage2 opaque-hard-UI soft-shadow tuning keeps broad soft ownership out of solid material tuning")
     elif parameter_profile == "edge_cleanup":
-        notes.append("stage2 edge-cleanup tuning narrowed color protection away from near-screen fringe")
+        notes.append("stage2 edge-cleanup tuning leaves near-screen fringe to CorridorKey")
     elif parameter_profile == "balanced":
-        notes.append("stage2 balanced tuning interpolated color protection from same-hue foreground risk")
+        notes.append("stage2 balanced tuning keeps default CorridorKey cleanup")
     elif parameter_profile == "screen_tinted_translucency":
-        notes.append("stage2 translucent tuning disabled color protection")
+        notes.append("stage2 translucent tuning uses CorridorKey-owned transparency")
     elif parameter_profile == "translucent_button":
-        notes.append("stage2 translucent-button tuning disabled color protection")
+        notes.append("stage2 translucent-button tuning uses CorridorKey-owned button transparency")
     elif parameter_profile == "composite_character_corridor_only":
-        notes.append("stage2 composite-character corridor-only tuning disabled color protection and automatic hint constraints")
+        notes.append("stage2 composite-character corridor-only tuning uses the constant hint contract")
     if small_component_risk:
         notes.append("small UI components disabled auto despeckle")
     if purity_sigma >= 8.0:

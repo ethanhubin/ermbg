@@ -64,6 +64,7 @@ from .slicer import (
     SliceResult,
     classify_ui_slice,
     crop_slice,
+    find_slice_boxes,
     merge_overlapping_slice_boxes,
     pad_slice_box,
     slice_image,
@@ -150,12 +151,8 @@ class WebExecutionRequest:
     corridorkey_auto_despeckle: str = "On"
     corridorkey_despeckle_size: int = 400
     corridorkey_auto_mask: bool = False
-    corridorkey_color_protection: bool = True
-    corridorkey_protection_bg_max: float = 12.0
-    corridorkey_protection_fg_min: float = 28.0
     corridorkey_screen_mode: str = "auto"
     corridorkey_preset: str = "auto"
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px"
     pymatting_method: str = "cf"
     pymatting_image_space: str = "linear"
     pymatting_bg_source: str = "auto"
@@ -419,7 +416,28 @@ def _load_upload_image_with_digest(upload: UploadFile) -> tuple[Image.Image, str
     return _image_from_upload_bytes(data), hashlib.sha256(data).hexdigest()
 
 
+def _source_alpha_mask(image: Image.Image) -> np.ndarray | None:
+    if image.mode != "RGBA":
+        return None
+    alpha = np.asarray(image.getchannel("A"), dtype=np.uint8)
+    if not np.any(alpha < 255):
+        return None
+    return alpha
+
+
+def _source_alpha_skip_info(*, requested: bool, stage: str) -> dict[str, object]:
+    return {
+        "requested": bool(requested),
+        "applied": False,
+        "skipped": True,
+        "reason": "source_alpha_transparent",
+        "stage": stage,
+    }
+
+
 def _preprocess_background_repair_image(image: Image.Image, enabled: bool) -> tuple[Image.Image, dict[str, object]]:
+    if _source_alpha_mask(image) is not None:
+        return image, _source_alpha_skip_info(requested=enabled, stage="background_repair")
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     result = apply_input_preprocess(
         rgb,
@@ -437,6 +455,14 @@ def _preprocess_background_repair_image(image: Image.Image, enabled: bool) -> tu
 def _image_digest(image: Image.Image) -> str:
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     return hashlib.sha256(rgb.tobytes()).hexdigest()
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+    if not fallback:
+        suffix = Path(filename).suffix if Path(filename).suffix.isascii() else ""
+        fallback = f"download{suffix or '.bin'}"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
 @app.get("/health")
@@ -492,6 +518,23 @@ def preprocess_analysis_endpoint(
     background_repair: Annotated[bool, Form()] = False,
 ) -> dict[str, object]:
     image = _load_upload_image(file)
+    source_alpha = _source_alpha_mask(image)
+    if source_alpha is not None:
+        skip_info = _source_alpha_skip_info(requested=background_repair, stage="preprocess_analysis")
+        return _json_safe_debug(
+            {
+                "schema": "ermbg.preprocess_analysis.v1",
+                "image_digest": _image_digest(image),
+                "width": int(image.width),
+                "height": int(image.height),
+                "selected": [],
+                "applied": [],
+                "preprocess": skip_info,
+                "analysis": {"items": [], "skipped": True, "reason": "source_alpha_transparent"},
+                "checkerboard": skip_info,
+                "next_endpoint": "/api/analyze-candidates",
+            }
+        )
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     result = apply_input_preprocess(
         rgb,
@@ -529,14 +572,17 @@ def analyze_candidates_endpoint(
     fallback_bg = _parse_rgb_triplet(fallback_bg_color)
     image = _load_upload_image(file)
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    source_alpha = _source_alpha_mask(image)
     preprocess = apply_input_preprocess(
         rgb,
-        selected=[BACKGROUND_REPAIR] if background_repair else [],
+        selected=[] if source_alpha is not None else ([BACKGROUND_REPAIR] if background_repair else []),
     )
     analyze_image = Image.fromarray(preprocess.image_srgb, mode="RGB")
     effective_preprocess = preprocess.decision
     known_b_preprocess_info: dict[str, Any] = {"requested": bool(background_repair), "applied": False}
-    if background_repair:
+    if source_alpha is not None:
+        known_b_preprocess_info = _source_alpha_skip_info(requested=background_repair, stage="known_b_background_normalization")
+    elif background_repair:
         pymatting_params = {
             "pymatting_bg_source": "auto",
             "pymatting_bg_color": fallback_bg,
@@ -767,6 +813,8 @@ def _apply_known_b_background_repair(
     route_params: dict[str, Any],
     pymatting_params: dict[str, object],
 ) -> tuple[Image.Image, dict[str, Any], dict[str, Any], PreprocessDecision | None]:
+    if _source_alpha_mask(image) is not None:
+        return image, _source_alpha_skip_info(requested=True, stage="known_b_background_normalization"), {}, None
     background, background_info = _known_b_background_from_params(image, route_params, pymatting_params)
     if background is None:
         return image, {"skipped": True, "reason": "missing_known_background_color"}, {}, None
@@ -1374,16 +1422,16 @@ def _matte_page_html() -> str:
     .candidate-panel { min-height: 0; display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 8px; padding: 10px; border: 1px solid #d9dfd7; border-radius: 6px; background: #fbfcfa; overflow: hidden; }
     .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 56px; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
-    .candidate-list { min-width: 0; display: grid; grid-template-columns: 1fr; gap: 8px; max-height: 240px; overflow-y: auto; padding: 2px; }
-    .candidate-tab { width: 100%; min-width: 0; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 8px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; text-align: left; }
+    .candidate-list { min-width: 0; display: grid; grid-template-columns: 1fr; grid-auto-rows: 64px; gap: 8px; max-height: var(--candidate-list-max-height, 50vh); overflow-y: auto; padding: 2px; align-content: start; }
+    .candidate-tab { width: 100%; min-width: 0; height: 64px; min-height: 64px; max-height: 64px; display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; gap: 8px; padding: 5px; border: 1px solid #cfd7cc; border-radius: 6px; background: #ffffff; color: #47524c; cursor: pointer; text-align: left; overflow: hidden; }
     .candidate-tab[aria-selected="true"] { border-color: #196f5a; box-shadow: 0 0 0 2px rgba(25, 111, 90, 0.18); color: #1c2320; }
-    .semantic-candidate-tab .candidate-name { white-space: normal; line-height: 1.2; }
-    .semantic-candidate-tab .candidate-copy { min-width: 0; display: grid; gap: 3px; }
+    .semantic-candidate-tab .candidate-name { white-space: nowrap; line-height: 1.2; }
+    .semantic-candidate-tab .candidate-copy { min-width: 0; display: grid; gap: 3px; overflow: hidden; }
     .candidate-subtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #68746e; font-size: 10px; font-weight: 700; line-height: 1.15; }
     .candidate-thumb { width: 56px; height: 56px; display: grid; place-items: center; overflow: hidden; border-radius: 4px; background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
     .candidate-thumb img { width: 56px; height: 56px; object-fit: contain; display: block; }
     .candidate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 800; line-height: 1.1; }
-    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
+    @media (max-width: 760px) { body { height: auto; min-height: 100vh; overflow: auto; } header { padding: 0 16px; } main { height: auto; min-height: 0; grid-template-columns: 1fr; padding: 16px; overflow: visible; } form { max-height: none; } .candidate-list { max-height: none; overflow-y: visible; } .preview { min-height: 620px; height: min(720px, calc(100vh - 32px)); grid-template-rows: auto auto minmax(0, 1fr) 56px; } .preview-bar { min-height: 84px; align-items: stretch; flex-direction: column; justify-content: center; padding: 10px 16px; } .tabs { width: 100%; overflow-x: auto; } .canvas { min-height: 0; height: 100%; } .source-frame { aspect-ratio: 16 / 10; max-height: 340px; } .mask-stage .source-frame { height: 100%; min-height: 0; max-height: none; aspect-ratio: auto; } }
   </style>
 </head>
 <body>
@@ -1418,7 +1466,6 @@ def _matte_page_html() -> str:
         <div class="settings-grid">
           <input id="ck-screen-mode" name="corridorkey_screen_mode" type="hidden" value="auto">
           <label class="inline-label">预设<select id="ck-preset" name="corridorkey_preset"><option value="auto" selected>自动</option><option value="detail_safe">细节保护</option><option value="spill_safe">强去溢色</option><option value="manual">手动参数</option></select></label>
-          <label class="inline-label">硬 UI Hint<select id="ck-hard-ui-hint-mode" name="corridorkey_hard_ui_hint_mode" disabled><option value="full_frame_zero">全黑 hint</option><option value="bbox_2px" selected>bbox 2px</option><option value="boundary_2px">边界 2px</option><option value="boundary_2px_shadow_safe">边界 2px shadow-safe</option><option value="boundary_2px_shadow_safe_edge_floor">边界 2px edge floor</option><option value="translucent_button">玻璃/半透明</option></select></label>
           <label class="inline-label">色彩空间<select id="ck-gamma-space" name="corridorkey_gamma_space"><option value="sRGB" selected>sRGB</option><option value="Linear">Linear</option></select></label>
           <div class="settings-row">
             <label>去溢色<input id="ck-despill" name="corridorkey_despill_strength" type="number" min="0" max="1" step="0.01" value="1"></label>
@@ -1429,17 +1476,6 @@ def _matte_page_html() -> str:
             <label>斑点尺寸<input id="ck-despeckle-size" name="corridorkey_despeckle_size" type="number" min="0" max="4096" step="1" value="400"></label>
           </div>
           <label class="check-label"><span>自动 Mask</span><input id="ck-auto-mask" name="corridorkey_auto_mask" type="checkbox"></label>
-          <label class="check-label"><span>颜色保护</span><input id="ck-color-protection" name="corridorkey_color_protection" type="checkbox" checked></label>
-          <div class="color-range">
-            <div class="range-head"><span>色彩范围</span><output class="range-value" id="ck-protect-range-value">12 / 28</output></div>
-            <div class="dual-range" id="ck-protect-range">
-              <span class="range-rail"></span>
-              <span class="range-fill"></span>
-              <input id="ck-protect-bg" name="corridorkey_protection_bg_max" type="range" min="0" max="64" step="0.5" value="12" aria-label="背景端点">
-              <input id="ck-protect-fg" name="corridorkey_protection_fg_min" type="range" min="0.5" max="64" step="0.5" value="28" aria-label="保护端点">
-            </div>
-            <div class="range-labels"><span>背景</span><span>过渡</span><span>保护</span></div>
-          </div>
         </div>
       </details>
       <details class="settings" id="known-bg-glow-settings" open>
@@ -1545,7 +1581,6 @@ def _matte_page_html() -> str:
     const pymattingSettingControls = Array.from(document.querySelectorAll("[name^='pymatting_']"));
     const shadowMode = document.getElementById("shadow-mode");
     const autoMask = document.getElementById("ck-auto-mask");
-    const hardUiHintMode = document.getElementById("ck-hard-ui-hint-mode");
     const samMaskButton = document.getElementById("sam-mask-button");
     const metaEl = statusEl;
     const sourceMeta = statusEl;
@@ -1553,10 +1588,6 @@ def _matte_page_html() -> str:
     const maskBrushModeButtons = Array.from(document.querySelectorAll("[data-mask-mode]"));
     const maskBrushSize = document.getElementById("mask-brush-size");
     const maskClearButton = document.getElementById("mask-clear-button");
-    const protectRange = document.getElementById("ck-protect-range");
-    const protectBg = document.getElementById("ck-protect-bg");
-    const protectFg = document.getElementById("ck-protect-fg");
-    const protectRangeValue = document.getElementById("ck-protect-range-value");
     const glowMaterialStrength = document.getElementById("glow-material-strength");
     const glowMaterialStrengthValue = document.getElementById("glow-material-strength-value");
     const backgroundTabs = Array.from(document.querySelectorAll("[data-bg]"));
@@ -1605,14 +1636,23 @@ def _matte_page_html() -> str:
       const base = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed}` : `完成 · ${elapsed}`;
       return details ? `${base} · ${details}` : base;
     }
+    function syncCandidateListHeight() {
+      if (window.matchMedia("(max-width: 760px)").matches) {
+        candidateList.style.removeProperty("--candidate-list-max-height");
+        return;
+      }
+      const rect = candidateList.getBoundingClientRect();
+      if (rect.top <= 0) return;
+      const bottomInset = 24;
+      const height = Math.max(160, Math.floor(window.innerHeight - rect.top - bottomInset));
+      candidateList.style.setProperty("--candidate-list-max-height", `${height}px`);
+    }
+    function scheduleCandidateListHeightSync() { requestAnimationFrame(syncCandidateListHeight); }
     function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy || !file.files.length || (!!pendingAnalyzePayload && !selectedSemanticCandidate); file.disabled = isBusy; backend.disabled = isBusy; backgroundRepair.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = true; if (!isBusy) syncAutoMaskControls(); submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy || !file.files.length || (!!pendingAnalyzePayload && !selectedSemanticCandidate); file.disabled = isBusy; backend.disabled = isBusy; backgroundRepair.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = true; submit.textContent = isBusy ? "处理中" : "抠图"; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
-    function syncAutoMaskControls() { hardUiHintMode.disabled = !autoMask.checked; }
     function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
-    function rangeText(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
-    function syncColorProtectionRange(changed) { const minGap = 0.5; const min = Number(protectBg.min); const max = Number(protectBg.max); let low = Number(protectBg.value); let high = Number(protectFg.value); if (low + minGap > high) { if (changed === protectBg) low = high - minGap; else high = low + minGap; } low = Math.max(min, Math.min(max - minGap, low)); high = Math.max(low + minGap, Math.min(max, high)); protectBg.value = String(low); protectFg.value = String(high); const lowPct = ((low - min) / (max - min)) * 100; const highPct = ((high - min) / (max - min)) * 100; protectRange.style.setProperty("--range-low", `${lowPct}%`); protectRange.style.setProperty("--range-high", `${highPct}%`); protectRangeValue.textContent = `${rangeText(low)} / ${rangeText(high)}`; }
     function syncPreviewMode() { const maskMode = activeView === "mask"; previewPanel.classList.toggle("is-mask-mode", maskMode); canvas.classList.toggle("is-mask-mode", maskMode); viewTabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.view === activeView))); backgroundTabs.forEach((tab) => tab.setAttribute("aria-selected", String(activeView === "preview" && tab.dataset.bg === activeBackground))); if (maskMode) layoutMaskCanvas(); }
     function setPreviewView(view) { activeView = view; syncPreviewMode(); }
     function setPreviewBackground(mode) { activeBackground = mode; activeView = "preview"; canvas.classList.remove("bg-white", "bg-black", "bg-gray", "bg-green", "bg-blue"); if (mode !== "checker") canvas.classList.add(`bg-${mode}`); syncPreviewMode(); }
@@ -1621,7 +1661,7 @@ def _matte_page_html() -> str:
     function resetMaskTransform() { maskScale = 1; maskPanX = 0; maskPanY = 0; applyMaskTransform(); }
     function maskTransformCss() { return `translate(-50%, -50%) translate(${maskPanX}px, ${maskPanY}px) scale(${maskScale})`; }
     function applyMaskTransform() { const transform = maskTransformCss(); if (sourceImage) sourceImage.style.transform = transform; if (maskCanvas) maskCanvas.style.transform = transform; }
-    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewRenderSeq += 1; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = true; confirmMatte.disabled = true; }
+    function resetResult() { candidates.forEach((candidate) => { if (candidate.revoke) URL.revokeObjectURL(candidate.url); }); candidates = []; activeCandidateIndex = -1; resultImage = null; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewRenderSeq += 1; resetPreviewTransform(); previewStage.innerHTML = '<span class="empty">结果会显示在这里</span>'; canvas.classList.remove("has-image", "is-dragging"); candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; scheduleCandidateListHeightSync(); metaEl.textContent = "RGBA PNG"; download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = true; confirmMatte.disabled = true; }
     function clearMaskState() { maskDirty = false; maskPainting = false; if (maskCanvas) { maskCanvas.remove(); maskCanvas = null; maskCtx = null; } sourceFrame.classList.remove("has-mask"); resetMaskTransform(); }
     function layoutMaskCanvas() { if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) return; const frameRect = sourceFrame.getBoundingClientRect(); if (frameRect.width <= 0 || frameRect.height <= 0) { requestAnimationFrame(layoutMaskCanvas); return; } const fit = Math.min(frameRect.width / sourceImage.naturalWidth, frameRect.height / sourceImage.naturalHeight); if (!Number.isFinite(fit) || fit <= 0) return; const displayWidth = Math.max(1, sourceImage.naturalWidth * fit); const displayHeight = Math.max(1, sourceImage.naturalHeight * fit); const transform = maskTransformCss(); sourceImage.style.width = `${displayWidth}px`; sourceImage.style.height = `${displayHeight}px`; sourceImage.style.maxWidth = "none"; sourceImage.style.maxHeight = "none"; sourceImage.style.left = "50%"; sourceImage.style.top = "50%"; sourceImage.style.transform = transform; if (maskCanvas) { maskCanvas.style.left = "50%"; maskCanvas.style.top = "50%"; maskCanvas.style.width = `${displayWidth}px`; maskCanvas.style.height = `${displayHeight}px`; maskCanvas.style.transform = transform; } }
     function ensureMaskCanvas(width, height) { if (!maskCanvas) { maskCanvas = document.createElement("canvas"); maskCanvas.className = "mask-overlay"; sourceFrame.appendChild(maskCanvas); maskCanvas.addEventListener("pointerdown", beginMaskPaint); maskCanvas.addEventListener("pointermove", paintMask); maskCanvas.addEventListener("pointerup", endMaskPaint); maskCanvas.addEventListener("pointercancel", endMaskPaint); } maskCanvas.width = width; maskCanvas.height = height; maskCanvas.style.display = "block"; sourceFrame.classList.add("has-mask"); maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true }); layoutMaskCanvas(); }
@@ -1635,7 +1675,7 @@ def _matte_page_html() -> str:
     function beginMaskPaint(event) { if (!maskCanvas) return; event.preventDefault(); event.stopPropagation(); maskPainting = true; maskCanvas.setPointerCapture(event.pointerId); drawMaskBrush(event); }
     function paintMask(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); drawMaskBrush(event); }
     function endMaskPaint(event) { if (!maskPainting) return; event.preventDefault(); event.stopPropagation(); maskPainting = false; try { maskCanvas.releasePointerCapture(event.pointerId); } catch (_) {} }
-    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); }
+    function renderCandidateTabs() { candidateList.innerHTML = ""; if (!candidates.length) { candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; scheduleCandidateListHeightSync(); return; } candidates.forEach((candidate, index) => { const button = document.createElement("button"); button.className = "candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", String(index === activeCandidateIndex)); button.dataset.index = String(index); button.title = candidate.label; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.src = candidate.url; img.alt = `${candidate.label} 缩略图`; thumb.appendChild(img); const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = candidate.label; button.appendChild(thumb); button.appendChild(label); button.addEventListener("click", () => setActiveCandidate(index)); candidateList.appendChild(button); }); scheduleCandidateListHeightSync(); }
     function setActiveCandidate(index) { if (index < 0 || index >= candidates.length) return; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; renderCandidateTabs(); setPreviewView("preview"); }
     function setCandidatePayloads(payload, name) { const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `结果 ${index + 1}`, selected: candidate.selected === true, meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的执行结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); const index = selectedIndex >= 0 ? selectedIndex : 0; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; setPreviewView("preview"); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
@@ -1644,14 +1684,11 @@ def _matte_page_html() -> str:
 
     file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); backgroundRepair.checked = true; statusEl.textContent = "正在生成候选"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
     backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
-    protectBg.addEventListener("input", () => syncColorProtectionRange(protectBg));
-    protectFg.addEventListener("input", () => syncColorProtectionRange(protectFg));
     glowMaterialStrength.addEventListener("input", syncGlowMaterialStrength);
-    autoMask.addEventListener("change", () => syncAutoMaskControls());
     samMaskButton.addEventListener("click", () => generateSamMask());
     maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
     maskClearButton.addEventListener("click", () => { if (!maskCanvas || !maskCtx) return; maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); maskDirty = false; maskStatus.textContent = "mask cleared"; });
-    window.addEventListener("resize", () => layoutMaskCanvas());
+    window.addEventListener("resize", () => { layoutMaskCanvas(); syncCandidateListHeight(); });
     viewTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewView(tab.dataset.view)));
     backgroundTabs.forEach((tab) => tab.addEventListener("click", () => setPreviewBackground(tab.dataset.bg)));
     [canvas, previewStage, sourceFrame, sourcePreview].forEach((element) => { ["dragstart", "dragover", "drop"].forEach((type) => element.addEventListener(type, (event) => event.preventDefault())); });
@@ -1717,6 +1754,54 @@ def _matte_page_html() -> str:
     }
     function routeAssetKindLabel(payload) { const route = payload && payload.route ? payload.route : {}; const raw = route.asset_kind || route.asset_type || ""; const labels = { asset: "资产", button: "按钮", character: "角色", game_ui: "游戏 UI", icon: "图标" }; return raw ? labels[raw] || raw : ""; }
     function loadPreviewImage(src) { return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error("候选预览载入失败")); img.src = src; }); }
+    async function hintOverlayDataUrl(hintDataUrl, maxSide = 0) {
+      await waitForSourceImage();
+      const sourceWidth = sourceImage.naturalWidth;
+      const sourceHeight = sourceImage.naturalHeight;
+      if (sourceWidth <= 0 || sourceHeight <= 0) throw new Error("原图尺寸无效");
+      const scale = maxSide > 0 ? Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight)) : 1;
+      const width = Math.max(1, Math.round(sourceWidth * scale));
+      const height = Math.max(1, Math.round(sourceHeight * scale));
+      const previewCanvas = document.createElement("canvas");
+      previewCanvas.width = width;
+      previewCanvas.height = height;
+      const ctx = previewCanvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(sourceImage, 0, 0, width, height);
+      const hintImage = await loadPreviewImage(hintDataUrl);
+      const hintCanvas = document.createElement("canvas");
+      hintCanvas.width = width;
+      hintCanvas.height = height;
+      const hintCtx = hintCanvas.getContext("2d", { willReadFrequently: true });
+      hintCtx.drawImage(hintImage, 0, 0, width, height);
+      const hintPixels = hintCtx.getImageData(0, 0, width, height).data;
+      const output = ctx.getImageData(0, 0, width, height);
+      const data = output.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const value = hintPixels[i] / 255;
+        if (value <= 0.004) continue;
+        const alpha = Math.min(0.58, value * 0.55);
+        data[i] = Math.round(data[i] * (1 - alpha) + 255 * alpha);
+        data[i + 1] = Math.round(data[i + 1] * (1 - alpha) + 72 * alpha);
+        data[i + 2] = Math.round(data[i + 2] * (1 - alpha) + 64 * alpha);
+      }
+      ctx.putImageData(output, 0, 0);
+      return previewCanvas.toDataURL("image/png");
+    }
+    async function applySemanticThumbnailPreview(img, candidate) {
+      const kind = semanticPreviewKind(candidate);
+      const dataUrl = serverSemanticPreviewAsset(candidate, kind);
+      if (!dataUrl) return;
+      if (kind !== "hint") {
+        img.src = dataUrl;
+        return;
+      }
+      if (sourceImage && sourceImage.src) img.src = sourceImage.src;
+      try {
+        img.src = await hintOverlayDataUrl(dataUrl, 128);
+      } catch (_) {
+        if (!img.src) img.src = dataUrl;
+      }
+    }
     function regionBox(region, width, height) { const raw = Array.isArray(region && region.bbox_xyxy) ? region.bbox_xyxy : [0, 0, 0, 0]; const x1 = Math.max(0, Math.min(width, Number(raw[0]) || 0)); const y1 = Math.max(0, Math.min(height, Number(raw[1]) || 0)); const x2 = Math.max(x1, Math.min(width, Number(raw[2]) || 0)); const y2 = Math.max(y1, Math.min(height, Number(raw[3]) || 0)); return { x: x1, y: y1, w: Math.max(1, x2 - x1), h: Math.max(1, y2 - y1) }; }
     function presentSemanticPreview(dataUrl, candidate, label) {
       previewStage.innerHTML = "";
@@ -1739,7 +1824,13 @@ def _matte_page_html() -> str:
       const previewKind = semanticPreviewKind(candidate);
       const serverPreview = serverSemanticPreviewAsset(candidate, previewKind);
       if (previewKind === "hint" && serverPreview) {
-        presentSemanticPreview(serverPreview, candidate, "hint");
+        try {
+          const overlayPreview = await hintOverlayDataUrl(serverPreview);
+          if (renderSeq !== semanticPreviewRenderSeq) return;
+          presentSemanticPreview(overlayPreview, candidate, "hint overlay");
+        } catch (_) {
+          presentSemanticPreview(serverPreview, candidate, "hint");
+        }
         return;
       }
       if (!sourceImage || sourceImage.naturalWidth <= 0 || sourceImage.naturalHeight <= 0) {
@@ -1825,7 +1916,60 @@ def _matte_page_html() -> str:
         setBusy(false);
       }
     }
-    function renderSemanticCandidates(payload) { pendingAnalyzePayload = payload; selectedSemanticCandidate = null; previewStage.innerHTML = '<span class="empty">选择语义候选</span>'; canvas.classList.remove("has-image", "is-dragging"); download.removeAttribute("href"); download.setAttribute("aria-disabled", "true"); confirmMatte.hidden = true; confirmMatte.disabled = true; candidateList.innerHTML = ""; const semanticCandidates = payload.candidates || []; const assetKindLabel = routeAssetKindLabel(payload); semanticCandidates.forEach((candidate, index) => { const displayLabel = semanticCandidateDisplayLabel(candidate, `候选 ${index + 1}`); const button = document.createElement("button"); button.className = "candidate-tab semantic-candidate-tab"; button.type = "button"; button.role = "tab"; button.setAttribute("aria-selected", "false"); button.dataset.candidateId = candidate.id || ""; button.title = [displayLabel, assetKindLabel, candidate.intent].filter(Boolean).join(" · ") || "semantic candidate"; const thumb = document.createElement("span"); thumb.className = "candidate-thumb"; const img = document.createElement("img"); img.alt = `${displayLabel} 预览`; img.src = serverSemanticPreviewAsset(candidate, semanticPreviewKind(candidate)) || ""; thumb.appendChild(img); const copy = document.createElement("span"); copy.className = "candidate-copy"; const label = document.createElement("span"); label.className = "candidate-name"; label.textContent = displayLabel; copy.appendChild(label); if (assetKindLabel) { const subtitle = document.createElement("span"); subtitle.className = "candidate-subtitle"; subtitle.textContent = assetKindLabel; copy.appendChild(subtitle); } button.appendChild(thumb); button.appendChild(copy); button.addEventListener("click", () => setSelectedSemanticCandidate(candidate)); candidateList.appendChild(button); }); if (!semanticCandidates.length) { candidateList.innerHTML = '<span class="empty">没有可执行候选</span>'; confirmMatte.disabled = true; } const defaultCandidate = semanticCandidates.find((candidate) => candidate.id === payload.default_candidate_id) || semanticCandidates.find((candidate) => candidate.default === true) || semanticCandidates[0]; if (defaultCandidate) setSelectedSemanticCandidate(defaultCandidate); setPreviewView("preview"); if (!defaultCandidate) metaEl.textContent = `语义候选 ${semanticCandidates.length}`; }
+    function renderSemanticCandidates(payload) {
+      pendingAnalyzePayload = payload;
+      selectedSemanticCandidate = null;
+      previewStage.innerHTML = '<span class="empty">选择语义候选</span>';
+      canvas.classList.remove("has-image", "is-dragging");
+      download.removeAttribute("href");
+      download.setAttribute("aria-disabled", "true");
+      confirmMatte.hidden = true;
+      confirmMatte.disabled = true;
+      candidateList.innerHTML = "";
+      const semanticCandidates = payload.candidates || [];
+      const assetKindLabel = routeAssetKindLabel(payload);
+      semanticCandidates.forEach((candidate, index) => {
+        const displayLabel = semanticCandidateDisplayLabel(candidate, `候选 ${index + 1}`);
+        const button = document.createElement("button");
+        button.className = "candidate-tab semantic-candidate-tab";
+        button.type = "button";
+        button.role = "tab";
+        button.setAttribute("aria-selected", "false");
+        button.dataset.candidateId = candidate.id || "";
+        button.title = [displayLabel, assetKindLabel, candidate.intent].filter(Boolean).join(" · ") || "semantic candidate";
+        const thumb = document.createElement("span");
+        thumb.className = "candidate-thumb";
+        const img = document.createElement("img");
+        img.alt = `${displayLabel} 预览`;
+        thumb.appendChild(img);
+        applySemanticThumbnailPreview(img, candidate);
+        const copy = document.createElement("span");
+        copy.className = "candidate-copy";
+        const label = document.createElement("span");
+        label.className = "candidate-name";
+        label.textContent = displayLabel;
+        copy.appendChild(label);
+        if (assetKindLabel) {
+          const subtitle = document.createElement("span");
+          subtitle.className = "candidate-subtitle";
+          subtitle.textContent = assetKindLabel;
+          copy.appendChild(subtitle);
+        }
+        button.appendChild(thumb);
+        button.appendChild(copy);
+        button.addEventListener("click", () => setSelectedSemanticCandidate(candidate));
+        candidateList.appendChild(button);
+      });
+      if (!semanticCandidates.length) {
+        candidateList.innerHTML = '<span class="empty">没有可执行候选</span>';
+        confirmMatte.disabled = true;
+      }
+      scheduleCandidateListHeightSync();
+      const defaultCandidate = semanticCandidates.find((candidate) => candidate.id === payload.default_candidate_id) || semanticCandidates.find((candidate) => candidate.default === true) || semanticCandidates[0];
+      if (defaultCandidate) setSelectedSemanticCandidate(defaultCandidate);
+      setPreviewView("preview");
+      if (!defaultCandidate) metaEl.textContent = `语义候选 ${semanticCandidates.length}`;
+    }
     async function analyzeCurrentUpload() {
       if (!file.files.length) return;
       const requestId = analyzeRequestId + 1;
@@ -1868,11 +2012,10 @@ def _matte_page_html() -> str:
       if (selectedSemanticCandidate) await executeSemanticCandidate(selectedSemanticCandidate);
     });
     confirmMatte.addEventListener("click", () => executeSemanticCandidate(selectedSemanticCandidate));
-    syncColorProtectionRange();
     syncGlowMaterialStrength();
     syncBackendSettings();
-    syncAutoMaskControls();
     syncPreviewMode();
+    scheduleCandidateListHeightSync();
     refreshRuntimeStatus();
     loadPendingSlice();
   </script>
@@ -3153,6 +3296,9 @@ def _batch_page_html() -> str:
     let queue = [];
     let running = false;
     let nextId = 1;
+    const BATCH_QUEUE_STORAGE_KEY = "ermbgBatchQueue";
+    const BATCH_QUEUE_DB_NAME = "ermbgBatchQueueDb";
+    const BATCH_QUEUE_STORE_NAME = "queues";
 
     function dataUrlToFile(dataUrl, filename) {
       const [header, base64] = dataUrl.split(",");
@@ -3161,6 +3307,56 @@ def _batch_page_html() -> str:
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
       return new File([bytes], filename, { type: mime });
+    }
+
+    function openBatchQueueDb() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error("IndexedDB unavailable"));
+          return;
+        }
+        const request = indexedDB.open(BATCH_QUEUE_DB_NAME, 1);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(BATCH_QUEUE_STORE_NAME)) db.createObjectStore(BATCH_QUEUE_STORE_NAME);
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+      });
+    }
+
+    function getBatchQueueDb(db) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(BATCH_QUEUE_STORE_NAME, "readwrite");
+        const store = transaction.objectStore(BATCH_QUEUE_STORE_NAME);
+        const request = store.get(BATCH_QUEUE_STORAGE_KEY);
+        request.onsuccess = () => {
+          const payload = request.result || null;
+          if (payload) store.delete(BATCH_QUEUE_STORAGE_KEY);
+          resolve(payload);
+        };
+        request.onerror = () => reject(request.error || new Error("IndexedDB read failed"));
+      });
+    }
+
+    async function loadBatchQueuePayload() {
+      if (window.indexedDB) {
+        try {
+          const db = await openBatchQueueDb();
+          const payload = await getBatchQueueDb(db);
+          db.close();
+          if (payload) {
+            sessionStorage.removeItem(BATCH_QUEUE_STORAGE_KEY);
+            return payload;
+          }
+        } catch (error) {
+          console.warn("IndexedDB batch queue read failed; falling back to sessionStorage", error);
+        }
+      }
+      const raw = sessionStorage.getItem(BATCH_QUEUE_STORAGE_KEY);
+      if (!raw) return null;
+      sessionStorage.removeItem(BATCH_QUEUE_STORAGE_KEY);
+      return JSON.parse(raw);
     }
 
     function addFiles(files, source = "upload") {
@@ -3202,6 +3398,29 @@ def _batch_page_html() -> str:
 
     function itemPreviewUrl(item) {
       return item.result && item.result.rgba ? item.result.rgba : item.previewUrl;
+    }
+
+    function executionAnalysisPayload(payload, selectedCandidate) {
+      if (!payload || typeof payload !== "object") return {};
+      const slim = { ...payload };
+      const selectedId = selectedCandidate && selectedCandidate.id ? String(selectedCandidate.id) : String(payload.default_candidate_id || "auto_default");
+      const selectedRefs = selectedCandidate && selectedCandidate.preview && selectedCandidate.preview.assets ? selectedCandidate.preview.assets : {};
+      const selectedTrimapRef = selectedRefs && selectedRefs.trimap ? String(selectedRefs.trimap) : "";
+      const selectedTrimapAsset = selectedTrimapRef && payload.preview_assets ? payload.preview_assets[selectedTrimapRef] : null;
+      slim.preview_assets = selectedTrimapAsset ? { [selectedTrimapRef]: selectedTrimapAsset } : {};
+      if (Array.isArray(slim.candidates)) {
+        slim.candidates = slim.candidates.map((candidate) => {
+          if (!candidate || typeof candidate !== "object") return candidate;
+          const copy = { ...candidate };
+          if (String(copy.id || "") === selectedId && selectedTrimapRef) {
+            copy.preview = { assets: { trimap: selectedTrimapRef } };
+          } else {
+            delete copy.preview;
+          }
+          return copy;
+        });
+      }
+      return slim;
     }
 
     function openLightbox(item) {
@@ -3411,18 +3630,21 @@ def _batch_page_html() -> str:
     ["dragleave", "drop"].forEach((name) => dropzone.addEventListener(name, (event) => { event.preventDefault(); dropzone.classList.remove("is-over"); }));
     dropzone.addEventListener("drop", (event) => addFiles(event.dataTransfer.files, "upload"));
 
-    try {
-      const pending = JSON.parse(sessionStorage.getItem("ermbgBatchQueue") || "null");
-      if (pending && Array.isArray(pending.items)) {
-        sessionStorage.removeItem("ermbgBatchQueue");
-        addFiles(pending.items, pending.source || "slicer");
-        statusEl.textContent = `已接收来自切图的 ${pending.items.length} 项`;
-      } else {
+    async function restorePendingBatchQueue() {
+      try {
+        const pending = await loadBatchQueuePayload();
+        if (pending && Array.isArray(pending.items)) {
+          addFiles(pending.items, pending.source || "slicer");
+          statusEl.textContent = `已接收来自切图的 ${pending.items.length} 项`;
+        } else {
+          render();
+        }
+      } catch (error) {
+        statusEl.textContent = `无法读取批量队列: ${error.message}`;
         render();
       }
-    } catch (_) {
-      render();
     }
+    restorePendingBatchQueue();
   </script>
 </body>
 </html>"""
@@ -3459,6 +3681,7 @@ def _slice_page_html() -> str:
     .background-repair-field { grid-column: 1; }
     .slice-actions-main { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
     .slice-actions-main button { height: 40px; min-height: 40px; align-self: start; }
+    .slice-actions-main .wide-action { grid-column: 1 / -1; }
     .preview, .thumb { background-color: #e9eee6; background-image: linear-gradient(45deg, #d3dbd0 25%, transparent 25%), linear-gradient(-45deg, #d3dbd0 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #d3dbd0 75%), linear-gradient(-45deg, transparent 75%, #d3dbd0 75%); background-size: 24px 24px; background-position: 0 0, 0 12px, 12px -12px, -12px 0; }
     .workspace { min-height: 640px; display: grid; grid-template-rows: 48px 1fr; overflow: hidden; }
     .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid #d9dfd7; }
@@ -3509,6 +3732,7 @@ def _slice_page_html() -> str:
       <div class="slice-actions-main">
         <button id="preview-button" type="button" disabled>预览</button>
         <button id="confirm" type="button" disabled>切图</button>
+        <button id="download-slices" class="wide-action" type="button" disabled>批量下载切图</button>
       </div>
       <div class="left-list" id="list"><span class="empty">切图列表会显示在这里</span></div>
       <div class="selected-actions" id="selected-actions">
@@ -3528,6 +3752,7 @@ def _slice_page_html() -> str:
     const backgroundRepair = document.getElementById("background-repair");
     const previewButton = document.getElementById("preview-button");
     const confirmButton = document.getElementById("confirm");
+    const downloadSlices = document.getElementById("download-slices");
     const batchAll = document.getElementById("batch-all");
     const selectedActions = document.getElementById("selected-actions");
     const statusEl = document.getElementById("status");
@@ -3540,10 +3765,14 @@ def _slice_page_html() -> str:
     let lastPreviewSettingsKey = "";
     let uploadedPreviewUrl = null;
     const SLICE_STATE_KEY = "ermbgSliceWorkspace";
+    const BATCH_QUEUE_STORAGE_KEY = "ermbgBatchQueue";
+    const BATCH_QUEUE_DB_NAME = "ermbgBatchQueueDb";
+    const BATCH_QUEUE_STORE_NAME = "queues";
 
     function setSliceBusy(isBusy) {
       previewButton.disabled = isBusy || !file.files.length;
       confirmButton.disabled = isBusy || !hasPreview;
+      downloadSlices.disabled = isBusy || !file.files.length;
       file.disabled = isBusy;
       backgroundRepair.disabled = isBusy;
     }
@@ -3577,14 +3806,70 @@ def _slice_page_html() -> str:
       try {
         current = JSON.parse(sessionStorage.getItem(SLICE_STATE_KEY) || "{}");
       } catch (_) {}
-      sessionStorage.setItem(
-        SLICE_STATE_KEY,
-        JSON.stringify({ ...current, ...patch, settings: currentSettings() }),
-      );
+      const next = { ...current, ...patch, settings: currentSettings() };
+      try {
+        sessionStorage.setItem(SLICE_STATE_KEY, JSON.stringify(next));
+      } catch (_) {
+        const slim = { ...next };
+        delete slim.crops;
+        if (slim.preview) {
+          slim.preview = {
+            count: slim.preview.count,
+            background_color: slim.preview.background_color,
+            overlap_count: slim.preview.overlap_count,
+            overlaps: slim.preview.overlaps,
+            boxes: slim.preview.boxes,
+            raw_boxes: slim.preview.raw_boxes,
+          };
+        }
+        try {
+          sessionStorage.setItem(SLICE_STATE_KEY, JSON.stringify(slim));
+        } catch (_) {}
+      }
     }
 
     function clearSliceState() {
       sessionStorage.removeItem(SLICE_STATE_KEY);
+    }
+
+    function openBatchQueueDb() {
+      return new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error("IndexedDB unavailable"));
+          return;
+        }
+        const request = indexedDB.open(BATCH_QUEUE_DB_NAME, 1);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(BATCH_QUEUE_STORE_NAME)) db.createObjectStore(BATCH_QUEUE_STORE_NAME);
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("IndexedDB open failed"));
+      });
+    }
+
+    function putBatchQueueDb(db, payload) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(BATCH_QUEUE_STORE_NAME, "readwrite");
+        transaction.objectStore(BATCH_QUEUE_STORE_NAME).put(payload, BATCH_QUEUE_STORAGE_KEY);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error("IndexedDB write failed"));
+      });
+    }
+
+    async function saveBatchQueuePayload(payload) {
+      if (window.indexedDB) {
+        try {
+          const db = await openBatchQueueDb();
+          await putBatchQueueDb(db, payload);
+          db.close();
+          sessionStorage.removeItem(BATCH_QUEUE_STORAGE_KEY);
+          return;
+        } catch (error) {
+          console.warn("IndexedDB batch queue write failed; falling back to sessionStorage", error);
+        }
+      }
+      sessionStorage.setItem(BATCH_QUEUE_STORAGE_KEY, JSON.stringify(payload));
     }
 
     function createImagePanZoomViewport(viewport, options = {}) {
@@ -3682,7 +3967,7 @@ def _slice_page_html() -> str:
       window.location.href = "/";
     }
 
-    function sendToBatch(crops) {
+    async function sendToBatch(crops) {
       const items = (crops || []).filter(Boolean).map((crop) => ({
         source: "slicer",
         filename: crop.filename || `${crop.id || crop.label || "slice"}_rgb.png`,
@@ -3693,8 +3978,13 @@ def _slice_page_html() -> str:
       if (!items.length) return;
       setTransferBusy(true);
       saveSliceState({ selectedCropId: selectedCrop ? (selectedCrop.id || selectedCrop.filename) : null });
-      sessionStorage.setItem("ermbgBatchQueue", JSON.stringify({ source: "slicer", items }));
-      window.location.href = "/batch";
+      try {
+        await saveBatchQueuePayload({ source: "slicer", items });
+        window.location.href = "/batch";
+      } catch (error) {
+        statusEl.textContent = `无法保存批量队列: ${error.message}`;
+        setTransferBusy(false);
+      }
     }
 
     function selectCrop(crop) {
@@ -3783,6 +4073,7 @@ def _slice_page_html() -> str:
       clearSliceState();
       previewButton.disabled = false;
       confirmButton.disabled = true;
+      downloadSlices.disabled = false;
       if (uploadedPreviewUrl) URL.revokeObjectURL(uploadedPreviewUrl);
       uploadedPreviewUrl = URL.createObjectURL(file.files[0]);
       renderPreviewImage(uploadedPreviewUrl, "上传图片预览");
@@ -3842,6 +4133,39 @@ def _slice_page_html() -> str:
 
     previewButton.addEventListener("click", () => {
       runAnnotate();
+    });
+
+    downloadSlices.addEventListener("click", async () => {
+      if (!file.files.length) return;
+      setSliceBusy(true);
+      statusEl.textContent = "正在打包切图";
+      try {
+        const response = await fetch("/api/slice", { method: "POST", body: formData() });
+        if (!response.ok) {
+          let detail = "下载失败";
+          try {
+            detail = (await response.json()).detail || detail;
+          } catch (_) {}
+          throw new Error(detail);
+        }
+        const blob = await response.blob();
+        const stem = file.files[0].name.replace(/\\.[^.]+$/, "") || "ermbg";
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${stem}_slices.zip`;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          link.remove();
+          URL.revokeObjectURL(url);
+        }, 30000);
+        statusEl.textContent = `已下载 ${response.headers.get("X-ERMBG-Slice-Count") || ""} 张切图`.trim();
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setSliceBusy(false);
+      }
     });
 
     confirmButton.addEventListener("click", async () => {
@@ -4224,6 +4548,35 @@ def _cached_slice_result(
     )
 
 
+def _slice_result_from_source_alpha(image: Image.Image, *, min_area: int, padding: int) -> tuple[np.ndarray, SliceResult] | None:
+    alpha = _source_alpha_mask(image)
+    if alpha is None:
+        return None
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    mask = alpha > 0
+    boxes = find_slice_boxes(mask, min_area=min_area, padding=0, exterior_background_mask=None)
+    return image_rgb, SliceResult(
+        background_color=(0, 0, 0),
+        foreground_mask=(alpha.astype(np.float32) / 255.0),
+        boxes=boxes,
+        padding=max(0, int(padding)),
+    )
+
+
+def _slice_source_and_result(
+    image: Image.Image,
+    image_digest: str,
+    *,
+    min_area: int,
+    padding: int,
+) -> tuple[np.ndarray, SliceResult]:
+    source_alpha_result = _slice_result_from_source_alpha(image, min_area=min_area, padding=padding)
+    if source_alpha_result is not None:
+        return source_alpha_result
+    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    return image_rgb, _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+
+
 def _slice_preview_payload(image_rgb: np.ndarray, stem: str, result: SliceResult) -> dict[str, object]:
     display_boxes = _slice_display_boxes(result, image_rgb.shape[:2])
     overlaps = _slice_box_overlaps(display_boxes)
@@ -4429,7 +4782,6 @@ def _run_web_backend(
     shadow_mode: str,
     corridorkey_screen_mode: str = "auto",
     corridorkey_preset: str = "auto",
-    corridorkey_hard_ui_hint_mode: str = "bbox_2px",
     parameter_source: str = "auto",
     **kwargs: Any,
 ) -> MatteResponse:
@@ -4467,7 +4819,6 @@ def _run_web_backend(
                 {
                     "corridorkey_screen_mode": corridorkey_screen_mode,
                     "corridorkey_preset": corridorkey_preset,
-                    "corridorkey_hard_ui_hint_mode": corridorkey_hard_ui_hint_mode,
                 }
             )
         if kwargs.get("corridorkey_hint_mask") is not None:
@@ -4489,9 +4840,6 @@ def _run_web_backend(
                     "corridorkey_auto_despeckle": str(kwargs.get("corridorkey_auto_despeckle", "On")),
                     "corridorkey_despeckle_size": int(kwargs.get("corridorkey_despeckle_size", 400)),
                     "corridorkey_auto_mask": bool(kwargs.get("corridorkey_auto_mask", False)),
-                    "corridorkey_color_protection": bool(kwargs.get("corridorkey_color_protection", True)),
-                    "corridorkey_protection_bg_max": float(kwargs.get("corridorkey_protection_bg_max", 12.0)),
-                    "corridorkey_protection_fg_min": float(kwargs.get("corridorkey_protection_fg_min", 28.0)),
                 }
             )
         if direct_execution_backend == "direct-known-bg-glow" and manual_params:
@@ -4560,7 +4908,6 @@ def _run_web_backend(
                 shadow_mode=shadow_mode,
                 corridorkey_screen_mode=corridorkey_screen_mode,
                 corridorkey_preset=corridorkey_preset,
-                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
                 **local_kwargs,
             )
             result.debug.setdefault("web_auto_primary_error", str(exc))
@@ -4575,7 +4922,6 @@ def _run_web_backend(
         shadow_mode=shadow_mode,
         corridorkey_screen_mode=corridorkey_screen_mode,
         corridorkey_preset=corridorkey_preset,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         **local_kwargs,
     )
 
@@ -4799,21 +5145,6 @@ def _execute_matte_candidates_payload(
         raise HTTPException(status_code=400, detail="corridorkey_screen_mode must be auto, green, or blue")
     if request.corridorkey_preset not in {"auto", "detail_safe", "spill_safe", "manual"}:
         raise HTTPException(status_code=400, detail="corridorkey_preset must be auto, detail_safe, spill_safe, or manual")
-    if request.corridorkey_hard_ui_hint_mode not in {
-        "full_frame_zero",
-        "bbox_2px",
-        "boundary_2px",
-        "boundary_2px_shadow_safe",
-        "boundary_2px_shadow_safe_edge_floor",
-        "translucent_button",
-    }:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "corridorkey_hard_ui_hint_mode must be full_frame_zero, bbox_2px, boundary_2px, "
-                "boundary_2px_shadow_safe, boundary_2px_shadow_safe_edge_floor, or translucent_button"
-            ),
-        )
     if not 0.0 <= request.corridorkey_despill_strength <= 1.0:
         raise HTTPException(status_code=400, detail="corridorkey_despill_strength must be between 0 and 1")
     if not 0.0 <= request.corridorkey_refiner_strength <= 4.0:
@@ -4822,8 +5153,6 @@ def _execute_matte_candidates_payload(
         raise HTTPException(status_code=400, detail="corridorkey_despeckle_size must be between 0 and 4096")
     if not 0.0 <= request.known_bg_glow_material_strength <= 2.0:
         raise HTTPException(status_code=400, detail="known_bg_glow_material_strength must be between 0 and 2")
-    if request.corridorkey_protection_fg_min <= request.corridorkey_protection_bg_max:
-        raise HTTPException(status_code=400, detail="corridorkey_protection_fg_min must be greater than corridorkey_protection_bg_max")
     shadow_mode = _shadow_mode_from_form(request.shadow_mode, request.shadow_enabled)
     pymatting_params = _pymatting_kwargs(
         pymatting_method=request.pymatting_method,
@@ -4877,12 +5206,8 @@ def _execute_matte_candidates_payload(
             corridorkey_auto_despeckle=request.corridorkey_auto_despeckle,
             corridorkey_despeckle_size=request.corridorkey_despeckle_size,
             corridorkey_auto_mask=request.corridorkey_auto_mask,
-            corridorkey_color_protection=request.corridorkey_color_protection,
-            corridorkey_protection_bg_max=request.corridorkey_protection_bg_max,
-            corridorkey_protection_fg_min=request.corridorkey_protection_fg_min,
             corridorkey_screen_mode=request.corridorkey_screen_mode,
             corridorkey_preset=request.corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=request.corridorkey_hard_ui_hint_mode,
             known_bg_glow_material_strength=request.known_bg_glow_material_strength,
             parameter_source=request.parameter_source,
             corridorkey_hint_mask=hint_mask,
@@ -4995,12 +5320,8 @@ def matte_candidates_endpoint(
     corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
     corridorkey_despeckle_size: Annotated[int, Form()] = 400,
     corridorkey_auto_mask: Annotated[bool, Form()] = False,
-    corridorkey_color_protection: Annotated[bool, Form()] = True,
-    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
-    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
     corridorkey_screen_mode: Annotated[str, Form()] = "auto",
     corridorkey_preset: Annotated[str, Form()] = "auto",
-    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
     pymatting_method: Annotated[str, Form()] = "cf",
     pymatting_image_space: Annotated[str, Form()] = "linear",
     pymatting_bg_source: Annotated[str, Form()] = "auto",
@@ -5030,12 +5351,8 @@ def matte_candidates_endpoint(
             corridorkey_auto_despeckle=corridorkey_auto_despeckle,
             corridorkey_despeckle_size=corridorkey_despeckle_size,
             corridorkey_auto_mask=corridorkey_auto_mask,
-            corridorkey_color_protection=corridorkey_color_protection,
-            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
-            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
             corridorkey_screen_mode=corridorkey_screen_mode,
             corridorkey_preset=corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
             pymatting_method=pymatting_method,
             pymatting_image_space=pymatting_image_space,
             pymatting_bg_source=pymatting_bg_source,
@@ -5072,12 +5389,8 @@ def execute_candidate_endpoint(
     corridorkey_auto_despeckle: Annotated[str, Form()] = "On",
     corridorkey_despeckle_size: Annotated[int, Form()] = 400,
     corridorkey_auto_mask: Annotated[bool, Form()] = False,
-    corridorkey_color_protection: Annotated[bool, Form()] = True,
-    corridorkey_protection_bg_max: Annotated[float, Form()] = 12.0,
-    corridorkey_protection_fg_min: Annotated[float, Form()] = 28.0,
     corridorkey_screen_mode: Annotated[str, Form()] = "auto",
     corridorkey_preset: Annotated[str, Form()] = "auto",
-    corridorkey_hard_ui_hint_mode: Annotated[str, Form()] = "bbox_2px",
     pymatting_method: Annotated[str, Form()] = "cf",
     pymatting_image_space: Annotated[str, Form()] = "linear",
     pymatting_bg_source: Annotated[str, Form()] = "auto",
@@ -5127,12 +5440,8 @@ def execute_candidate_endpoint(
             corridorkey_auto_despeckle=corridorkey_auto_despeckle,
             corridorkey_despeckle_size=corridorkey_despeckle_size,
             corridorkey_auto_mask=corridorkey_auto_mask,
-            corridorkey_color_protection=corridorkey_color_protection,
-            corridorkey_protection_bg_max=corridorkey_protection_bg_max,
-            corridorkey_protection_fg_min=corridorkey_protection_fg_min,
             corridorkey_screen_mode=corridorkey_screen_mode,
             corridorkey_preset=corridorkey_preset,
-            corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
             pymatting_method=pymatting_method,
             pymatting_image_space=pymatting_image_space,
             pymatting_bg_source=pymatting_bg_source,
@@ -5171,9 +5480,8 @@ def slice_endpoint(
     image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
-    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        image_rgb, result = _slice_source_and_result(image, image_digest, min_area=min_area, padding=padding)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"slicing failed: {e}") from e
 
@@ -5192,7 +5500,7 @@ def slice_endpoint(
         content=buf.getvalue(),
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": _attachment_content_disposition(filename),
             "X-ERMBG-Slice-Count": str(len(result.boxes)),
             "X-ERMBG-Background": ",".join(str(c) for c in result.background_color),
             "X-ERMBG-Background-Repair": "1" if preprocess_info.get("applied") else "0",
@@ -5211,10 +5519,9 @@ def slice_preview_endpoint(
     image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
-    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        image_rgb, result = _slice_source_and_result(image, image_digest, min_area=min_area, padding=padding)
         payload = _slice_preview_payload(image_rgb, stem, result)
         payload["preprocess"] = {"checkerboard": preprocess_info}
         return payload
@@ -5233,10 +5540,9 @@ def slice_crops_endpoint(
     image, preprocess_info = _preprocess_background_repair_image(image, background_repair)
     if preprocess_info.get("applied", False):
         image_digest = _image_digest(image)
-    image_rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     stem = (file.filename or "ermbg").rsplit(".", 1)[0]
     try:
-        result = _cached_slice_result(image_rgb, image_digest, min_area=min_area, padding=padding)
+        image_rgb, result = _slice_source_and_result(image, image_digest, min_area=min_area, padding=padding)
         payload = _slice_crop_payloads(image_rgb, stem, result)
         payload["preprocess"] = {"checkerboard": preprocess_info}
         return payload
@@ -6052,6 +6358,20 @@ def _case_artifact_url(
     return None
 
 
+def _looks_like_corridorkey(*values: object) -> bool:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            if _looks_like_corridorkey(*value):
+                return True
+            continue
+        normalized = str(value).replace("-", "").replace("_", "").lower()
+        if "corridorkey" in normalized:
+            return True
+    return False
+
+
 def _case_mask_hint_url(out_dir: Path, sample_screen: str, summary: dict[str, object]) -> str | None:
     return _case_artifact_url(
         out_dir,
@@ -6120,6 +6440,7 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
         shadow_detected = bool(row.get("shadow_detected", False))
         shadow_pixels = int(row.get("shadow_pixels", 0) or 0)
         strategy = str(row.get("strategy", ""))
+        is_corridorkey = _looks_like_corridorkey(strategy, row.get("backend"), row.get("execution_backend"))
         matte_url = _case_matte_url(out_dir, active_screen, row)
         alpha_url = _case_alpha_url(out_dir, active_screen, row)
         mask_hint_url = _case_mask_hint_url(out_dir, active_screen, row)
@@ -6143,6 +6464,7 @@ def _game_eval_data_from_matte_summary(root: Path) -> dict[str, object]:
                     "sampleId": sample_id,
                     "sampleCode": sample_code,
                     "sampleScreen": sample_screen,
+                    "isCorridorKey": is_corridorkey if is_active_run else False,
                     "runStatus": "ran" if is_active_run else "not-run",
                     "category": "matte-rerun" if is_active_run else "",
                     "verdict": strategy if is_active_run else "not-run",
@@ -6197,6 +6519,7 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
         sample_path = sample_paths.get(sample_screen, "")
         status = str(row.get("status", "ok"))
         is_ok = status != "error"
+        is_corridorkey = _looks_like_corridorkey(row.get("backend"), row.get("execution_backend"), row.get("selected_tools"))
         ok_count += 1 if is_ok else 0
         if row.get("expected_role_hit") is not None:
             expected_role_required_count += 1
@@ -6234,6 +6557,7 @@ def _game_eval_data_from_partial_summaries(root: Path) -> dict[str, object]:
                 "sampleId": sample_id,
                 "sampleCode": str(row.get("sample_code") or f"{sample_id}-{sample_screen[:1].upper()}"),
                 "sampleScreen": sample_screen,
+                "isCorridorKey": is_corridorkey if is_ok else False,
                 "runStatus": "ran" if is_ok else "error",
                 "category": row.get("category", ""),
                 "verdict": row.get("diagnosis_verdict", status),
@@ -6427,6 +6751,7 @@ def _game_eval_data_from_solid_graphic_summary(root: Path, summary_path: Path) -
                 "sampleId": sample_id,
                 "sampleCode": sample_code,
                 "sampleScreen": screen,
+                "isCorridorKey": False,
                 "runStatus": "ran" if is_ok else "error",
                 "category": "solid-graphic-compare",
                 "verdict": verdict if is_ok else status,
@@ -6515,8 +6840,18 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
             outputs = item.get("output") if isinstance(item.get("output"), dict) else {}
         metrics = item.get("quality_metrics") if isinstance(item.get("quality_metrics"), dict) else {}
         remote_debug = item.get("remote_debug") if isinstance(item.get("remote_debug"), dict) else {}
+        direct_worker_payload = remote_debug.get("direct_worker") if isinstance(remote_debug.get("direct_worker"), dict) else {}
         timings = remote_debug.get("timings") if isinstance(remote_debug.get("timings"), dict) else {}
         strategy = str(item.get("backend") or "auto")
+        is_corridorkey = _looks_like_corridorkey(
+            strategy,
+            item.get("requested_backend"),
+            item.get("execution_backend"),
+            direct_worker_payload.get("algorithm"),
+            direct_worker_payload.get("execution_backend"),
+            direct_worker_payload.get("route"),
+            remote_debug.get("auto_route"),
+        )
         elapsed = item.get("elapsed_sec_client")
         alpha_mean = metrics.get("alpha_mean")
         alpha_pixels = metrics.get("alpha_nonzero_pixels")
@@ -6555,6 +6890,7 @@ def _game_eval_data_from_comfy_ermbg_summary(root: Path, summary_path: Path) -> 
                 "sampleId": sample_id,
                 "sampleCode": f"{sample_id}-{screen[:1].upper()}",
                 "sampleScreen": screen,
+                "isCorridorKey": is_corridorkey if is_ok else False,
                 "runStatus": "ran" if is_ok else "error",
                 "category": metadata.get("category", strategy),
                 "verdict": strategy if is_ok else status,
@@ -6668,6 +7004,7 @@ def _game_eval_data_from_route_analyze_summary(root: Path, summary_path: Path) -
                 "sampleId": sample_id,
                 "sampleCode": f"{sample_id}-{sample_screen[:1].upper()}",
                 "sampleScreen": sample_screen,
+                "isCorridorKey": False,
                 "runStatus": "ran" if is_ok else "error",
                 "category": item.get("category", "route-analyze"),
                 "verdict": " / ".join(part for part in verdict_parts if part),
@@ -6823,6 +7160,7 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                 if is_active_run
                 else None
             )
+            is_corridorkey = _looks_like_corridorkey(summary.get("backend"), row.get("backend"), fallback_tools, top_roles)
             mask_hint_url = _case_mask_hint_url(out_dir, active_screen, summary) if is_active_run else None
             raw_alpha_url = _case_corridorkey_raw_alpha_url(out_dir, active_screen, summary) if is_active_run else None
             foreground_url = _case_foreground_url(out_dir, active_screen, summary) if is_active_run else None
@@ -6832,6 +7170,7 @@ def _game_eval_data(root: Path = DEFAULT_GAME_EVAL_ROOT) -> dict[str, object]:
                     "sampleId": sample_id,
                     "sampleCode": sample_code,
                     "sampleScreen": sample_screen,
+                    "isCorridorKey": is_corridorkey if is_active_run else False,
                     "runStatus": "ran" if is_active_run else "not-run",
                     "category": row.get("category", ""),
                     "verdict": row.get("diagnosis_verdict", "") if is_active_run else "not-run",
@@ -6889,6 +7228,7 @@ def _empty_game_eval_data() -> dict[str, object]:
                     "sampleId": sample_id,
                     "sampleCode": f"{sample_id}-{sample_screen[:1].upper()}",
                     "sampleScreen": sample_screen,
+                    "isCorridorKey": False,
                     "runStatus": "not-run",
                     "category": item.get("category", ""),
                     "verdict": "not-run",
@@ -8065,6 +8405,19 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
       runSelect.disabled = runs.length <= 1;
     }}
 
+    function previewUrlForColumn(caseItem, column) {{
+      if (column.urlKey === "trimapUrl" && caseItem.isCorridorKey) {{
+        return caseItem.maskHintUrl || caseItem.trimapUrl || "";
+      }}
+      return caseItem[column.urlKey] || "";
+    }}
+
+    function previewTagForColumn(caseItem, column) {{
+      if (column.urlKey === "originalUrl") return `${{caseItem.sampleCode || ""}}`;
+      if (column.urlKey === "trimapUrl" && caseItem.isCorridorKey && caseItem.maskHintUrl) return "hint";
+      return "";
+    }}
+
     function renderRows() {{
       renderRunSelect();
       runIdEl.textContent = data.runId || "game eval";
@@ -8106,14 +8459,14 @@ def game_eval_page(run: str | None = Query(default=None)) -> str:
         row.appendChild(compareCell);
         previewColumns.forEach((column) => {{
           const cell = document.createElement("td");
-          const previewUrl = caseItem[column.urlKey] || "";
+          const previewUrl = previewUrlForColumn(caseItem, column);
           if (previewUrl) {{
             cell.appendChild(
               makePreview(
                 previewUrl,
                 `${{caseItem.sampleCode || ""}} · ${{caseItem.caseId || ""}} · ${{column.label}}`,
                 column.bg,
-                column.urlKey === "originalUrl" ? `${{caseItem.sampleCode || ""}}` : "",
+                previewTagForColumn(caseItem, column),
               ),
             );
           }} else {{

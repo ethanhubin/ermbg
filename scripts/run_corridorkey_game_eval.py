@@ -25,15 +25,6 @@ from ermbg.direct_worker_client import DEFAULT_DIRECT_WORKER_URL, matte_image_di
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "samples" / "corridorkey_semantic" / "manifest.json"
 EVAL_BACKENDS = ("auto", "direct-worker")
-COLOR_PROTECTION_MODES = ("auto", "on", "off")
-HARD_UI_HINT_MODES = (
-    "full_frame_zero",
-    "bbox_2px",
-    "boundary_2px",
-    "boundary_2px_shadow_safe",
-    "boundary_2px_shadow_safe_edge_floor",
-    "translucent_button",
-)
 
 
 def _json_safe(value: Any) -> Any:
@@ -218,7 +209,6 @@ def _debug_timings(debug: dict[str, Any]) -> dict[str, float]:
         "remote_upload_sec",
         "remote_queue_sec",
         "corridorkey_refine_sec",
-        "color_protection_sec",
         "total_sec",
         "server_elapsed_sec",
         "route_sec",
@@ -352,12 +342,6 @@ def _effective_backend(requested_backend: str, result: Any) -> str:
     return requested_backend
 
 
-def _color_protection_arg(mode: str) -> bool | None:
-    if mode == "auto":
-        return None
-    return mode == "on"
-
-
 def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
     for src_name, dst_name in [
         (f"{stem}_rgba.png", "rgba.png"),
@@ -370,7 +354,6 @@ def _copy_backend_outputs(case_dir: Path, stem: str) -> None:
         (f"{stem}_corridorkey_subject_alpha.png", "corridorkey_subject_alpha.png"),
         (f"{stem}_corridorkey_hint.png", "corridorkey_hint.png"),
         (f"{stem}_corridorkey_raw_alpha.png", "corridorkey_raw_alpha.png"),
-        (f"{stem}_key_color_protection.png", "key_color_protection.png"),
         (f"{stem}_trimap.png", "trimap.png"),
     ]:
         src = case_dir / src_name
@@ -391,6 +374,10 @@ def _write_direct_worker_outputs(case_dir: Path, result: Any) -> None:
     if isinstance(encoded_trimap, str):
         data = base64.b64decode(encoded_trimap)
         Image.open(io.BytesIO(data)).convert("L").save(case_dir / "trimap.png")
+    encoded_hint = direct_worker.get("corridorkey_hint_png_base64") if isinstance(direct_worker, dict) else None
+    if isinstance(encoded_hint, str):
+        data = base64.b64decode(encoded_hint)
+        Image.open(io.BytesIO(data)).convert("L").save(case_dir / "corridorkey_hint.png")
 
 
 def _case_outputs(case_dir: Path) -> dict[str, str]:
@@ -408,7 +395,6 @@ def _case_outputs(case_dir: Path) -> dict[str, str]:
         "analyze_candidate_trimap": "analyze_candidate_trimap.png",
         "hint": "corridorkey_hint.png",
         "raw_alpha": "corridorkey_raw_alpha.png",
-        "key_color_protection": "key_color_protection.png",
         "contact_sheet": "contact_sheet.png",
     }
     outputs = {}
@@ -436,7 +422,11 @@ def _write_case_manifest(
         "foreground": case_dir / "foreground.png",
         "trimap": case_dir / "trimap.png",
         "analyze_candidate_trimap": case_dir / "analyze_candidate_trimap.png",
+        "hint": case_dir / "corridorkey_hint.png",
+        "raw_alpha": case_dir / "corridorkey_raw_alpha.png",
         "shadow": case_dir / "shadow.png",
+        "shadow_layer": case_dir / "shadow_layer.png",
+        "shadow_physical": case_dir / "shadow_physical.png",
         "contact_sheet": case_dir / "contact_sheet.png",
     }
     manifest = build_run_manifest(
@@ -583,6 +573,7 @@ def _coverage_metrics(input_path: Path, alpha_path: Path, background: tuple[int,
 def run(args: argparse.Namespace) -> dict[str, Any]:
     manifest = _load_manifest(args.manifest)
     use_analyze_candidates = bool(getattr(args, "use_analyze_candidates", True))
+    shadow_mode = str(getattr(args, "shadow_mode", "on"))
     cases = [case for case in manifest.get("cases", []) if isinstance(case, dict)]
     if args.sample_id:
         sample_ids = {item.strip() for item in args.sample_id.split(",") if item.strip()}
@@ -625,9 +616,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     input_path,
                     direct_worker_url=args.direct_worker_url,
                     execution_backend="auto" if args.backend == "auto" else "direct-worker",
-                    shadow_mode="on",
+                    shadow_mode=shadow_mode,
                     corridorkey_preset=args.corridorkey_preset,
-                    corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
                     route_decision=route_decision,
                     semantic_decision=semantic_decision,
                     pymatting_explicit_trimap=explicit_trimap,
@@ -644,9 +634,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     qa=False,
                     comfy_url=args.comfy_url,
                     corridorkey_preset=args.corridorkey_preset,
-                    corridorkey_color_protection=_color_protection_arg(args.corridorkey_color_protection),
-                    corridorkey_auto_mask=args.corridorkey_hard_ui_hint_mode != "full_frame_zero",
-                    corridorkey_hard_ui_hint_mode=args.corridorkey_hard_ui_hint_mode,
+                    corridorkey_auto_mask=False,
                 )
             elapsed = time.perf_counter() - start
             effective_backend = _effective_backend(args.backend, result)
@@ -714,9 +702,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "category_filter": args.category,
             "eval_overrides": {
                 "corridorkey_preset": args.corridorkey_preset,
-                "corridorkey_color_protection": args.corridorkey_color_protection,
-                "corridorkey_auto_mask": args.corridorkey_hard_ui_hint_mode != "full_frame_zero",
-                "corridorkey_hard_ui_hint_mode": args.corridorkey_hard_ui_hint_mode,
+                "corridorkey_auto_mask": False,
+                "shadow_mode": shadow_mode,
                 "use_analyze_candidates": use_analyze_candidates,
             },
             "timing_summary": _timing_summary(runs),
@@ -752,8 +739,7 @@ def main() -> None:
     parser.add_argument("--direct-worker-url", default=DEFAULT_DIRECT_WORKER_URL)
     parser.add_argument("--subject-threshold", type=float, default=35.0)
     parser.add_argument("--corridorkey-preset", default="auto", choices=("auto", "detail_safe", "spill_safe", "manual"))
-    parser.add_argument("--corridorkey-color-protection", default="auto", choices=COLOR_PROTECTION_MODES)
-    parser.add_argument("--corridorkey-hard-ui-hint-mode", default="bbox_2px", choices=HARD_UI_HINT_MODES)
+    parser.add_argument("--shadow-mode", default="on", choices=("auto", "on", "off"))
     parser.add_argument(
         "--use-analyze-candidates",
         dest="use_analyze_candidates",

@@ -88,6 +88,16 @@ def _encode_gray_png_base64(mask: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _mask_u8(mask: np.ndarray) -> np.ndarray:
+    arr = np.asarray(mask)
+    if arr.dtype == np.uint8:
+        return arr
+    arr_f = arr.astype(np.float32)
+    if arr_f.max(initial=0.0) <= 1.0:
+        arr_f = arr_f * 255.0
+    return np.clip(arr_f + 0.5, 0, 255).astype(np.uint8)
+
+
 def _git_sha() -> str:
     env_sha = os.environ.get("ERMBG_BUILD_GIT_SHA")
     if env_sha:
@@ -115,7 +125,6 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
         debug.get("corridorkey_hint_plan") if isinstance(debug.get("corridorkey_hint_plan"), dict) else None
     )
     settings = debug.get("settings") if isinstance(debug.get("settings"), dict) else None
-    hard_ui_hint = debug.get("hard_ui_hint") if isinstance(debug.get("hard_ui_hint"), dict) else None
     shadow = debug.get("shadow") if isinstance(debug.get("shadow"), dict) else None
     semantic_execution = (
         debug.get("semantic_execution") if isinstance(debug.get("semantic_execution"), dict) else None
@@ -141,8 +150,6 @@ def _algorithm_debug(result: DirectWorkerResult) -> dict[str, Any]:
         algorithm["corridorkey_hint_plan"] = corridorkey_hint_plan
     if settings is not None:
         algorithm["settings"] = settings
-    if hard_ui_hint is not None:
-        algorithm["hard_ui_hint"] = hard_ui_hint
     if shadow is not None:
         algorithm["shadow"] = shadow
     if semantic_execution is not None:
@@ -193,6 +200,9 @@ def _case_payload(
         trimap = debug.get("trimap_u8")
         if isinstance(trimap, np.ndarray) and trimap.ndim == 2:
             payload["trimap_png_base64"] = _encode_gray_png_base64(trimap)
+        corridorkey_hint = debug.get("corridorkey_hint")
+        if isinstance(corridorkey_hint, np.ndarray) and corridorkey_hint.ndim == 2:
+            payload["corridorkey_hint_png_base64"] = _encode_gray_png_base64(_mask_u8(corridorkey_hint))
     return payload
 
 
@@ -541,12 +551,8 @@ def _corridorkey_form_params(
     corridorkey_auto_despeckle: str | None,
     corridorkey_despeckle_size: int | None,
     corridorkey_auto_mask: bool | None,
-    corridorkey_color_protection: bool | None,
-    corridorkey_protection_bg_max: float | None,
-    corridorkey_protection_fg_min: float | None,
     corridorkey_screen_mode: str | None,
     corridorkey_preset: str | None,
-    corridorkey_hard_ui_hint_mode: str | None,
 ) -> dict[str, Any]:
     def text_or_none(value: str | None) -> str | None:
         if value is None:
@@ -565,18 +571,8 @@ def _corridorkey_form_params(
         "corridorkey_auto_despeckle": corridorkey_auto_despeckle,
         "corridorkey_despeckle_size": None if corridorkey_despeckle_size is None else int(corridorkey_despeckle_size),
         "corridorkey_auto_mask": None if corridorkey_auto_mask is None else bool(corridorkey_auto_mask),
-        "corridorkey_color_protection": None
-        if corridorkey_color_protection is None
-        else bool(corridorkey_color_protection),
-        "corridorkey_protection_bg_max": None
-        if corridorkey_protection_bg_max is None
-        else float(corridorkey_protection_bg_max),
-        "corridorkey_protection_fg_min": None
-        if corridorkey_protection_fg_min is None
-        else float(corridorkey_protection_fg_min),
         "corridorkey_screen_mode": text_or_none(corridorkey_screen_mode),
         "corridorkey_preset": text_or_none(corridorkey_preset),
-        "corridorkey_hard_ui_hint_mode": text_or_none(corridorkey_hard_ui_hint_mode),
     }
     return {key: value for key, value in params.items() if value is not None}
 
@@ -589,7 +585,6 @@ def _run_prepared_main(
     prepared: PreparedRequest,
     *,
     shadow_mode: str,
-    corridorkey_hard_ui_hint_mode: str,
     corridorkey_hint_mask: np.ndarray | None,
     fallback_bg_color: tuple[int, int, int],
 ) -> DirectWorkerResult:
@@ -600,7 +595,6 @@ def _run_prepared_main(
                 decision=prepared.decision,
                 source_alpha=prepared.source_alpha,
                 shadow_mode=shadow_mode,
-                corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
                 corridorkey_hint_mask=corridorkey_hint_mask,
                 fallback_bg_color=fallback_bg_color,
                 ck_factory=_CK_FACTORY,
@@ -611,7 +605,6 @@ def _run_prepared_main(
         decision=prepared.decision,
         source_alpha=prepared.source_alpha,
         shadow_mode=shadow_mode,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         corridorkey_hint_mask=corridorkey_hint_mask,
         fallback_bg_color=fallback_bg_color,
         ck_factory=_CK_FACTORY,
@@ -625,7 +618,6 @@ def _cpu_worker(
     decision: RouteDecision,
     *,
     shadow_mode: str,
-    corridorkey_hard_ui_hint_mode: str,
     fallback_bg_color: tuple[int, int, int],
     route_sec: float,
     include_image: bool,
@@ -636,7 +628,6 @@ def _cpu_worker(
         decision=decision,
         source_alpha=source_alpha,
         shadow_mode=shadow_mode,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
         fallback_bg_color=fallback_bg_color,
         ck_factory=None,
         route_sec=route_sec,
@@ -763,12 +754,8 @@ async def matte_endpoint(
     corridorkey_auto_despeckle: str | None = Form(None),
     corridorkey_despeckle_size: int | None = Form(None),
     corridorkey_auto_mask: bool | None = Form(None),
-    corridorkey_color_protection: bool | None = Form(None),
-    corridorkey_protection_bg_max: float | None = Form(None),
-    corridorkey_protection_fg_min: float | None = Form(None),
     corridorkey_screen_mode: str | None = Form(None),
     corridorkey_preset: str | None = Form(None),
-    corridorkey_hard_ui_hint_mode: str | None = Form(None),
     known_bg_glow_material_strength: float | None = Form(None),
     pymatting_method: str | None = Form(None),
     pymatting_image_space: str | None = Form(None),
@@ -793,7 +780,6 @@ async def matte_endpoint(
     bg = _parse_bg_color(fallback_bg_color)
     effective_corridorkey_screen_mode = str(corridorkey_screen_mode or "auto")
     effective_corridorkey_preset = str(corridorkey_preset or "auto")
-    effective_corridorkey_hard_ui_hint_mode = str(corridorkey_hard_ui_hint_mode or "bbox_2px")
     route_decision_payload = _parse_json_object(route_decision, "route_decision")
     semantic_decision_payload = _parse_semantic_decision(semantic_decision)
     ck_params = _corridorkey_form_params(
@@ -803,12 +789,8 @@ async def matte_endpoint(
         corridorkey_auto_despeckle=corridorkey_auto_despeckle,
         corridorkey_despeckle_size=corridorkey_despeckle_size,
         corridorkey_auto_mask=corridorkey_auto_mask,
-        corridorkey_color_protection=corridorkey_color_protection,
-        corridorkey_protection_bg_max=corridorkey_protection_bg_max,
-        corridorkey_protection_fg_min=corridorkey_protection_fg_min,
         corridorkey_screen_mode=corridorkey_screen_mode,
         corridorkey_preset=corridorkey_preset,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
     )
     known_b_params = _known_b_form_params(
         pymatting_method=pymatting_method,
@@ -876,7 +858,6 @@ async def matte_endpoint(
         result = _run_prepared_main(
             prepared,
             shadow_mode=shadow_mode,
-            corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
             corridorkey_hint_mask=hint_mask,
             fallback_bg_color=bg,
         )
@@ -905,12 +886,8 @@ async def batch_matte_endpoint(
     corridorkey_auto_despeckle: str | None = Form(None),
     corridorkey_despeckle_size: int | None = Form(None),
     corridorkey_auto_mask: bool | None = Form(None),
-    corridorkey_color_protection: bool | None = Form(None),
-    corridorkey_protection_bg_max: float | None = Form(None),
-    corridorkey_protection_fg_min: float | None = Form(None),
     corridorkey_screen_mode: str | None = Form(None),
     corridorkey_preset: str | None = Form(None),
-    corridorkey_hard_ui_hint_mode: str | None = Form(None),
     known_bg_glow_material_strength: float | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
     include_images: bool = Form(True),
@@ -919,7 +896,6 @@ async def batch_matte_endpoint(
     bg = _parse_bg_color(fallback_bg_color)
     effective_corridorkey_screen_mode = str(corridorkey_screen_mode or "auto")
     effective_corridorkey_preset = str(corridorkey_preset or "auto")
-    effective_corridorkey_hard_ui_hint_mode = str(corridorkey_hard_ui_hint_mode or "bbox_2px")
     ck_params = _corridorkey_form_params(
         corridorkey_gamma_space=corridorkey_gamma_space,
         corridorkey_despill_strength=corridorkey_despill_strength,
@@ -927,12 +903,8 @@ async def batch_matte_endpoint(
         corridorkey_auto_despeckle=corridorkey_auto_despeckle,
         corridorkey_despeckle_size=corridorkey_despeckle_size,
         corridorkey_auto_mask=corridorkey_auto_mask,
-        corridorkey_color_protection=corridorkey_color_protection,
-        corridorkey_protection_bg_max=corridorkey_protection_bg_max,
-        corridorkey_protection_fg_min=corridorkey_protection_fg_min,
         corridorkey_screen_mode=corridorkey_screen_mode,
         corridorkey_preset=corridorkey_preset,
-        corridorkey_hard_ui_hint_mode=corridorkey_hard_ui_hint_mode,
     )
     prepared: list[PreparedRequest] = []
     rows: list[dict[str, Any] | None] = [None] * len(files)
@@ -976,7 +948,6 @@ async def batch_matte_endpoint(
                     item.source_alpha,
                     item.decision,
                     shadow_mode=shadow_mode,
-                    corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
                     fallback_bg_color=bg,
                     route_sec=item.route_sec,
                     include_image=include_images,
@@ -987,7 +958,6 @@ async def batch_matte_endpoint(
             result = _run_prepared_main(
                 item,
                 shadow_mode=shadow_mode,
-                corridorkey_hard_ui_hint_mode=effective_corridorkey_hard_ui_hint_mode,
                 corridorkey_hint_mask=None,
                 fallback_bg_color=bg,
             )

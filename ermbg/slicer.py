@@ -583,7 +583,8 @@ def crop_slice(
     crop = image_srgb[y : y + h, x : x + w]
     if not transparent:
         return crop.copy()
-    alpha = (mask[y : y + h, x : x + w] > 0.5).astype(np.uint8) * 255
+    alpha = np.clip(mask[y : y + h, x : x + w], 0.0, 1.0)
+    alpha = np.rint(alpha * 255.0).astype(np.uint8)
     return np.dstack([crop, alpha]).astype(np.uint8)
 
 

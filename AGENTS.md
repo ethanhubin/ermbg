@@ -87,8 +87,8 @@
 7. 用 Analyze payload 对 `/api/execute-candidate` 跑真实 HTTP smoke，确认
    HTTP 200、`algorithm`、route/profile 元数据、`execution_backend`、
    `execution_server_url`、`server_elapsed_sec`；涉及 CorridorKey hint 候选时，
-   还要确认 `semantic_decision.corridorkey_hint_variant` 与 Direct Worker
-   `algorithm_debug.corridorkey_hint_plan.variant` 一致。
+   还要确认 `semantic_decision.corridorkey_hint_value` 与 Direct Worker
+   `algorithm_debug.corridorkey_hint_plan.value` 一致。
 8. `/api/matte-candidates` 只作为旧调用方兼容层，不作为新候选路径质量验证入口。
 9. 如果 Web 报告 Direct Worker 连接错误，先检查
    `<services.direct_worker_url>/health`、远端 `7871` 监听和本机 `.venv`

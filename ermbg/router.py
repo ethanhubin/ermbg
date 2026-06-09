@@ -619,13 +619,9 @@ def _corridorkey_route_params(analysis: Any, *, execution_profile: str) -> dict[
         "corridorkey_refiner_strength": settings.refiner_strength,
         "corridorkey_auto_despeckle": settings.auto_despeckle,
         "corridorkey_despeckle_size": settings.despeckle_size,
-        "corridorkey_color_protection": settings.color_protection,
-        "corridorkey_protection_bg_max": settings.protection_bg_max,
-        "corridorkey_protection_fg_min": settings.protection_fg_min,
         # Every CorridorKey auto route defaults to a full-frame 0.32 soft prior.
         # auto_mask=False keeps the executor on the constant-prior path without
-        # computing any feature hint. Feature-hint code is kept in tree but is no
-        # longer wired into the default path.
+        # computing any feature hint.
         "corridorkey_auto_mask": False,
     }
 
@@ -1192,11 +1188,6 @@ def build_route_candidates(
             execution_profile = "corridorkey-transparent-button"
 
         params = _corridorkey_route_params(ck, execution_profile=execution_profile)
-        if execution_profile == "corridorkey-transparent-button":
-            # The router owns the transparent/glass-button decision and sends
-            # the complete execution recipe. Downstream code should not infer
-            # button behavior from CorridorKey's generic semantic profile.
-            params["corridorkey_hard_ui_hint_mode"] = "translucent_button"
         if soft_boundary_detail and not fine_detail_character_composite:
             ck_reasons = ["soft_boundary_detail_foreground_uses_corridorkey"]
         elif fine_detail_composite:

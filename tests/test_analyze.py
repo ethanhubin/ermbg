@@ -72,6 +72,26 @@ def _white_bg_colored_badge_with_shadow() -> np.ndarray:
     return image
 
 
+def _outlined_cartoon_white_marking() -> np.ndarray:
+    h = w = 128
+    image = np.full((h, w, 3), 255, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 42, (36, 24, 18), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 38, (245, 130, 20), -1, cv2.LINE_AA)
+    cv2.ellipse(image, (55, 66), (18, 12), -20, 0, 360, (255, 255, 255), -1, cv2.LINE_AA)
+    return image
+
+
+def _same_outline_cartoon_hole() -> np.ndarray:
+    h = w = 128
+    bg = (0, 200, 0)
+    image = np.full((h, w, 3), bg, dtype=np.uint8)
+    cv2.circle(image, (64, 64), 42, (25, 25, 20), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 38, (230, 180, 30), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 16, (25, 25, 20), -1, cv2.LINE_AA)
+    cv2.circle(image, (64, 64), 12, bg, -1, cv2.LINE_AA)
+    return image
+
+
 def _decode_preview_luma(data_url: str) -> np.ndarray:
     raw = base64.b64decode(data_url.split(",", 1)[1])
     return np.asarray(Image.open(io.BytesIO(raw)).convert("L"), dtype=np.uint8)
@@ -196,6 +216,40 @@ def test_analyze_enclosed_near_background_returns_semantic_candidates() -> None:
     assert "candidate:protect_near_bg_subject:hint" not in result.preview_assets
 
 
+def test_analyze_outlined_cartoon_white_marking_defaults_to_subject() -> None:
+    result = analyze_candidates(_outlined_cartoon_white_marking())
+
+    assert result.status == "needs_decision"
+    assert result.default_candidate_id == "auto_recommended_holes"
+    assert {region.type for region in result.ambiguity_regions} == {"enclosed_near_background"}
+    region = result.ambiguity_regions[0]
+    assert region.evidence["subject_outline_confidence"] > 0.8
+    assert region.evidence["hole_outline_confidence"] < 0.1
+    assert result.candidates[0].decision["enclosed_near_bg_policy"] == "subject"
+    assert result.candidates[0].confidence > result.candidates[2].confidence
+    trimap_meta = result.preview_assets[result.candidates[0].preview["assets"]["trimap"]]["metadata"]
+    assert trimap_meta["flat_opaque_internal_unknown"]["applied"] is True
+    assert trimap_meta["flat_opaque_internal_unknown"]["released_pixels"] > 0
+    assert trimap_meta["flat_opaque_internal_unknown"]["policy"] == "topological_subject_internal_unknown_to_sure_fg"
+    assert trimap_meta["flat_opaque_internal_unknown"]["exterior_connected_unknown_pixels"] > 0
+    assert trimap_meta["flat_opaque_internal_unknown"]["internal_unknown_pixels"] == trimap_meta["flat_opaque_internal_unknown"]["released_pixels"]
+
+
+def test_analyze_same_outline_internal_hole_defaults_to_transparent() -> None:
+    result = analyze_candidates(_same_outline_cartoon_hole())
+
+    assert result.status == "needs_decision"
+    assert result.default_candidate_id == "use_cut_hole_0"
+    assert {region.type for region in result.ambiguity_regions} == {"enclosed_near_background"}
+    region = result.ambiguity_regions[0]
+    assert region.evidence["subject_outline_confidence"] > 0.8
+    assert region.evidence["hole_outline_confidence"] > 0.65
+    assert result.candidates[0].decision["enclosed_near_bg_policy"] == "transparent_hole"
+    assert result.candidates[0].confidence > result.candidates[1].confidence
+    trimap_meta = result.preview_assets[result.candidates[0].preview["assets"]["trimap"]]["metadata"]
+    assert trimap_meta["flat_opaque_internal_unknown"]["applied"] is False
+
+
 def test_analyze_known_b_connected_shadow_is_resolved_by_default_trimap() -> None:
     result = analyze_candidates(_white_bg_colored_badge_with_shadow())
 
@@ -299,8 +353,7 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         "pymatting_known_b",
         "corridorkey",
     }
-    # CorridorKey defaults to a full-frame 0.32 soft prior and exposes no
-    # feature-hint ambiguity regions or candidates.
+    # CorridorKey exposes only full-frame constant hint strengths.
     assert [
         region.type
         for region in result.ambiguity_regions
@@ -312,10 +365,18 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         if candidate.route_candidate_id == "route_corridorkey"
     ]
     assert [candidate.id for candidate in corridorkey_candidates] == [
+        "route_corridorkey__corridorkey_hint_000",
+        "route_corridorkey__corridorkey_hint_016",
         "route_corridorkey__auto_default",
+        "route_corridorkey__corridorkey_hint_050",
+        "route_corridorkey__corridorkey_hint_070",
     ]
-    assert corridorkey_candidates[0].default is True
-    assert corridorkey_candidates[0].decision == {"policy": "auto_default"}
+    default = [candidate for candidate in corridorkey_candidates if candidate.default][0]
+    assert default.id == "route_corridorkey__auto_default"
+    assert default.decision["policy"] == "corridorkey_constant_hint"
+    assert default.decision["corridorkey_hint_value"] == 0.32
+    hint = _decode_preview_luma(result.preview_assets[default.preview["assets"]["hint"]]["data_url"])
+    assert int(hint.min()) == int(hint.max())
 
 
 def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates() -> None:
@@ -333,8 +394,8 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
     assert result.route["algorithm"] == "corridorkey"
     assert result.route["execution_profile"] == "corridorkey-character"
     assert result.default_candidate_id == "route_corridorkey__auto_default"
-    # CorridorKey emits no feature-hint regions or candidates; the default is a
-    # plain auto_default that resolves to a full-frame 0.32 soft prior.
+    # CorridorKey emits no feature-hint regions; candidates are pure constant
+    # hint strengths.
     corridorkey_regions = [
         region
         for region in result.ambiguity_regions
@@ -347,10 +408,21 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
         if candidate.route_candidate_id == "route_corridorkey"
     ]
     assert [candidate.id for candidate in corridorkey_candidates] == [
+        "route_corridorkey__corridorkey_hint_000",
+        "route_corridorkey__corridorkey_hint_016",
         "route_corridorkey__auto_default",
+        "route_corridorkey__corridorkey_hint_050",
+        "route_corridorkey__corridorkey_hint_070",
     ]
-    assert corridorkey_candidates[0].default is True
-    assert corridorkey_candidates[0].decision == {"policy": "auto_default"}
+    default = [candidate for candidate in corridorkey_candidates if candidate.default][0]
+    assert default.id == "route_corridorkey__auto_default"
+    assert default.decision == {
+        "policy": "corridorkey_constant_hint",
+        "corridorkey_hint_value": 0.32,
+        "review_region_types": [],
+    }
+    hint = _decode_preview_luma(result.preview_assets[default.preview["assets"]["hint"]]["data_url"])
+    assert int(hint.min()) == int(hint.max())
 
 
 def test_analyze_button_shadow_is_resolved_by_bg_seed_outline_without_candidates() -> None:
@@ -525,6 +597,54 @@ def test_analyze_translucent_known_b_uses_wide_near_background_preview_region(mo
     sure_bg = trimap < 64
     assert _non_boundary_unknown_component_count(unknown, sure_bg) <= 1
     assert trimap_meta["candidate_assembly"]["unknown_pixels"] > 0
+
+
+def test_analyze_known_b_preview_trimap_uses_preprocessed_background_for_drifted_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = _solid_green_button()
+    decision = RouteDecision(
+        route="pymatting_known_b",
+        asset_kind="button",
+        backend="pymatting_known_b",
+        params={
+            "execution_profile": "pymatting-hard-button",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": (0, 192, 0),
+            "pymatting_bg_threshold": 3.5,
+            "pymatting_fg_threshold": 24.0,
+            "pymatting_boundary_band_px": 2,
+            "pymatting_adapt_bg_threshold": False,
+            "pymatting_adapt_fg_threshold": True,
+            "pymatting_adapt_boundary_band": True,
+            "pymatting_trimap_mode": "standard",
+            "pymatting_unknown_grow_px": 0,
+        },
+        confidence=1.0,
+        reasons=["test_quantized_screen_background"],
+        analysis={
+            "corridorkey_analysis": {
+                "screen_mode": "green",
+                "background_color": [0, 200, 0],
+                "parameter_profile": "opaque_hard_ui_soft_shadow",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "ermbg.analyze.build_route_candidates",
+        lambda *args, **kwargs: [RouteCandidate(id="route_pymatting_known_b", decision=decision, default=True)],
+    )
+
+    result = analyze_candidates(image, fallback_background_color=(0, 200, 0))
+
+    trimap_ref = result.candidates[0].preview["assets"]["trimap"]
+    trimap_meta = result.preview_assets[trimap_ref]["metadata"]
+    assert trimap_meta["states"]["sure_bg"]["pixels"] > 0
+    assert trimap_meta["states"]["unknown"]["pixels"] > 0
+    assert trimap_meta["states"]["sure_fg"]["pixels"] > 0
+    assert trimap_meta["preprocess"]["known_background_normalization"]["applied"] is True
+    trimap = _decode_preview_luma(result.preview_assets[trimap_ref]["data_url"])
+    assert np.count_nonzero(trimap == 0) > 0
 
 
 def test_analyze_consumes_preprocess_decision() -> None:
