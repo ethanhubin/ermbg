@@ -1442,7 +1442,6 @@ def _matte_page_html() -> str:
       <a class="nav-tab" href="/slice">切图</a>
       <a class="nav-tab is-active" href="/" aria-current="page">抠图</a>
       <a class="nav-tab" href="/batch">批量抠图</a>
-      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <span class="runtime-status" id="runtime-status" aria-live="polite">
@@ -3249,7 +3248,6 @@ def _batch_page_html() -> str:
       <a class="nav-tab" href="/slice">切图</a>
       <a class="nav-tab" href="/">抠图</a>
       <a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>
-      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
@@ -3721,7 +3719,6 @@ def _slice_page_html() -> str:
       <a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>
       <a class="nav-tab" href="/">抠图</a>
       <a class="nav-tab" href="/batch">批量抠图</a>
-      <a class="nav-tab" href="/artifacts">Artifacts</a>
     </nav>
     <div class="header-right">
       <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>

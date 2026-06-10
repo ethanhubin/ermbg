@@ -129,7 +129,7 @@ def test_index_serves_upload_ui():
     assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
     assert '<a class="nav-tab is-active" href="/" aria-current="page">抠图</a>' in response.text
     assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
-    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' not in response.text
     assert '"/api/slice-preview"' not in response.text
     assert '"/api/slice-crops"' not in response.text
     assert 'id="runtime-status"' in response.text
@@ -467,7 +467,7 @@ def test_slice_page_serves_slice_mode_entry():
     assert '<a class="nav-tab is-active" href="/slice" aria-current="page">切图</a>' in response.text
     assert '<a class="nav-tab" href="/">抠图</a>' in response.text
     assert '<a class="nav-tab" href="/batch">批量抠图</a>' in response.text
-    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' not in response.text
     assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
     assert '"/api/slice-preview"' in response.text
     assert '"/api/slice-crops"' in response.text
@@ -556,7 +556,7 @@ def test_batch_page_serves_batch_queue_entry():
     assert '<a class="nav-tab" href="/slice">切图</a>' in response.text
     assert '<a class="nav-tab" href="/">抠图</a>' in response.text
     assert '<a class="nav-tab is-active" href="/batch" aria-current="page">批量抠图</a>' in response.text
-    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' in response.text
+    assert '<a class="nav-tab" href="/artifacts">Artifacts</a>' not in response.text
     assert '<a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>' in response.text
     assert 'type="file"' in response.text
     assert "multiple" in response.text
@@ -664,6 +664,7 @@ def test_game_eval_page_serves_result_table():
     assert "selectedTestPath()" in response.text
     assert 'role="progressbar"' in response.text
     assert 'id="batch-progress"' in response.text
+    assert '<a href="/artifacts">Artifacts</a>' in response.text
     assert 'id="runtime-status"' in response.text
     assert 'data-runtime="local"' in response.text
     assert 'data-runtime="comfy"' not in response.text
