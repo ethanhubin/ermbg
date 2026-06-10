@@ -22,6 +22,7 @@ Example::
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
@@ -878,6 +879,9 @@ def _matte_image_pymatting_known_b(
     if float(cg_rtol) <= 0.0:
         raise ValueError("pymatting_cg_rtol must be > 0")
 
+    timings: dict[str, float] = {}
+    total_started = time.perf_counter()
+    step_started = time.perf_counter()
     bg_info: dict[str, Any]
     effective_bg_source = bg_source
     effective_adapt_bg_threshold = bool(adapt_bg_threshold)
@@ -905,7 +909,9 @@ def _matte_image_pymatting_known_b(
         bg_info = {"accepted": True, "source": "custom", "reason": "custom", "background_color": list(selected_bg)}
     if bg_info_override is not None:
         bg_info = dict(bg_info_override)
+    timings["background_resolve_sec"] = time.perf_counter() - step_started
 
+    step_started = time.perf_counter()
     requested_trimap_mode = str(trimap_mode or "standard")
     semantic_decision_payload = dict(semantic_decision or {})
     effective_trimap_mode = requested_trimap_mode
@@ -944,9 +950,11 @@ def _matte_image_pymatting_known_b(
             "restore_uses_same_mask": True,
             "solver_trimap_mode": requested_trimap_mode,
         }
+    timings["same_key_proxy_sec"] = time.perf_counter() - step_started
 
     processing_rgb = solver_rgb
 
+    step_started = time.perf_counter()
     if explicit_trimap is not None:
         trimap, trimap_info = _known_b_explicit_trimap(
             explicit_trimap,
@@ -979,6 +987,9 @@ def _matte_image_pymatting_known_b(
             user_keep_mask=user_keep_mask,
             user_remove_mask=user_remove_mask,
         )
+    timings["trimap_sec"] = time.perf_counter() - step_started
+
+    step_started = time.perf_counter()
     pm = estimate_alpha_with_pymatting(
         processing_rgb,
         trimap,
@@ -987,6 +998,9 @@ def _matte_image_pymatting_known_b(
         cg_maxiter=int(cg_maxiter),
         cg_rtol=float(cg_rtol),
     )
+    timings["pymatting_solve_sec"] = time.perf_counter() - step_started
+
+    step_started = time.perf_counter()
     alpha = np.clip(pm.alpha.astype(np.float32), 0.0, 1.0)
     alpha, alpha_pinhole_repair = _repair_known_b_alpha_pinholes(
         processing_rgb,
@@ -1023,6 +1037,9 @@ def _matte_image_pymatting_known_b(
     )
     foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
     foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
+    timings["foreground_unmix_repair_sec"] = time.perf_counter() - step_started
+
+    step_started = time.perf_counter()
     pymatting_alpha_before_inner_floor = alpha.copy()
     if same_key_inner_opaque_mask is not None:
         floor_eligible = same_key_inner_opaque_mask & ~trimap.sure_bg
@@ -1060,6 +1077,9 @@ def _matte_image_pymatting_known_b(
         shadow_mode=shadow_mode,
         repair_domain=trimap.unknown,
     )
+    timings["shadow_patch_sec"] = time.perf_counter() - step_started
+
+    step_started = time.perf_counter()
     if same_key_inner_floor_mask is not None:
         alpha = alpha.copy()
         subject_foreground_srgb = subject_foreground_srgb.copy()
@@ -1081,6 +1101,8 @@ def _matte_image_pymatting_known_b(
         rgba_rgb_srgb[proxy_subject_mask] = rgb[proxy_subject_mask]
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
+    timings["compose_sec"] = time.perf_counter() - step_started
+    timings["total_internal_sec"] = time.perf_counter() - total_started
 
     report: dict[str, Any] = {
         "diagnosis": None,
@@ -1126,6 +1148,7 @@ def _matte_image_pymatting_known_b(
                 },
                 "same_key_proxy_subject": proxy_subject_info,
                 "same_key_inner_opaque_floor": same_key_inner_floor_info,
+                "timings": timings,
             },
         },
     }
@@ -1240,6 +1263,7 @@ def _matte_image_pymatting_known_b(
             "same_key_inner_opaque_floor": same_key_inner_floor_info,
         },
         "shadow": shadow_info,
+        "timings": timings,
     }
     if preprocess_info is not None:
         debug["input_preprocess"] = preprocess_info

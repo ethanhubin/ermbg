@@ -64,6 +64,56 @@ def test_direct_matte_auto_reuses_route_corridorkey_analysis(monkeypatch):
     assert result.timings["backend_sec"] >= 0.0
 
 
+def test_direct_matte_known_b_skips_preprocess_when_input_is_preprocessed(monkeypatch):
+    rgb = np.full((3, 4, 3), (0, 200, 0), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    def fail_prepare(*args, **kwargs):
+        raise AssertionError("prepare_known_b_preprocessed_input should be skipped")
+
+    def fake_known_b(image, *, bg_color, preprocess_info, **kwargs):
+        captured["image"] = image
+        captured["bg_color"] = bg_color
+        captured["preprocess_info"] = preprocess_info
+        captured["explicit_trimap"] = kwargs.get("explicit_trimap")
+        return MatteResponse(
+            rgba=_rgba(image),
+            alpha=np.ones(image.shape[:2], dtype=np.float32),
+            foreground_srgb=image.copy(),
+            strategy_name="pymatting_known_b",
+            background_color=bg_color,
+            debug={"timings": {"trimap_sec": 0.0, "pymatting_solve_sec": 0.0}},
+        )
+
+    monkeypatch.setattr(direct_worker, "prepare_known_b_preprocessed_input", fail_prepare)
+    monkeypatch.setattr(direct_worker, "_matte_image_pymatting_known_b", fake_known_b)
+
+    decision = RouteDecision(
+        route="pymatting_known_b",
+        asset_kind="button",
+        backend="pymatting_known_b",
+        params={
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": (0, 200, 0),
+            "pymatting_input_preprocessed": True,
+            "pymatting_explicit_trimap": np.full(rgb.shape[:2], 128, dtype=np.uint8),
+        },
+        confidence=1.0,
+        reasons=["test"],
+    )
+
+    result = direct_worker.direct_matte_from_decision(rgb, decision=decision, route_sec=0.0)
+
+    assert captured["image"] is rgb
+    assert captured["bg_color"] == (0, 200, 0)
+    preprocess_info = captured["preprocess_info"]
+    assert isinstance(preprocess_info, dict)
+    assert preprocess_info["known_background_normalization"]["reason"] == "input_already_preprocessed_by_caller"
+    assert isinstance(captured["explicit_trimap"], np.ndarray)
+    assert result.timings["known_b_preprocess_sec"] >= 0.0
+    assert result.timings["known_b_trimap_sec"] == 0.0
+
+
 def test_matte_corridorkey_direct_uses_fake_client_without_comfy():
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     alpha = np.ones(rgb.shape[:2], dtype=np.float32)

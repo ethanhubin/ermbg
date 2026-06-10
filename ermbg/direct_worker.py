@@ -486,14 +486,44 @@ def direct_matte_from_decision(
         known_b_bg_threshold = _route_params(params, "pymatting_bg_threshold", 3.5)
         known_b_fg_threshold = _route_params(params, "pymatting_fg_threshold", 24.0)
         known_b_bg_source = _route_params(params, "pymatting_bg_source", "custom")
-        known_b_rgb, known_b_bg, known_b_bg_info, preprocess_info = prepare_known_b_preprocessed_input(
-            rgb,
-            bg_source=known_b_bg_source,
-            bg_color=_route_params(params, "pymatting_bg_color", fallback_bg_color),
-            bg_threshold=known_b_bg_threshold,
-            fg_threshold=known_b_fg_threshold,
-            adaptive=False,
-        )
+        known_b_input_preprocessed = bool(_route_params(params, "pymatting_input_preprocessed", False))
+        t_preprocess = time.perf_counter()
+        if known_b_input_preprocessed:
+            known_b_bg = _rgb_param(params, "pymatting_bg_color", fallback_bg_color)
+            known_b_rgb = rgb
+            known_b_bg_info = {
+                "accepted": True,
+                "source": "custom",
+                "reason": "input_already_preprocessed",
+                "background_color": [int(c) for c in known_b_bg],
+            }
+            preprocess_info = {
+                "selected": [],
+                "applied": [],
+                "metadata": {
+                    "known_background_normalization": {
+                        "enabled": True,
+                        "applied": False,
+                        "reason": "input_already_preprocessed_by_caller",
+                    }
+                },
+                "known_background_normalization": {
+                    "enabled": True,
+                    "applied": False,
+                    "reason": "input_already_preprocessed_by_caller",
+                },
+            }
+        else:
+            known_b_rgb, known_b_bg, known_b_bg_info, preprocess_info = prepare_known_b_preprocessed_input(
+                rgb,
+                bg_source=known_b_bg_source,
+                bg_color=_route_params(params, "pymatting_bg_color", fallback_bg_color),
+                bg_threshold=known_b_bg_threshold,
+                fg_threshold=known_b_fg_threshold,
+                adaptive=False,
+            )
+        timings["known_b_preprocess_sec"] = time.perf_counter() - t_preprocess
+        t_executor = time.perf_counter()
         response = _matte_image_pymatting_known_b(
             known_b_rgb,
             src_path=None,
@@ -523,6 +553,12 @@ def direct_matte_from_decision(
             explicit_trimap=_route_params(params, "pymatting_explicit_trimap", None),
             auto_route=auto_route,
         )
+        timings["known_b_executor_sec"] = time.perf_counter() - t_executor
+        response_timings = response.debug.get("timings") if isinstance(response.debug, dict) else None
+        if isinstance(response_timings, dict):
+            for key, value in response_timings.items():
+                if isinstance(value, (int, float)):
+                    timings[f"known_b_{key}"] = float(value)
         response.strategy_name = "direct_pymatting_known_b"
         response.debug["backend"] = "direct-pymatting-known-b"
         execution_backend = "direct-pymatting-known-b"

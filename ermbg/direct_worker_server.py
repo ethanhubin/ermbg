@@ -441,6 +441,7 @@ def _known_b_form_params(
     pymatting_cg_rtol: float | None,
     pymatting_trimap_mode: str | None,
     pymatting_unknown_grow_px: int | None,
+    pymatting_input_preprocessed: bool | None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if pymatting_method is not None:
@@ -472,6 +473,8 @@ def _known_b_form_params(
         params["pymatting_trimap_mode"] = str(pymatting_trimap_mode)
     if pymatting_unknown_grow_px is not None:
         params["pymatting_unknown_grow_px"] = int(pymatting_unknown_grow_px)
+    if pymatting_input_preprocessed is not None:
+        params["pymatting_input_preprocessed"] = bool(pymatting_input_preprocessed)
     return params
 
 
@@ -771,6 +774,7 @@ async def matte_endpoint(
     pymatting_cg_rtol: float | None = Form(None),
     pymatting_trimap_mode: str | None = Form(None),
     pymatting_unknown_grow_px: int | None = Form(None),
+    pymatting_input_preprocessed: bool | None = Form(None),
     route_decision: str | None = Form(None),
     semantic_decision: str | None = Form(None),
     fallback_bg_color: str = Form("0,200,0"),
@@ -807,6 +811,7 @@ async def matte_endpoint(
         pymatting_cg_rtol=pymatting_cg_rtol,
         pymatting_trimap_mode=pymatting_trimap_mode,
         pymatting_unknown_grow_px=pymatting_unknown_grow_px,
+        pymatting_input_preprocessed=pymatting_input_preprocessed,
     )
     data = await image.read()
     hint_mask = None

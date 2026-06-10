@@ -834,6 +834,7 @@ def _apply_known_b_background_repair(
     execution_params = {
         "pymatting_bg_source": "custom",
         "pymatting_bg_color": background,
+        "pymatting_input_preprocessed": True,
         "pymatting_bg_threshold": bg_threshold,
         "pymatting_fg_threshold": fg_threshold,
         "pymatting_adapt_bg_threshold": bool(
@@ -857,6 +858,7 @@ def _apply_known_b_background_repair(
         "pymatting_cg_rtol",
         "pymatting_trimap_mode",
         "pymatting_unknown_grow_px",
+        "pymatting_input_preprocessed",
     ):
         if key in route_params:
             execution_params[key] = route_params[key]
@@ -4866,6 +4868,7 @@ def _run_web_backend(
             "pymatting_trimap_mode",
             "pymatting_unknown_grow_px",
             "pymatting_explicit_trimap",
+            "pymatting_input_preprocessed",
         )
         route_payload = kwargs.get("route_decision") if isinstance(kwargs.get("route_decision"), dict) else {}
         route_params = route_payload.get("params") if isinstance(route_payload.get("params"), dict) else {}

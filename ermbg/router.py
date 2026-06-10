@@ -1169,7 +1169,7 @@ def build_route_candidates(
         if same_key_opaque_button
         else "standard_route_candidates",
     }
-    if same_key_opaque_button:
+    if same_key_opaque_button and not candidates:
         opaque_params = _pymatting_route_params(
             stable_bg,
             execution_profile="pymatting-hard-button",

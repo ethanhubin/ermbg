@@ -24,6 +24,14 @@ from .router import build_route_candidates, select_default_route_candidate
 from .types import Trimap
 
 
+@dataclass(frozen=True)
+class _KnownBTrimapPreviewBase:
+    trimap: Trimap
+    assembly_info: dict[str, Any]
+    preprocess_info: dict[str, Any]
+    kwargs: dict[str, Any]
+
+
 def _route_payload(route_decision: Any) -> dict[str, Any]:
     payload = route_decision.to_dict()
     return {
@@ -370,31 +378,15 @@ def _semantic_hole_bg_core_and_unknown(
     }
 
 
-def _known_b_trimap_preview(
+def _known_b_trimap_preview_base(
     image_srgb: np.ndarray,
     route: dict[str, Any],
-    candidate: SemanticCandidate,
-    *,
-    candidate_mask: np.ndarray | None = None,
-    region_masks: dict[str, np.ndarray] | None = None,
-    regions: list[AmbiguityRegion] | None = None,
-) -> tuple[np.ndarray, dict[str, Any]] | None:
-    """Build the explicit trimap that Analyze will hand to Execute.
-
-    The current Known-B contract is deliberately simple: normalize the measured
-    background field, let the BG-seed outline builder decide BG/unknown/FG, then
-    apply only semantic hole decisions as an overlay. Shadow evidence is handled
-    inside the outline builder as boundary expansion; it is not a separate
-    candidate branch here.
-    """
-
+) -> _KnownBTrimapPreviewBase | None:
     kwargs = _known_b_trimap_kwargs_from_route(route)
     background = kwargs.pop("background_color")
     if background is None:
         return None
     bg_source = str(kwargs.pop("bg_source", "custom"))
-    decision = candidate.decision or {}
-    region_masks = region_masks or {}
     try:
         from .api import prepare_known_b_preprocessed_input
         from .pymatting_refine import build_known_background_trimap
@@ -418,12 +410,86 @@ def _known_b_trimap_preview(
             adapt_boundary_band=bool(kwargs["adapt_boundary_band"]),
             trimap_mode=str(kwargs.get("trimap_mode") or "standard"),
             unknown_grow_px=int(kwargs.get("unknown_grow_px") or 0),
-            semantic_decision=dict(decision),
         )
     except Exception:
         return None
+    return _KnownBTrimapPreviewBase(
+        trimap=trimap,
+        assembly_info=assembly_info,
+        preprocess_info=preprocess_info,
+        kwargs=kwargs,
+    )
+
+
+def _known_b_trimap_preview(
+    image_srgb: np.ndarray,
+    route: dict[str, Any],
+    candidate: SemanticCandidate,
+    *,
+    candidate_mask: np.ndarray | None = None,
+    region_masks: dict[str, np.ndarray] | None = None,
+    regions: list[AmbiguityRegion] | None = None,
+    base: _KnownBTrimapPreviewBase | None = None,
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    """Build the explicit trimap that Analyze will hand to Execute.
+
+    The current Known-B contract is deliberately simple: normalize the measured
+    background field, let the BG-seed outline builder decide BG/unknown/FG, then
+    apply only semantic hole decisions as an overlay. Shadow evidence is handled
+    inside the outline builder as boundary expansion; it is not a separate
+    candidate branch here.
+    """
+
+    decision = candidate.decision or {}
+    region_masks = region_masks or {}
     hole_policies = decision.get("enclosed_near_bg_region_policies")
     shadow_policies = decision.get("known_b_shadow_region_policies")
+    summary_policy = str(decision.get("enclosed_near_bg_policy") or "")
+    can_reuse_base = (
+        isinstance(hole_policies, dict)
+        or isinstance(shadow_policies, dict)
+        or summary_policy in {"", "auto_default"}
+    )
+    if base is None or not can_reuse_base:
+        try:
+            from .api import prepare_known_b_preprocessed_input
+            from .pymatting_refine import build_known_background_trimap
+
+            kwargs = _known_b_trimap_kwargs_from_route(route)
+            background = kwargs.pop("background_color")
+            if background is None:
+                return None
+            bg_source = str(kwargs.pop("bg_source", "custom"))
+            trimap_image_srgb, trimap_background, _bg_info, preprocess_info = prepare_known_b_preprocessed_input(
+                image_srgb,
+                bg_source=bg_source,
+                bg_color=background,
+                bg_threshold=float(kwargs["bg_threshold"]),
+                fg_threshold=float(kwargs["fg_threshold"]),
+                adaptive=False,
+            )
+            trimap, assembly_info = build_known_background_trimap(
+                trimap_image_srgb,
+                trimap_background,
+                bg_threshold=float(kwargs["bg_threshold"]),
+                fg_threshold=float(kwargs["fg_threshold"]),
+                boundary_band_px=int(kwargs["boundary_band_px"]),
+                adapt_bg_threshold=bool(kwargs["adapt_bg_threshold"]),
+                adapt_fg_threshold=bool(kwargs["adapt_fg_threshold"]),
+                adapt_boundary_band=bool(kwargs["adapt_boundary_band"]),
+                trimap_mode=str(kwargs.get("trimap_mode") or "standard"),
+                unknown_grow_px=int(kwargs.get("unknown_grow_px") or 0),
+                semantic_decision=dict(decision),
+            )
+        except Exception:
+            return None
+        base_reused = False
+    else:
+        trimap = base.trimap
+        assembly_info = base.assembly_info
+        preprocess_info = base.preprocess_info
+        kwargs = base.kwargs
+        base_reused = True
     region_by_id = {region.id: region for region in (regions or [])}
     semantic_forced_bg = np.zeros(trimap.sure_bg.shape, dtype=bool)
     semantic_forced_fg = np.zeros(trimap.sure_fg.shape, dtype=bool)
@@ -598,6 +664,7 @@ def _known_b_trimap_preview(
         "flat_opaque_internal_unknown": flat_opaque_info,
         "preprocess": preprocess_info,
         "candidate_assembly": assembly_info,
+        "base_trimap_reused": bool(base_reused),
     }
     return preview, metadata
 
@@ -624,6 +691,7 @@ def _attach_preview_assets(
     regions: list[AmbiguityRegion],
     region_masks: dict[str, np.ndarray],
     candidates: list[SemanticCandidate],
+    eager_trimap: bool = True,
 ) -> tuple[list[SemanticCandidate], dict[str, Any]]:
     """Generate cheap Analyze previews without running a matting backend."""
 
@@ -647,14 +715,21 @@ def _attach_preview_assets(
             "data_url": _png_data_url_rgba(rgba),
         }
 
-    if route_algorithm == "pymatting_known_b":
+    if route_algorithm == "pymatting_known_b" and eager_trimap:
         preview_modes = ("overlay", "trimap")
+    elif route_algorithm == "pymatting_known_b":
+        preview_modes = ("overlay",)
     elif route_algorithm == "corridorkey":
         preview_modes = ("overlay", "hint")
     else:
         preview_modes = ("overlay",)
 
     updated: list[SemanticCandidate] = []
+    known_b_base = (
+        _known_b_trimap_preview_base(image_srgb, route)
+        if route_algorithm == "pymatting_known_b" and "trimap" in preview_modes
+        else None
+    )
     for candidate in candidates:
         decision = candidate.decision or {}
         policy = str(
@@ -677,8 +752,9 @@ def _attach_preview_assets(
                 candidate_mask=mask,
                 region_masks=region_masks,
                 regions=regions,
+                base=known_b_base,
             )
-            if route_algorithm == "pymatting_known_b"
+            if route_algorithm == "pymatting_known_b" and "trimap" in preview_modes
             else None
         )
         trimap_image = trimap_preview[0] if trimap_preview is not None else _trimap_preview_from_masks(
@@ -694,11 +770,13 @@ def _attach_preview_assets(
             },
             "source": "fallback_all_unknown",
         }
-        mode_images = {
-            "overlay": _png_data_url_rgba(_overlay_preview(image_srgb, mask, color)),
-            "trimap": _png_data_url_rgb(trimap_image),
-            "hint": _png_data_url_rgba(_hint_preview(mask, (h, w), keep=keep)),
-        }
+        mode_images: dict[str, str] = {}
+        if "overlay" in preview_modes:
+            mode_images["overlay"] = _png_data_url_rgba(_overlay_preview(image_srgb, mask, color))
+        if "trimap" in preview_modes:
+            mode_images["trimap"] = _png_data_url_rgb(trimap_image)
+        if "hint" in preview_modes:
+            mode_images["hint"] = _png_data_url_rgba(_hint_preview(mask, (h, w), keep=keep))
         hint_metadata: dict[str, Any] | None = None
         if route_algorithm == "corridorkey":
             hint_value = decision.get("corridorkey_hint_value")
@@ -2459,6 +2537,7 @@ def analyze_candidates(
         "schema": "ermbg.analysis_preview_assets.v1",
         "image_space": "analyze_semantic_input",
     }
+    default_route_candidate_id = default_route_candidate.id
     for plan in route_plans:
         plan_regions = [region_by_id.get(region.id, region) for region in plan["regions"]]
         candidates, assets = _attach_preview_assets(
@@ -2469,11 +2548,11 @@ def analyze_candidates(
             regions=plan_regions,
             region_masks=plan["region_masks"],
             candidates=plan["candidates"],
+            eager_trimap=(plan["route_candidate_id"] == default_route_candidate_id),
         )
         preview_assets.update(assets)
         all_candidates.extend(candidates)
 
-    default_route_candidate_id = default_route_candidate.id
     default_route_candidates = [
         candidate
         for candidate in all_candidates
