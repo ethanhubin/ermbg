@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -802,3 +803,57 @@ def test_direct_worker_server_batch_endpoint_preserves_order(monkeypatch):
     assert [row["filename"] for row in payload["runs"]] == ["first.png", "second.png"]
     assert payload["runs"][0]["execution_profile"] == "pymatting-hard-button"
     assert payload["runs"][1]["execution_profile"] == "corridorkey-effect-icon"
+
+
+def test_direct_worker_server_batch_cpu_path_preserves_debug_assets(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    hint = np.zeros(rgb.shape[:2], dtype=np.float32)
+    hint[:, 1] = 1.0
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    monkeypatch.setattr(
+        server,
+        "classify_route",
+        lambda *args, **kwargs: RouteDecision(
+            route="pymatting_known_b",
+            asset_kind="button",
+            backend="pymatting_known_b",
+            params={"execution_profile": "pymatting-hard-button"},
+            confidence=1.0,
+            reasons=["test"],
+        ),
+    )
+
+    def fake_direct_matte_from_decision(rgb, **kwargs):
+        del kwargs
+        result = _result(rgb)
+        result.response.debug["corridorkey_hint"] = hint
+        return result
+
+    monkeypatch.setattr(server, "direct_matte_from_decision", fake_direct_matte_from_decision)
+    monkeypatch.setattr(server, "_executor", lambda: executor)
+
+    try:
+        client = TestClient(server.app)
+        response = client.post(
+            "/batch-matte",
+            files=[("files", ("first.png", _png_bytes(rgb), "image/png"))],
+            data={"include_images": "true"},
+        )
+    finally:
+        executor.shutdown(wait=True)
+
+    assert response.status_code == 200
+    row = response.json()["runs"][0]
+    assert row["algorithm_debug"]["pymatting_known_b"]["trimap"]["unknown_pixels"] == 6
+    assert "rgba_png_base64" in row
+    decoded_trimap = np.asarray(
+        Image.open(io.BytesIO(base64.b64decode(row["trimap_png_base64"]))).convert("L"),
+        dtype=np.uint8,
+    )
+    decoded_hint = np.asarray(
+        Image.open(io.BytesIO(base64.b64decode(row["corridorkey_hint_png_base64"]))).convert("L"),
+        dtype=np.uint8,
+    )
+    assert decoded_trimap.shape == rgb.shape[:2]
+    assert decoded_hint[:, 1].min() == 255

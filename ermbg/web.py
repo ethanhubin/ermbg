@@ -185,7 +185,7 @@ GAME_EVAL_SCREENS = ("green", "blue")
 # Fallback only applies in tests or broken installs where the manifest is not
 # available. It mirrors the current B/I/C semantic manifest so progress does not
 # silently drift back to the retired 78-sample set.
-FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 83
+FALLBACK_GAME_EVAL_EXPECTED_TOTAL = 88
 DEFAULT_GAME_EVAL_TEST_PATH = "auto"
 GAME_EVAL_TEST_PATHS = {
     "auto": {

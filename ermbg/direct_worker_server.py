@@ -639,6 +639,13 @@ def _cpu_worker(
     payload["worker_elapsed_sec"] = time.perf_counter() - t
     if include_image:
         payload["rgba_png_base64"] = _encode_rgba_png_base64(result.response.rgba)
+        debug = result.response.debug if isinstance(result.response.debug, dict) else {}
+        trimap = debug.get("trimap_u8")
+        if isinstance(trimap, np.ndarray) and trimap.ndim == 2:
+            payload["trimap_png_base64"] = _encode_gray_png_base64(trimap)
+        corridorkey_hint = debug.get("corridorkey_hint")
+        if isinstance(corridorkey_hint, np.ndarray) and corridorkey_hint.ndim == 2:
+            payload["corridorkey_hint_png_base64"] = _encode_gray_png_base64(_mask_u8(corridorkey_hint))
     payload["width"] = int(result.response.rgba.shape[1])
     payload["height"] = int(result.response.rgba.shape[0])
     return payload
@@ -1001,9 +1008,14 @@ async def batch_matte_endpoint(
                 "execution_profile": payload.get("execution_profile"),
                 "shadow_mode": payload.get("shadow_mode"),
                 "timings": timings,
+                "algorithm_debug": payload.get("algorithm_debug"),
             }
             if include_images and isinstance(payload.get("rgba_png_base64"), str):
                 row["rgba_png_base64"] = payload["rgba_png_base64"]
+            if include_images and isinstance(payload.get("trimap_png_base64"), str):
+                row["trimap_png_base64"] = payload["trimap_png_base64"]
+            if include_images and isinstance(payload.get("corridorkey_hint_png_base64"), str):
+                row["corridorkey_hint_png_base64"] = payload["corridorkey_hint_png_base64"]
             rows[item.index] = row
         except Exception as exc:
             rows[item.index] = {

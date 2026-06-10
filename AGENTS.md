@@ -45,7 +45,7 @@
   case manifest 路径和输出文件路径，保证 Web 后台列表稳定发现。最终
   `rgba` 是通用输出；`trimap`、`alpha`、`shadow` 等诊断图只在该后端实际
   产出时写入并列入 manifest，不作为所有 backend 的强制要求。
-- 当前 game eval manifest 全量为 87 个样本；标准流程不要继续按旧 85/86 样本口径汇报。
+- 当前 game eval manifest 全量为 88 个样本；标准流程不要继续按旧 85/86/87 样本口径汇报。
 
 ## 算法相关任务
 

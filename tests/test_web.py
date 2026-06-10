@@ -790,7 +790,7 @@ def test_game_eval_start_run_creates_new_batch(monkeypatch, tmp_path):
     assert payload["runId"].endswith("_v001")
     assert payload["status"] == "running"
     assert payload["progress"]["completed"] == 0
-    assert payload["progress"]["total"] == 83
+    assert payload["progress"]["total"] == 88
     assert (tmp_path / "out" / payload["runId"] / "web_launch.json").exists()
 
     status_response = client.get(payload["statusUrl"])
