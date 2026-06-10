@@ -233,6 +233,8 @@ _SLICE_CACHE_LOCK = Lock()
 def _direct_backend_base(backend: str) -> str:
     if backend.startswith("direct-worker:"):
         return "direct-worker"
+    if backend.startswith("direct-pymatting-known-b:"):
+        return "direct-pymatting-known-b"
     if backend.startswith("direct-corridorkey:"):
         return "direct-corridorkey"
     if backend.startswith("direct-known-bg-glow:"):
@@ -244,7 +246,7 @@ def _direct_backend_endpoint_name(backend: str) -> str | None:
     if ":" not in backend:
         return None
     base, name = backend.split(":", 1)
-    if base not in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"}:
+    if base not in {"direct-worker", "direct-pymatting-known-b", "direct-corridorkey", "direct-known-bg-glow"}:
         return None
     name = name.strip()
     return name or None
@@ -291,7 +293,7 @@ def _is_allowed_backend(backend: str) -> bool:
     base = _direct_backend_base(backend)
     if base not in ALLOWED_BACKENDS:
         return False
-    if base in {"direct-worker", "direct-corridorkey", "direct-known-bg-glow"} and _direct_backend_endpoint_name(backend) is not None:
+    if base in {"direct-worker", "direct-pymatting-known-b", "direct-corridorkey", "direct-known-bg-glow"} and _direct_backend_endpoint_name(backend) is not None:
         return _direct_backend_endpoint_name(backend) in WEB_DIRECT_WORKER_ENDPOINTS
     return backend in ALLOWED_BACKENDS
 
@@ -300,6 +302,7 @@ def _allowed_backend_names() -> list[str]:
     names = sorted(ALLOWED_BACKENDS)
     for endpoint_name in sorted(WEB_DIRECT_WORKER_ENDPOINTS):
         names.append(f"direct-worker:{endpoint_name}")
+        names.append(f"direct-pymatting-known-b:{endpoint_name}")
         names.append(f"direct-corridorkey:{endpoint_name}")
         names.append(f"direct-known-bg-glow:{endpoint_name}")
     return names
@@ -320,6 +323,51 @@ def _backend_options_html(*, selected: str = "auto") -> str:
     return "".join(rows)
 
 
+def _direct_worker_endpoint_options_html(*, runtime_labels: bool = False) -> str:
+    primary_url = WEB_DIRECT_WORKER_URL.rstrip("/")
+    prefix = "Direct · " if runtime_labels else ""
+
+    def option(value: str, label: str, title: str = "") -> str:
+        title_attr = f' title="{html.escape(title)}"' if title else ""
+        return f'<option value="{html.escape(value)}"{title_attr}>{html.escape(label)}</option>'
+
+    rows = [option("", f"{prefix}Auto primary", primary_url)]
+    seen_urls: set[str] = set()
+    for name, url in WEB_DIRECT_WORKER_ENDPOINTS.items():
+        url = url.rstrip("/")
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        marker = " · primary" if url == primary_url else ""
+        rows.append(option(name, f"{prefix}{name}{marker}", url))
+    return "".join(rows)
+
+
+def _direct_worker_endpoint_form_select_html() -> str:
+    has_remote = any(
+        "127.0.0.1" not in url.lower() and "localhost" not in url.lower() and "[::1]" not in url.lower()
+        for url in WEB_DIRECT_WORKER_ENDPOINTS.values()
+    )
+    if not has_remote and len(WEB_DIRECT_WORKER_ENDPOINTS) <= 1:
+        return ""
+    return (
+        '<label class="direct-endpoint-field">Direct Worker'
+        '<select id="direct-endpoint">'
+        f'{_direct_worker_endpoint_options_html()}'
+        '</select></label>'
+    )
+
+
+def _direct_worker_endpoint_runtime_select_html() -> str:
+    return (
+        '<span class="runtime-pill runtime-endpoint-pill" data-runtime="direct">'
+        '<span class="runtime-dot" aria-hidden="true"></span>'
+        '<select id="direct-endpoint" class="runtime-endpoint-select" aria-label="Direct Worker">'
+        f'{_direct_worker_endpoint_options_html(runtime_labels=True)}'
+        '</select></span>'
+    )
+
+
 def _inject_backend_options(html: str) -> str:
     old = (
         '<option value="auto" selected>Auto</option>'
@@ -328,7 +376,16 @@ def _inject_backend_options(html: str) -> str:
         '<option value="direct-known-bg-glow">Direct Worker Known-B Glow</option>'
         '<option value="pymatting-known-b">pymatting-known-b</option>'
     )
-    return html.replace(old, _backend_options_html())
+    return html.replace(old, _backend_options_html()).replace(
+        "__BACKEND_OPTIONS__",
+        _backend_options_html(),
+    ).replace(
+        "__DIRECT_WORKER_RUNTIME_ENDPOINT__",
+        _direct_worker_endpoint_runtime_select_html(),
+    ).replace(
+        "__DIRECT_WORKER_ENDPOINT_FIELD__",
+        _direct_worker_endpoint_form_select_html(),
+    )
 
 
 def _game_sample_root() -> Path:
@@ -1337,6 +1394,14 @@ def _matte_page_html() -> str:
     .runtime-pill.is-ok::before { background: #23855f; }
     .runtime-pill.is-error::before { background: #b94a42; }
     .runtime-pill.is-warn::before { background: #b57b18; }
+    .runtime-endpoint-pill { position: relative; padding: 0 6px 0 8px; gap: 0; }
+    .runtime-endpoint-pill::before { display: none; }
+    .runtime-dot { flex: 0 0 7px; width: 7px; height: 7px; border-radius: 50%; background: #9aa59e; }
+    .runtime-endpoint-pill.is-ok .runtime-dot { background: #23855f; }
+    .runtime-endpoint-pill.is-error .runtime-dot { background: #b94a42; }
+    .runtime-endpoint-pill.is-warn .runtime-dot { background: #b57b18; }
+    .runtime-endpoint-select { width: auto; min-width: 120px; max-width: 190px; min-height: 22px; padding: 0 22px 0 6px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px; font-weight: 900; cursor: pointer; }
+    .runtime-endpoint-select:disabled { cursor: wait; opacity: 0.72; }
     main { width: min(1120px, 100%); height: calc(100vh - 56px); min-height: 0; margin: 0 auto; padding: 16px 24px; display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: stretch; overflow: hidden; }
     form, .preview { background: #ffffff; border: 1px solid #d9dfd7; border-radius: 8px; }
     form { min-width: 0; min-height: 0; max-height: 100%; padding: 16px; display: grid; gap: 12px; align-content: start; overflow-y: auto; }
@@ -1422,6 +1487,7 @@ def _matte_page_html() -> str:
     .result-image { width: 100%; height: 100%; object-fit: contain; transform-origin: center center; user-select: none; pointer-events: none; will-change: transform; align-self: center; justify-self: center; }
     .empty { color: #6a746f; font-size: 14px; }
     .candidate-panel { min-height: 0; display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 8px; padding: 10px; border: 1px solid #d9dfd7; border-radius: 6px; background: #fbfcfa; overflow: hidden; }
+    .candidate-panel[hidden] { display: none; }
     .preview.is-mask-mode { grid-template-rows: 48px auto minmax(0, 1fr) 56px; }
     .candidate-title { font-size: 12px; font-weight: 800; color: #47524c; white-space: nowrap; }
     .candidate-list { min-width: 0; display: grid; grid-template-columns: 1fr; grid-auto-rows: 64px; gap: 8px; max-height: var(--candidate-list-max-height, 50vh); overflow-y: auto; padding: 2px; align-content: start; }
@@ -1446,7 +1512,7 @@ def _matte_page_html() -> str:
     <div class="header-right">
       <span class="runtime-status" id="runtime-status" aria-live="polite">
         <span class="runtime-pill" data-runtime="local">Local</span>
-        <span class="runtime-pill" data-runtime="direct">Direct</span>
+        __DIRECT_WORKER_RUNTIME_ENDPOINT__
       </span>
       <span class="status" id="strategy">就绪</span>
       <a class="eval-link" href="/eval/game" target="_blank" rel="noreferrer">Game Eval</a>
@@ -1561,6 +1627,7 @@ def _matte_page_html() -> str:
     const form = document.getElementById("matte-form");
     const file = document.getElementById("file");
     const backend = document.getElementById("backend");
+    const directEndpoint = document.getElementById("direct-endpoint");
     const backgroundRepair = document.getElementById("background-repair");
     const submit = document.getElementById("submit");
     const statusEl = document.getElementById("status");
@@ -1571,6 +1638,7 @@ def _matte_page_html() -> str:
     const previewStage = document.getElementById("preview-stage");
     const download = document.getElementById("download");
     const confirmMatte = document.getElementById("confirm-matte");
+    const candidatePanel = document.querySelector(".candidate-panel");
     const candidateList = document.getElementById("candidate-list");
     const sourcePreview = document.getElementById("source-preview");
     const sourceFrame = document.getElementById("source-frame");
@@ -1627,7 +1695,7 @@ def _matte_page_html() -> str:
       const directWorker = debug.direct_worker || {};
       const autoRoute = debug.auto_route || {};
       const executionBackend = payload.execution_backend || directWorker.execution_backend || autoRoute.execution_backend;
-      const backendLabel = executionBackend || payload.backend || backend.value;
+      const backendLabel = executionBackend || payload.backend || effectiveBackendValue();
       const route = payload.route || directWorker.route || autoRoute.route;
       const profile = payload.execution_profile || directWorker.execution_profile || autoRoute.execution_profile || payload.parameter_profile || directWorker.parameter_profile || autoRoute.parameter_profile;
       return [backendLabel, route, profile].filter((part, index, parts) => part && parts.indexOf(part) === index).join(" · ");
@@ -1637,7 +1705,9 @@ def _matte_page_html() -> str:
       const base = serverElapsed ? `完成 · client ${elapsed} · server ${serverElapsed}` : `完成 · ${elapsed}`;
       return details ? `${base} · ${details}` : base;
     }
+    function isAutoRouteMode() { return backend.value.split(":")[0] === "auto"; }
     function syncCandidateListHeight() {
+      if (candidatePanel.hidden) return;
       if (window.matchMedia("(max-width: 760px)").matches) {
         candidateList.style.removeProperty("--candidate-list-max-height");
         return;
@@ -1649,10 +1719,12 @@ def _matte_page_html() -> str:
       candidateList.style.setProperty("--candidate-list-max-height", `${height}px`);
     }
     function scheduleCandidateListHeightSync() { requestAnimationFrame(syncCandidateListHeight); }
-    function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
+    function setRuntimePill(kind, label, state, title) { const pill = runtimeStatus.querySelector(`[data-runtime="${kind}"]`); if (!pill) return; const select = pill.querySelector("select"); if (select) select.title = title || label; else pill.textContent = label; pill.classList.remove("is-ok", "is-error", "is-warn"); if (state) pill.classList.add(`is-${state}`); pill.title = title || label; }
     async function refreshRuntimeStatus() { try { const response = await fetch("/api/runtime-capabilities?include_comfy=false&include_object_info=false&timeout=1.5"); if (!response.ok) throw new Error(`HTTP ${response.status}`); const payload = await response.json(); setRuntimePill("local", "Local", payload.local && payload.local.status === "ok" ? "ok" : "error", `ERMBG ${payload.local && payload.local.version ? payload.local.version : ""}`); const dw = payload.direct_worker || {}; const directOk = dw.status === "ok"; const directLabel = dw.location ? `Direct · ${dw.location}` : "Direct"; setRuntimePill("direct", directLabel, directOk ? "ok" : "error", directOk ? dw.url : (dw.error || "Direct Worker unavailable")); } catch (error) { setRuntimePill("local", "Local", "warn", "capability check failed"); setRuntimePill("direct", "Direct", "warn", "capability check failed"); } }
-    function setBusy(isBusy) { submit.disabled = isBusy || !file.files.length || (!!pendingAnalyzePayload && !selectedSemanticCandidate); file.disabled = isBusy; backend.disabled = isBusy; backgroundRepair.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = true; submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function setBusy(isBusy) { submit.disabled = isBusy || !file.files.length || (!!pendingAnalyzePayload && !selectedSemanticCandidate); file.disabled = isBusy; backend.disabled = isBusy; if (directEndpoint) directEndpoint.disabled = isBusy; backgroundRepair.disabled = isBusy; corridorSettingControls.forEach((control) => { control.disabled = isBusy; }); knownBgGlowSettingControls.forEach((control) => { control.disabled = isBusy; }); pymattingSettingControls.forEach((control) => { control.disabled = isBusy; }); shadowMode.disabled = isBusy; maskToolbarControls.forEach((control) => { control.disabled = isBusy; }); confirmMatte.disabled = true; submit.textContent = isBusy ? "处理中" : "抠图"; }
+    function effectiveBackendValue() { const endpoint = directEndpoint ? directEndpoint.value : ""; const baseBackend = backend.value.split(":")[0]; if (!endpoint) return backend.value; if (baseBackend === "auto" || baseBackend === "direct-worker") return `direct-worker:${endpoint}`; if (baseBackend === "corridorkey" || baseBackend === "direct-corridorkey") return `direct-corridorkey:${endpoint}`; if (baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b" || baseBackend === "direct-pymatting-known-b") return `direct-pymatting-known-b:${endpoint}`; if (baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow") return `direct-known-bg-glow:${endpoint}`; return backend.value; }
     function syncBackendSettings() { const baseBackend = backend.value.split(":")[0]; corridorSettings.classList.toggle("is-visible", baseBackend === "corridorkey" || baseBackend === "direct-corridorkey"); knownBgGlowSettings.classList.toggle("is-visible", baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow"); pymattingSettings.classList.toggle("is-visible", baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b"); }
+    function syncCandidatePanelVisibility() { const autoRoute = isAutoRouteMode(); candidatePanel.hidden = !autoRoute; candidatePanel.setAttribute("aria-hidden", String(!autoRoute)); if (!autoRoute) { analyzeRequestId += 1; pendingAnalyzePayload = null; pendingExecuteFormData = null; selectedSemanticCandidate = null; semanticPreviewRenderSeq += 1; candidateList.innerHTML = ""; candidateList.style.removeProperty("--candidate-list-max-height"); confirmMatte.hidden = true; confirmMatte.disabled = true; return; } if (!candidateList.children.length) candidateList.innerHTML = '<span class="empty">上传后生成候选</span>'; scheduleCandidateListHeightSync(); }
     function syncGlowMaterialStrength() { glowMaterialStrengthValue.textContent = Number(glowMaterialStrength.value || 1).toFixed(2); }
     function syncPreviewMode() { const maskMode = activeView === "mask"; previewPanel.classList.toggle("is-mask-mode", maskMode); canvas.classList.toggle("is-mask-mode", maskMode); viewTabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.view === activeView))); backgroundTabs.forEach((tab) => tab.setAttribute("aria-selected", String(activeView === "preview" && tab.dataset.bg === activeBackground))); if (maskMode) layoutMaskCanvas(); }
     function setPreviewView(view) { activeView = view; syncPreviewMode(); }
@@ -1681,10 +1753,11 @@ def _matte_page_html() -> str:
     function setCandidatePayloads(payload, name) { const stem = name.replace(/\\.[^.]+$/, ""); candidates = (payload.candidates || []).map((candidate, index) => ({ url: candidate.rgba, revoke: false, label: candidate.label || `结果 ${index + 1}`, selected: candidate.selected === true, meta: `结果 ${index + 1} / ${payload.candidates.length} · ${candidate.kind || "RGBA PNG"}`, downloadName: candidate.filename || `${stem}_${candidate.id || `candidate_${index + 1}`}.png` })); if (!candidates.length) throw new Error("没有可显示的执行结果"); const selectedIndex = candidates.findIndex((candidate) => candidate.selected); const index = selectedIndex >= 0 ? selectedIndex : 0; const candidate = candidates[index]; activeCandidateIndex = index; resetPreviewTransform(); previewStage.innerHTML = ""; const img = document.createElement("img"); img.src = candidate.url; img.alt = candidate.label; img.draggable = false; img.className = "result-image"; resultImage = img; canvas.classList.add("has-image"); previewStage.appendChild(img); applyPreviewTransform(); download.href = candidate.url; download.download = candidate.downloadName; download.setAttribute("aria-disabled", "false"); metaEl.textContent = candidate.meta; setPreviewView("preview"); }
     function dataUrlToFile(dataUrl, filename) { const [header, base64] = dataUrl.split(","); const mime = (header.match(/data:(.*);base64/) || [])[1] || "image/png"; const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return new File([bytes], filename, { type: mime }); }
     async function generateSamMask() { if (!file.files.length) { setPreviewView("mask"); maskStatus.textContent = "请先选择图片"; return; } const requestId = samMaskRequestId + 1; samMaskRequestId = requestId; setPreviewView("mask"); const formData = new FormData(); formData.append("file", file.files[0]); setBusy(true); maskStatus.textContent = "Sam3 生成中"; try { await waitForSourceImage(); const response = await fetch("/api/sam-mask", { method: "POST", body: formData }); if (!response.ok) { let message = "Sam3 mask 失败"; try { const payload = await response.json(); message = payload.detail || message; } catch (_) {} throw new Error(message); } const payload = await response.json(); if (requestId !== samMaskRequestId) return; await loadMaskOverlay(payload.mask); const elapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : ""; maskStatus.textContent = elapsed ? `已生成 Sam3 mask · ${elapsed}` : "已生成 Sam3 mask"; } catch (error) { if (requestId === samMaskRequestId) { clearMaskState(); maskStatus.textContent = error.message; } } finally { if (requestId === samMaskRequestId) setBusy(false); } }
-    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; backgroundRepair.checked = true; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "正在生成候选"; strategyEl.textContent = backend.value; setBusy(false); } catch (error) { statusEl.textContent = "切图载入失败"; } }
+    function loadPendingSlice() { const raw = sessionStorage.getItem("ermbgPendingSlice"); if (!raw) return; sessionStorage.removeItem("ermbgPendingSlice"); try { const pending = JSON.parse(raw); const sliceFile = dataUrlToFile(pending.rgb, pending.filename || "slice.png"); const transfer = new DataTransfer(); transfer.items.add(sliceFile); file.files = transfer.files; backend.value = "auto"; backgroundRepair.checked = true; setPreviewView("mask"); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "切图预览"; img.onload = () => { resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = "切图预览载入失败"; }; sourceFrame.appendChild(img); img.src = pending.rgb; sourceMeta.textContent = `${sliceFile.name} · ${pending.meta || "来自切图"}`; statusEl.textContent = "正在生成候选"; strategyEl.textContent = effectiveBackendValue(); setBusy(false); } catch (error) { statusEl.textContent = "切图载入失败"; } }
 
-    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); backgroundRepair.checked = true; statusEl.textContent = "正在生成候选"; strategyEl.textContent = backend.value; if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
-    backend.addEventListener("change", () => { strategyEl.textContent = backend.value; syncBackendSettings(); });
+    file.addEventListener("change", () => { if (!file.files.length) return; resetResult(); clearMaskState(); setPreviewView("mask"); backgroundRepair.checked = true; statusEl.textContent = "正在生成候选"; strategyEl.textContent = effectiveBackendValue(); if (sourceUrl) URL.revokeObjectURL(sourceUrl); const selected = file.files[0]; sourceUrl = URL.createObjectURL(selected); sourcePreview.classList.add("is-visible"); sourceFrame.innerHTML = ""; const img = document.createElement("img"); sourceImage = img; resetMaskTransform(); img.alt = "上传图片预览"; img.onload = () => { sourceMeta.textContent = `${img.naturalWidth}x${img.naturalHeight} · ${humanSize(selected.size)}`; resetMaskTransform(); layoutMaskCanvas(); analyzeCurrentUpload(); }; img.onerror = () => { sourceMeta.textContent = `无法预览 · ${humanSize(selected.size)}`; }; sourceFrame.appendChild(img); img.src = sourceUrl; });
+    backend.addEventListener("change", () => { strategyEl.textContent = effectiveBackendValue(); syncBackendSettings(); });
+    if (directEndpoint) directEndpoint.addEventListener("change", () => { strategyEl.textContent = effectiveBackendValue(); });
     glowMaterialStrength.addEventListener("input", syncGlowMaterialStrength);
     samMaskButton.addEventListener("click", () => generateSamMask());
     maskBrushModeButtons.forEach((button) => button.addEventListener("click", () => setMaskBrushMode(button.dataset.maskMode)));
@@ -1701,7 +1774,7 @@ def _matte_page_html() -> str:
     async function buildMatteFormData() {
       const formData = new FormData();
       formData.append("file", file.files[0]);
-      formData.append("backend", backend.value);
+      formData.append("backend", effectiveBackendValue());
       formData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       formData.append("shadow_mode", shadowMode.value);
       formData.append("parameter_source", backend.value === "auto" ? "auto" : "manual");
@@ -1973,11 +2046,12 @@ def _matte_page_html() -> str:
     }
     async function analyzeCurrentUpload() {
       if (!file.files.length) return;
+      if (!isAutoRouteMode()) { statusEl.textContent = "手动路径就绪，点击抠图执行"; setBusy(false); return; }
       const requestId = analyzeRequestId + 1;
       analyzeRequestId = requestId;
       setBusy(true);
       statusEl.textContent = "正在分析";
-      strategyEl.textContent = backend.value;
+      strategyEl.textContent = effectiveBackendValue();
       const analyzeFormData = new FormData();
       analyzeFormData.append("file", file.files[0]);
       appendAnalyzeControls(analyzeFormData);
@@ -2004,9 +2078,43 @@ def _matte_page_html() -> str:
         if (requestId === analyzeRequestId) setBusy(false);
       }
     }
+    async function executeManualMatte() {
+      if (!file.files.length) return;
+      syncCandidatePanelVisibility();
+      const executeFormData = await buildMatteFormData();
+      executeFormData.append("selected_candidate_id", "auto_default");
+      executeFormData.append("semantic_decision", "{}");
+      executeFormData.append("analysis_payload", "{}");
+      setBusy(true);
+      statusEl.textContent = "正在执行手动路径";
+      const startedAt = performance.now();
+      try {
+        const response = await fetch("/api/execute-candidate", { method: "POST", body: executeFormData });
+        if (!response.ok) {
+          let message = "处理失败";
+          try {
+            const payload = await response.json();
+            message = payload.detail || message;
+          } catch (_) {}
+          throw new Error(message);
+        }
+        const payload = await response.json();
+        const elapsed = formatElapsed(performance.now() - startedAt);
+        const serverElapsed = typeof payload.server_elapsed_sec === "number" ? formatElapsed(payload.server_elapsed_sec * 1000) : null;
+        setCandidatePayloads(payload, file.files[0].name);
+        statusEl.textContent = completionStatusText(payload, elapsed, serverElapsed);
+        strategyEl.textContent = payload.strategy || completionBackendLabel(payload) || effectiveBackendValue();
+        syncCandidatePanelVisibility();
+      } catch (error) {
+        statusEl.textContent = error.message;
+      } finally {
+        setBusy(false);
+      }
+    }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!file.files.length) return;
+      if (!isAutoRouteMode()) { await executeManualMatte(); return; }
       if (!pendingAnalyzePayload || !selectedSemanticCandidate) {
         await analyzeCurrentUpload();
       }
@@ -2015,6 +2123,7 @@ def _matte_page_html() -> str:
     confirmMatte.addEventListener("click", () => executeSemanticCandidate(selectedSemanticCandidate));
     syncGlowMaterialStrength();
     syncBackendSettings();
+    syncCandidatePanelVisibility();
     syncPreviewMode();
     scheduleCandidateListHeightSync();
     refreshRuntimeStatus();
@@ -3166,7 +3275,7 @@ def batch_results_zip_endpoint(payload: Annotated[dict[str, Any], Body()]) -> Re
 
 
 def _batch_page_html() -> str:
-    return """<!doctype html>
+    return _inject_backend_options("""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -3257,7 +3366,8 @@ def _batch_page_html() -> str:
     <section class="panel controls">
       <label>上传图片<input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple></label>
       <div class="dropzone" id="dropzone">拖拽多张图片到这里，或使用上方文件选择</div>
-      <label>后端<select id="backend"><option value="auto" selected>Auto Route</option></select></label>
+      <label>后端<select id="backend">__BACKEND_OPTIONS__</select></label>
+      __DIRECT_WORKER_ENDPOINT_FIELD__
       <label class="checkbox-field background-repair-field"><input id="background-repair" name="background_repair" type="checkbox" checked><span>背景修复</span></label>
       <div class="toolbar">
         <button id="start" type="button" disabled>开始全部</button>
@@ -3283,6 +3393,7 @@ def _batch_page_html() -> str:
     const file = document.getElementById("file");
     const dropzone = document.getElementById("dropzone");
     const backend = document.getElementById("backend");
+    const directEndpoint = document.getElementById("direct-endpoint");
     const backgroundRepair = document.getElementById("background-repair");
     const startButton = document.getElementById("start");
     const retryButton = document.getElementById("retry");
@@ -3386,6 +3497,17 @@ def _batch_page_html() -> str:
       return candidates.find((candidate) => candidate.selected) || candidates[0] || null;
     }
 
+    function effectiveBackendValue() {
+      const endpoint = directEndpoint ? directEndpoint.value : "";
+      const baseBackend = backend.value.split(":")[0];
+      if (!endpoint) return backend.value || "auto";
+      if (baseBackend === "auto" || baseBackend === "direct-worker") return `direct-worker:${endpoint}`;
+      if (baseBackend === "corridorkey" || baseBackend === "direct-corridorkey") return `direct-corridorkey:${endpoint}`;
+      if (baseBackend === "pymatting_known_b" || baseBackend === "pymatting-known-b" || baseBackend === "direct-pymatting-known-b") return `direct-pymatting-known-b:${endpoint}`;
+      if (baseBackend === "known-bg-glow" || baseBackend === "known_bg_glow" || baseBackend === "direct-known-bg-glow") return `direct-known-bg-glow:${endpoint}`;
+      return backend.value || "auto";
+    }
+
     function defaultSemanticCandidate(payload) {
       const candidates = payload.candidates || [];
       return candidates.find((candidate) => candidate.id === payload.default_candidate_id) || candidates[0] || { id: "auto_default", decision: { policy: "auto_default" } };
@@ -3451,6 +3573,8 @@ def _batch_page_html() -> str:
       retryButton.disabled = running || !queue.some((item) => item.status === "failed");
       zipButton.disabled = running || !done;
       clearButton.disabled = running || !queue.length;
+      backend.disabled = running;
+      if (directEndpoint) directEndpoint.disabled = running;
       backgroundRepair.disabled = running;
       if (!queue.length) {
         list.innerHTML = '<div class="empty">批量队列会显示在这里</div>';
@@ -3533,7 +3657,7 @@ def _batch_page_html() -> str:
       render();
       const executeFormData = new FormData();
       executeFormData.append("file", item.file);
-      executeFormData.append("backend", backend.value || "auto");
+      executeFormData.append("backend", effectiveBackendValue());
       executeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false");
       executeFormData.append("shadow_mode", "auto");
       executeFormData.append("parameter_source", "auto");
@@ -3556,7 +3680,7 @@ def _batch_page_html() -> str:
         filename: item.filename,
         name: item.name,
         rgba: candidate.rgba,
-        requested_backend: payload.requested_backend || backend.value || "auto",
+        requested_backend: payload.requested_backend || effectiveBackendValue(),
         algorithm: payload.algorithm,
         route: payload.route,
         parameter_profile: payload.parameter_profile,
@@ -3651,7 +3775,7 @@ def _batch_page_html() -> str:
     restorePendingBatchQueue();
   </script>
 </body>
-</html>"""
+</html>""")
 
 
 def _slice_page_html() -> str:

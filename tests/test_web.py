@@ -306,7 +306,7 @@ def test_index_serves_upload_ui():
     assert "formatElapsed(performance.now() - startedAt)" in response.text
     assert "server_elapsed_sec" in response.text
     assert "client ${elapsed}" in response.text
-    assert "payload.backend || backend.value" in response.text
+    assert "payload.backend || effectiveBackendValue()" in response.text
     assert 'backend.value = "auto"' in response.text
 
 
@@ -356,8 +356,16 @@ def test_matte_page_lists_named_direct_worker_endpoints(monkeypatch):
     assert response.status_code == 200
     assert '<option value="auto" selected>Auto Route</option>' in response.text
     assert '<option value="corridorkey">CorridorKey</option>' in response.text
-    assert "direct-worker:local" not in response.text
-    assert "direct-corridorkey:remote" not in response.text
+    assert '<span class="runtime-pill runtime-endpoint-pill" data-runtime="direct">' in response.text
+    assert '<select id="direct-endpoint" class="runtime-endpoint-select" aria-label="Direct Worker">' in response.text
+    assert '<option value="" title="http://192.168.0.8:7871">Direct · Auto primary</option>' in response.text
+    assert '<option value="local" title="http://127.0.0.1:7871">Direct · local</option>' in response.text
+    assert '<option value="remote" title="http://192.168.0.8:7871">Direct · remote · primary</option>' in response.text
+    assert "__DIRECT_WORKER_ENDPOINT_FIELD__" not in response.text
+    assert "function effectiveBackendValue()" in response.text
+    assert "direct-worker:${endpoint}" in response.text
+    assert "direct-pymatting-known-b:${endpoint}" in response.text
+    assert "direct-corridorkey:${endpoint}" in response.text
 
 
 def test_artifacts_api_discovers_run_manifests(monkeypatch, tmp_path):
@@ -576,7 +584,7 @@ def test_batch_page_serves_batch_queue_entry():
     assert '<input id="background-repair" name="background_repair" type="checkbox" checked>' in response.text
     assert 'const backgroundRepair = document.getElementById("background-repair");' in response.text
     assert 'analyzeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
-    assert 'executeFormData.append("backend", backend.value || "auto")' in response.text
+    assert 'executeFormData.append("backend", effectiveBackendValue())' in response.text
     assert 'executeFormData.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
     assert 'id="lightbox"' in response.text
     assert 'id="lightbox-stage"' in response.text
@@ -2613,6 +2621,49 @@ def test_matte_candidates_endpoint_accepts_named_direct_worker_endpoint(monkeypa
     payload = response.json()
     assert payload["backend"] == "direct-worker"
     assert payload["requested_backend"] == "direct-worker:remote"
+    assert payload["debug"]["web_direct_worker_endpoint"] == "remote"
+    assert payload["debug"]["web_direct_worker_url"] == "http://192.168.0.8:7871"
+
+
+def test_matte_candidates_endpoint_accepts_named_direct_pymatting_endpoint(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {"requested_backend": "direct-pymatting-known-b", "route": "pymatting_known_b"},
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_DIRECT_WORKER_ENDPOINTS", {"remote": "http://192.168.0.8:7871"})
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/matte-candidates",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={"backend": "direct-pymatting-known-b:remote"},
+    )
+
+    assert response.status_code == 200
+    assert captured["direct_worker_url"] == "http://192.168.0.8:7871"
+    assert captured["execution_backend"] == "direct-pymatting-known-b"
+    payload = response.json()
+    assert payload["backend"] == "direct-pymatting-known-b"
+    assert payload["requested_backend"] == "direct-pymatting-known-b:remote"
     assert payload["debug"]["web_direct_worker_endpoint"] == "remote"
     assert payload["debug"]["web_direct_worker_url"] == "http://192.168.0.8:7871"
 
