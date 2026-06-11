@@ -2177,12 +2177,25 @@ def build_same_key_opaque_inner_opaque_mask(
     if trace.get("outline_recipe") == "lower_perimeter_ridge" and "broad_fill" in trace:
         support = np.asarray(trace["broad_fill"], dtype=bool)
         support_source = "relaxed_component"
+        _, stroke_info = _same_key_opaque_stroke_core_from_component(image_srgb, support)
+        measured_guard = float(max(0, int(stroke_info.get("proxy_inset_px", 0) or 0)))
+        guard_source = (
+            "max(requested_outer_guard, measured_stroke_proxy_inset)"
+            if measured_guard > float(outer_guard_px)
+            else "requested_outer_guard"
+        )
     elif "support" in trace:
         support = np.asarray(trace["support"], dtype=bool)
         support_source = "closed_outline_support"
+        stroke_info = {"enabled": False, "stroke_inset_px": 0, "proxy_inset_px": 0, "stroke_pixels": 0}
+        measured_guard = 0.0
+        guard_source = "requested_outer_guard"
     else:
         support = np.asarray(trace["body_fill"], dtype=bool)
         support_source = "body_fill"
+        stroke_info = {"enabled": False, "stroke_inset_px": 0, "proxy_inset_px": 0, "stroke_pixels": 0}
+        measured_guard = 0.0
+        guard_source = "requested_outer_guard"
 
     labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), 8)
     if labels_count <= 1:
@@ -2191,7 +2204,7 @@ def build_same_key_opaque_inner_opaque_mask(
     support = labels == label
     support = np.asarray(ndimage.binary_fill_holes(support), dtype=bool)
 
-    guard = max(0.0, float(outer_guard_px))
+    guard = max(0.0, float(outer_guard_px), measured_guard)
     dist_to_exterior = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3)
     mask = support & (dist_to_exterior > guard)
     guarded = support & ~mask
@@ -2201,9 +2214,59 @@ def build_same_key_opaque_inner_opaque_mask(
         "method": "same_key_opaque_inner_opaque_mask",
         "support_source": support_source,
         "outer_guard_px": float(guard),
+        "requested_outer_guard_px": float(outer_guard_px),
+        "outer_guard_source": guard_source,
+        "stroke_outline": stroke_info,
         "support_pixels": int(support.sum()),
         "mask_pixels": int(mask.sum()),
         "outer_guard_pixels": int(guarded.sum()),
+    }
+
+
+def build_same_key_opaque_color_restore_mask(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int] | np.ndarray,
+    *,
+    bg_threshold: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return the measured same-key support where final RGB should be source RGB.
+
+    Same-key proxy colors are synthetic foreground evidence for PyMatting only.
+    The solved alpha can use them, but straight RGB exported inside the measured
+    original outline support must come from the source material rather than a
+    proxy-colored unmix or consistency-repair donor.
+    """
+    bg = np.asarray(background_color, dtype=np.uint8)
+    trace = _same_key_opaque_body_outline_trace(
+        image_srgb,
+        bg,
+        bg_threshold=float(bg_threshold),
+    )
+    if not trace.get("accepted", False):
+        raise ValueError(f"same-key color restore route contract failed: {trace.get('reason', 'unknown')}")
+
+    if trace.get("outline_recipe") == "lower_perimeter_ridge" and "broad_fill" in trace:
+        support = np.asarray(trace["broad_fill"], dtype=bool)
+        support_source = "relaxed_component"
+    elif "support" in trace:
+        support = np.asarray(trace["support"], dtype=bool)
+        support_source = "closed_outline_support"
+    else:
+        support = np.asarray(trace["body_fill"], dtype=bool)
+        support_source = "body_fill"
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(support.astype(np.uint8), 8)
+    if labels_count <= 1:
+        raise ValueError("same-key color restore support is empty after outline trace")
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    support = labels == label
+    support = np.asarray(ndimage.binary_fill_holes(support), dtype=bool)
+    return support, {
+        "enabled": True,
+        **_public_same_key_outline_trace(trace),
+        "method": "same_key_opaque_color_restore_mask",
+        "support_source": support_source,
+        "mask_pixels": int(support.sum()),
     }
 
 
@@ -3732,6 +3795,7 @@ __all__ = [
     "PyMattingAlphaResult",
     "analyze_same_key_opaque_body_outline",
     "build_known_background_hard_edge_boundary_mask",
+    "build_same_key_opaque_color_restore_mask",
     "build_same_key_opaque_inner_opaque_mask",
     "build_same_key_opaque_proxy_subject_mask",
     "build_known_background_trimap",

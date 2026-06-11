@@ -18,6 +18,7 @@ from ermbg.pymatting_refine import (
     analyze_same_key_opaque_body_outline,
     build_known_background_hard_edge_boundary_mask,
     build_known_background_trimap,
+    build_same_key_opaque_color_restore_mask,
     build_same_key_opaque_inner_opaque_mask,
     build_same_key_opaque_proxy_subject_mask,
     estimate_known_background_alpha_with_pymatting,
@@ -1260,6 +1261,42 @@ def test_same_key_opaque_inner_opaque_mask_keeps_non_proxy_stroke_material():
     assert int(extra_inner_material.sum()) > 100
 
 
+def test_same_key_lower_ridge_inner_floor_uses_measured_stroke_guard():
+    bg = (1, 95, 248)
+    image = np.full((120, 240, 3), bg, dtype=np.uint8)
+    cv2.rectangle(image, (20, 12), (220, 98), (112, 160, 248), -1, cv2.LINE_AA)
+    cv2.rectangle(image, (20, 12), (220, 98), (70, 118, 210), 2, cv2.LINE_AA)
+    cv2.rectangle(image, (22, 99), (218, 108), (6, 74, 188), -1)
+    cv2.line(image, (22, 98), (218, 98), (92, 126, 170), 1, cv2.LINE_AA)
+
+    proxy_mask, proxy_info = build_same_key_opaque_proxy_subject_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        expand_px=0,
+    )
+    inner_mask, inner_info = build_same_key_opaque_inner_opaque_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+        outer_guard_px=1.0,
+    )
+    restore_mask, restore_info = build_same_key_opaque_color_restore_mask(
+        image,
+        bg,
+        bg_threshold=3.5,
+    )
+
+    assert proxy_info["outline_recipe"] == "lower_perimeter_ridge"
+    assert inner_info["outer_guard_px"] == proxy_info["stroke_outline"]["proxy_inset_px"]
+    assert inner_info["outer_guard_source"] == "max(requested_outer_guard, measured_stroke_proxy_inset)"
+    assert int((inner_mask & ~proxy_mask).sum()) == 0
+    assert int((proxy_mask & ~inner_mask).sum()) == 0
+    assert restore_info["support_source"] == "relaxed_component"
+    assert int((proxy_mask & ~restore_mask).sum()) == 0
+    assert int(restore_mask.sum()) > int(proxy_mask.sum())
+
+
 def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solve():
     bg = (1, 95, 248)
     image = np.full((128, 128, 3), bg, dtype=np.uint8)
@@ -1288,14 +1325,42 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solv
     assert np.all(result.rgba[..., :3][result.debug["proxy_subject_mask"]] == image[result.debug["proxy_subject_mask"]])
     floor_info = result.debug["pymatting_known_b"]["same_key_inner_opaque_floor"]
     floor_mask = result.debug["same_key_inner_opaque_floor_mask"]
+    restore_info = result.debug["pymatting_known_b"]["same_key_color_restore"]
+    restore_mask = result.debug["same_key_color_restore_mask"]
     assert floor_info["enabled"] is True
     assert floor_info["applied_before_shadow_patch"] is True
     assert floor_info["alpha_lift_pixels"] >= 0
     assert floor_mask.shape == image.shape[:2]
+    assert restore_info["enabled"] is True
+    assert restore_mask.shape == image.shape[:2]
     assert np.all(result.alpha[floor_mask] == 1.0)
     assert np.all(result.rgba[..., 3][floor_mask] == 255)
     assert np.all(result.rgba[..., :3][floor_mask] == image[floor_mask])
+    assert np.all(result.rgba[..., :3][restore_mask] == image[restore_mask])
     assert result.debug["pymatting_subject_alpha_raw"].shape == image.shape[:2]
+
+
+def test_same_key_opaque_shadow_patch_uses_source_replay_not_proxy_colors():
+    path = PROJECT_ROOT / "samples/corridorkey_semantic/button/button_blue_play_clipped_hard_shadow/blue.png"
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+
+    result = matte_image(
+        image,
+        backend="pymatting-known-b",
+        shadow_mode="on",
+        pymatting_bg_source="custom",
+        pymatting_bg_color=(1, 94, 246),
+        pymatting_trimap_mode="same_key_opaque_body_outline",
+    )
+
+    shadow = result.debug["shadow"]
+    objective = shadow["objective_shadow"]
+    assert shadow["input_source"]["same_key_source_replay"] is True
+    assert shadow["input_source"]["image_source"] == "pre_proxy_known_b_input"
+    assert shadow["input_source"]["foreground_source"] == "source_restored_same_key_support"
+    assert objective["subject_edge_aa_written_pixels"] > 100
+    assert objective["p95_abs_error_after_u8"] < 20.0
+    assert objective["p95_abs_error_after_u8"] < objective["p95_abs_error_before_u8"]
 
 
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():

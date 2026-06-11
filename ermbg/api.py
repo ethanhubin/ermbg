@@ -855,6 +855,7 @@ def _matte_image_pymatting_known_b(
 ) -> MatteResponse:
     from .pymatting_refine import (
         build_known_background_trimap,
+        build_same_key_opaque_color_restore_mask,
         build_same_key_opaque_inner_opaque_mask,
         build_same_key_opaque_proxy_subject_mask,
         estimate_alpha_with_pymatting,
@@ -922,6 +923,8 @@ def _matte_image_pymatting_known_b(
     same_key_inner_opaque_mask: np.ndarray | None = None
     same_key_inner_floor_mask: np.ndarray | None = None
     same_key_inner_floor_info: dict[str, Any] = {"enabled": False}
+    same_key_color_restore_mask: np.ndarray | None = None
+    same_key_color_restore_info: dict[str, Any] = {"enabled": False}
     if requested_trimap_mode == "same_key_opaque_body_outline":
         proxy_subject_mask, proxy_subject_info = build_same_key_opaque_proxy_subject_mask(
             rgb,
@@ -934,6 +937,11 @@ def _matte_image_pymatting_known_b(
             selected_bg,
             bg_threshold=float(bg_threshold),
             outer_guard_px=1.0,
+        )
+        same_key_color_restore_mask, same_key_color_restore_info = build_same_key_opaque_color_restore_mask(
+            rgb,
+            selected_bg,
+            bg_threshold=float(bg_threshold),
         )
         # Same-key opaque UI needs a non-screen subject color so PyMatting sees
         # clear foreground evidence inside the measured body-outline trimap.
@@ -1028,12 +1036,18 @@ def _matte_image_pymatting_known_b(
     # consistently. We resolve them by borrowing the nearest healthy neighbor's F
     # and re-projecting C onto the (F_neighbor, B) line to recover a self-consistent
     # alpha; healthy pixels are not touched.
+    donor_foreground_linear: np.ndarray | None = None
+    if proxy_subject_mask is not None:
+        donor_foreground_linear = foreground_linear.copy()
+        original_rgb_linear = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
+        donor_foreground_linear[proxy_subject_mask] = original_rgb_linear[proxy_subject_mask]
     alpha, foreground_linear, consistency_repair = _repair_known_b_unmix_consistency(
         alpha,
         foreground_linear,
         C_lin=C_lin,
         B_lin=B_lin,
         solve=solve,
+        donor_foreground_linear=donor_foreground_linear,
     )
     foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
     foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
@@ -1069,14 +1083,38 @@ def _matte_image_pymatting_known_b(
         }
     subject_alpha = alpha
     subject_foreground_srgb = foreground_srgb
+    shadow_patch_rgb = processing_rgb
+    shadow_patch_foreground_srgb = subject_foreground_srgb
+    shadow_patch_source_info = {
+        "image_source": "solver_input",
+        "foreground_source": "solver_foreground",
+        "same_key_source_replay": False,
+    }
+    if proxy_subject_mask is not None:
+        shadow_patch_rgb = rgb
+        shadow_patch_source_info = {
+            "image_source": "pre_proxy_known_b_input",
+            "foreground_source": "solver_foreground",
+            "same_key_source_replay": True,
+        }
+        if same_key_color_restore_mask is not None:
+            # Shadow evidence for same-key opaque assets must be measured against
+            # the source/preprocessed pixels, not the proxy-painted solver colors.
+            # Restore measured subject support before the ownership contest so
+            # scalar known-B darkening can be compared to the real source image.
+            shadow_patch_foreground_srgb = subject_foreground_srgb.copy()
+            shadow_patch_foreground_srgb[same_key_color_restore_mask] = rgb[same_key_color_restore_mask]
+            shadow_patch_source_info["foreground_source"] = "source_restored_same_key_support"
+            shadow_patch_source_info["restored_foreground_pixels"] = int(same_key_color_restore_mask.sum())
     alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
-        processing_rgb,
+        shadow_patch_rgb,
         subject_alpha=subject_alpha,
-        subject_foreground_srgb=subject_foreground_srgb,
+        subject_foreground_srgb=shadow_patch_foreground_srgb,
         background_color=selected_bg,
         shadow_mode=shadow_mode,
         repair_domain=trimap.unknown,
     )
+    shadow_info["input_source"] = shadow_patch_source_info
     timings["shadow_patch_sec"] = time.perf_counter() - step_started
 
     step_started = time.perf_counter()
@@ -1091,14 +1129,32 @@ def _matte_image_pymatting_known_b(
         rgba_rgb_srgb[same_key_inner_floor_mask] = rgb[same_key_inner_floor_mask]
         shadow_alpha[same_key_inner_floor_mask] = 0.0
         shadow_alpha_physical[same_key_inner_floor_mask] = 0.0
-    if proxy_subject_mask is not None:
-        # Restore only the exact proxy-painted domain. This keeps antialiased
-        # subject corners from being erased while preventing original same-key
-        # blue/green shadow pixels from re-entering the exported shadow layer.
+    if same_key_color_restore_mask is not None:
+        # Proxy colors are solver-only. Restore straight RGB over the measured
+        # original support only where ShadowPatch did not assign a real shadow
+        # layer. Shadow-owned pixels must keep the black shadow RGB produced by
+        # the source replay; restoring blue/green source RGB there turns a
+        # correct shadow alpha back into same-key colored fringe.
+        restore_after_shadow = same_key_color_restore_mask & (shadow_alpha <= (1.0 / 255.0))
+        blocked_by_shadow = same_key_color_restore_mask & ~restore_after_shadow
+        same_key_color_restore_info = {
+            **same_key_color_restore_info,
+            "applied_after_shadow_pixels": int(restore_after_shadow.sum()),
+            "shadow_blocked_pixels": int(blocked_by_shadow.sum()),
+        }
         subject_foreground_srgb = subject_foreground_srgb.copy()
         rgba_rgb_srgb = rgba_rgb_srgb.copy()
-        subject_foreground_srgb[proxy_subject_mask] = rgb[proxy_subject_mask]
-        rgba_rgb_srgb[proxy_subject_mask] = rgb[proxy_subject_mask]
+        subject_foreground_srgb[restore_after_shadow] = rgb[restore_after_shadow]
+        rgba_rgb_srgb[restore_after_shadow] = rgb[restore_after_shadow]
+    if proxy_subject_mask is not None:
+        # Keep the exact proxy-painted domain restored as well; the broader
+        # color-restore support above covers same-key edges, while this remains
+        # the minimal invariant for proxy-painted subject pixels.
+        proxy_restore_after_shadow = proxy_subject_mask & (shadow_alpha <= (1.0 / 255.0))
+        subject_foreground_srgb = subject_foreground_srgb.copy()
+        rgba_rgb_srgb = rgba_rgb_srgb.copy()
+        subject_foreground_srgb[proxy_restore_after_shadow] = rgb[proxy_restore_after_shadow]
+        rgba_rgb_srgb[proxy_restore_after_shadow] = rgb[proxy_restore_after_shadow]
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
     timings["compose_sec"] = time.perf_counter() - step_started
@@ -1148,6 +1204,7 @@ def _matte_image_pymatting_known_b(
                 },
                 "same_key_proxy_subject": proxy_subject_info,
                 "same_key_inner_opaque_floor": same_key_inner_floor_info,
+                "same_key_color_restore": same_key_color_restore_info,
                 "timings": timings,
             },
         },
@@ -1178,6 +1235,8 @@ def _matte_image_pymatting_known_b(
             ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_mask.png", same_key_inner_opaque_mask.astype(np.float32))
         if same_key_inner_floor_mask is not None:
             ermbg_io.save_mask(out_dir / f"{stem}_same_key_inner_opaque_floor_mask.png", same_key_inner_floor_mask.astype(np.float32))
+        if same_key_color_restore_mask is not None:
+            ermbg_io.save_mask(out_dir / f"{stem}_same_key_color_restore_mask.png", same_key_color_restore_mask.astype(np.float32))
         if qa:
             qa_dir = out_dir / f"{stem}_qa"
             qa_metrics = run_qa(
@@ -1226,6 +1285,13 @@ def _matte_image_pymatting_known_b(
                     if same_key_inner_floor_mask is not None
                     else {}
                 ),
+                **(
+                    {
+                        "same_key_color_restore_mask": out_dir / f"{stem}_same_key_color_restore_mask.png",
+                    }
+                    if same_key_color_restore_mask is not None
+                    else {}
+                ),
             },
             report_path=report_path,
             requested_backend="pymatting-known-b",
@@ -1261,6 +1327,7 @@ def _matte_image_pymatting_known_b(
             "user_mask_decision": trimap_info.get("user_mask_decision", {}),
             "same_key_proxy_subject": proxy_subject_info,
             "same_key_inner_opaque_floor": same_key_inner_floor_info,
+            "same_key_color_restore": same_key_color_restore_info,
         },
         "shadow": shadow_info,
         "timings": timings,
@@ -1274,6 +1341,8 @@ def _matte_image_pymatting_known_b(
         debug["same_key_inner_opaque_mask"] = same_key_inner_opaque_mask
     if same_key_inner_floor_mask is not None:
         debug["same_key_inner_opaque_floor_mask"] = same_key_inner_floor_mask
+    if same_key_color_restore_mask is not None:
+        debug["same_key_color_restore_mask"] = same_key_color_restore_mask
     if auto_route is not None:
         debug["auto_route"] = auto_route
     return MatteResponse(
@@ -1397,6 +1466,8 @@ def _repair_known_b_unmix_consistency(
     C_lin: np.ndarray,
     B_lin: np.ndarray,
     solve: np.ndarray,
+    donor_foreground_linear: np.ndarray | None = None,
+    donor_exclusion_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Repair edge pixels whose unmix produced an out-of-gamut foreground.
 
@@ -1411,9 +1482,8 @@ def _repair_known_b_unmix_consistency(
     the source color onto the line through (B, F_neighbor) in linear RGB. The
     projection coefficient is the alpha that makes the borrowed F consistent
     with C; F is then re-derived from that alpha so the recovered (F, a) lies
-    inside the gamut. Pixels with no usable healthy neighbor (F too close to B,
-    or no healthy pixel exists) keep their clipped values, which is at least no
-    worse than the current behavior.
+    inside the gamut. Pixels with no usable healthy neighbor fall back to the
+    minimum per-pixel alpha required to keep F physically in gamut.
     """
     a = alpha.astype(np.float32)
     F = foreground_linear.astype(np.float32)
@@ -1428,49 +1498,96 @@ def _repair_known_b_unmix_consistency(
         "negative_pixels": int((solve & out_low).sum()),
         "overshoot_pixels": int((solve & out_high).sum()),
         "repaired_pixels": 0,
+        "donor_repaired_pixels": 0,
+        "physical_repaired_pixels": 0,
+        "donor_foreground_override_pixels": 0,
+        "donor_exclusion_pixels": 0,
+        "healthy_donor_pixels": 0,
         "alpha_lift_mean": 0.0,
         "alpha_lift_max": 0.0,
     }
     if not bool(dirty.any()):
         return a, F, info
 
-    # Healthy donor: a subject pixel whose unmixed F already lies in gamut.
-    # Use a small inward erosion-friendly margin so donors are unambiguous.
-    healthy_mask = solve & ~dirty & (F >= 0.0).all(axis=-1) & (F <= 1.0).all(axis=-1)
-    if not bool(healthy_mask.any()):
-        return a, F, info
+    F_for_donor = F
+    if donor_foreground_linear is not None:
+        F_for_donor = np.asarray(donor_foreground_linear, dtype=np.float32)
+        if F_for_donor.shape != F.shape:
+            raise ValueError("donor_foreground_linear must match foreground shape")
+        info["donor_foreground_override_pixels"] = int(np.any(np.abs(F_for_donor - F) > 1.0e-6, axis=-1).sum())
 
-    from scipy import ndimage
-
-    # Nearest healthy donor for each pixel; only used at dirty positions.
-    _, indices = ndimage.distance_transform_edt(~healthy_mask, return_indices=True)
-    F_donor = F[indices[0], indices[1]]
-    direction = F_donor - B_lin.reshape(1, 1, 3)
-    denom = np.sum(direction * direction, axis=-1)
-    # Donor must point away from B in linear RGB; a degenerate (F_donor ~ B) is
-    # not informative -- leave that pixel alone.
-    usable = dirty & (denom > 1.0e-5)
-    if not bool(usable.any()):
-        return a, F, info
-
-    projected = np.sum((C_lin - B_lin.reshape(1, 1, 3)) * direction, axis=-1) / np.maximum(denom, 1.0e-6)
-    repaired_alpha = np.clip(projected, 0.0, 1.0).astype(np.float32)
-    # Only accept repairs that actually raise alpha; lowering alpha here would
-    # eat into known-good subject seed and is not what the dirty signal proves.
-    accept = usable & (repaired_alpha > a + 1.0e-3)
-    if not bool(accept.any()):
-        return a, F, info
-
-    lift = repaired_alpha[accept] - a[accept]
+    # Healthy donor: a subject pixel whose donor F lies in gamut. Same-key proxy
+    # painting may pass a donor map where proxy-painted pixels use the original
+    # material color rather than the synthetic solver color.
+    healthy_mask = solve & ~dirty & (F_for_donor >= 0.0).all(axis=-1) & (F_for_donor <= 1.0).all(axis=-1)
+    excluded_donor_pixels = 0
+    if donor_exclusion_mask is not None:
+        excluded = np.asarray(donor_exclusion_mask, dtype=bool)
+        if excluded.shape != a.shape:
+            raise ValueError("donor_exclusion_mask must match alpha shape")
+        excluded_donor_pixels = int((healthy_mask & excluded).sum())
+        healthy_mask = healthy_mask & ~excluded
+    info["donor_exclusion_pixels"] = int(excluded_donor_pixels)
+    info["healthy_donor_pixels"] = int(healthy_mask.sum())
     a_new = a.copy()
-    a_new[accept] = repaired_alpha[accept]
     F_new = F.copy()
-    a_safe = np.maximum(a_new[accept, None], 1.0e-3)
-    F_new[accept] = (C_lin[accept] - (1.0 - a_new[accept, None]) * B_lin.reshape(1, 3)) / a_safe
+    accept = np.zeros((h, w), dtype=bool)
 
+    if bool(healthy_mask.any()):
+        from scipy import ndimage
+
+        # Nearest healthy donor for each pixel; only used at dirty positions.
+        _, indices = ndimage.distance_transform_edt(~healthy_mask, return_indices=True)
+        F_donor = F_for_donor[indices[0], indices[1]]
+        direction = F_donor - B_lin.reshape(1, 1, 3)
+        denom = np.sum(direction * direction, axis=-1)
+        # Donor must point away from B in linear RGB; a degenerate (F_donor ~ B)
+        # is not informative.
+        usable = dirty & (denom > 1.0e-5)
+        if bool(usable.any()):
+            projected = np.sum((C_lin - B_lin.reshape(1, 1, 3)) * direction, axis=-1) / np.maximum(denom, 1.0e-6)
+            repaired_alpha = np.clip(projected, 0.0, 1.0).astype(np.float32)
+            # Only accept repairs that actually raise alpha; lowering alpha here
+            # would eat into known-good subject seed and is not what the dirty
+            # signal proves.
+            accept = usable & (repaired_alpha > a_new + 1.0e-3)
+            if bool(accept.any()):
+                a_new[accept] = repaired_alpha[accept]
+                a_safe = np.maximum(a_new[accept, None], 1.0e-3)
+                F_new[accept] = (C_lin[accept] - (1.0 - a_new[accept, None]) * B_lin.reshape(1, 3)) / a_safe
+
+    remaining_dirty = dirty & ~accept
+    physical_accept = np.zeros((h, w), dtype=bool)
+    if bool(remaining_dirty.any()):
+        b = B_lin.reshape(1, 1, 3)
+        c = C_lin
+        min_alpha = np.zeros((h, w), dtype=np.float32)
+        bg_positive = b > 1.0e-6
+        lower = np.where(bg_positive, 1.0 - (c / np.maximum(b, 1.0e-6)), 0.0)
+        min_alpha = np.maximum(min_alpha, np.max(lower, axis=-1))
+        bg_below_white = (1.0 - b) > 1.0e-6
+        upper = np.where(bg_below_white, (c - b) / np.maximum(1.0 - b, 1.0e-6), 0.0)
+        min_alpha = np.maximum(min_alpha, np.max(upper, axis=-1))
+        min_alpha = np.clip(min_alpha, 0.0, 1.0).astype(np.float32)
+        physical_alpha = np.maximum(min_alpha, a_new).astype(np.float32)
+        physical_accept = remaining_dirty & (physical_alpha > a_new + 1.0e-3)
+        if bool(physical_accept.any()):
+            a_new[physical_accept] = physical_alpha[physical_accept]
+            a_safe = np.maximum(a_new[physical_accept, None], 1.0e-3)
+            F_new[physical_accept] = (
+                C_lin[physical_accept] - (1.0 - a_new[physical_accept, None]) * B_lin.reshape(1, 3)
+            ) / a_safe
+
+    repaired = accept | physical_accept
+    if not bool(repaired.any()):
+        return a, F, info
+
+    lift = a_new[repaired] - a[repaired]
     info.update(
         {
-            "repaired_pixels": int(accept.sum()),
+            "repaired_pixels": int(repaired.sum()),
+            "donor_repaired_pixels": int(accept.sum()),
+            "physical_repaired_pixels": int(physical_accept.sum()),
             "alpha_lift_mean": float(lift.mean()),
             "alpha_lift_max": float(lift.max()),
         }
