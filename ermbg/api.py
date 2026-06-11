@@ -925,6 +925,7 @@ def _matte_image_pymatting_known_b(
     same_key_inner_floor_info: dict[str, Any] = {"enabled": False}
     same_key_color_restore_mask: np.ndarray | None = None
     same_key_color_restore_info: dict[str, Any] = {"enabled": False}
+    same_key_opaque_edge_solver_info: dict[str, Any] = {"enabled": False}
     if requested_trimap_mode == "same_key_opaque_body_outline":
         proxy_subject_mask, proxy_subject_info = build_same_key_opaque_proxy_subject_mask(
             rgb,
@@ -998,60 +999,87 @@ def _matte_image_pymatting_known_b(
     timings["trimap_sec"] = time.perf_counter() - step_started
 
     step_started = time.perf_counter()
-    pm = estimate_alpha_with_pymatting(
-        processing_rgb,
-        trimap,
-        method=method,
-        image_space=image_space,
-        cg_maxiter=int(cg_maxiter),
-        cg_rtol=float(cg_rtol),
+    use_same_key_opaque_edge_solver = (
+        requested_trimap_mode == "same_key_opaque_body_outline"
+        and explicit_trimap is None
+        and same_key_color_restore_mask is not None
     )
-    timings["pymatting_solve_sec"] = time.perf_counter() - step_started
+    if use_same_key_opaque_edge_solver:
+        alpha, foreground_srgb, same_key_opaque_edge_solver_info = _solve_same_key_opaque_known_b_edge(
+            rgb,
+            background_color=selected_bg,
+            support_mask=same_key_color_restore_mask,
+            trimap_sure_bg=trimap.sure_bg,
+            inner_opaque_mask=same_key_inner_opaque_mask,
+        )
+        pm_debug = {
+            "used": False,
+            "method": "known_b_opaque_ui_edge_solver",
+            "applied": False,
+            "reason": "same-key opaque UI uses known-B contour-coverage unmix solver",
+            "unknown_pixels": int(trimap.unknown.sum()),
+            "image_space": "sRGB",
+        }
+        alpha_pinhole_repair = {"used": False, "reason": "known-B opaque edge solver owns alpha"}
+        consistency_repair = {"used": False, "reason": "known-B opaque edge solver produces physical foreground"}
+        timings["pymatting_solve_sec"] = 0.0
+        timings["foreground_unmix_repair_sec"] = time.perf_counter() - step_started
+    else:
+        pm = estimate_alpha_with_pymatting(
+            processing_rgb,
+            trimap,
+            method=method,
+            image_space=image_space,
+            cg_maxiter=int(cg_maxiter),
+            cg_rtol=float(cg_rtol),
+        )
+        timings["pymatting_solve_sec"] = time.perf_counter() - step_started
 
-    step_started = time.perf_counter()
-    alpha = np.clip(pm.alpha.astype(np.float32), 0.0, 1.0)
-    alpha, alpha_pinhole_repair = _repair_known_b_alpha_pinholes(
-        processing_rgb,
-        alpha,
-        background_color=selected_bg,
-    )
+        step_started = time.perf_counter()
+        alpha = np.clip(pm.alpha.astype(np.float32), 0.0, 1.0)
+        alpha, alpha_pinhole_repair = _repair_known_b_alpha_pinholes(
+            processing_rgb,
+            alpha,
+            background_color=selected_bg,
+        )
 
-    C_lin = ermbg_io.srgb_to_linear(processing_rgb).astype(np.float32)
-    B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
-    foreground_linear = C_lin.copy()
-    solve = alpha > 1e-3
-    # Mechanism: once PyMatting has solved the narrow antialiasing band, recover
-    # straight foreground against the measured known-B color so the exported RGB
-    # does not retain green/blue-screen contribution at the edge.
-    foreground_linear[solve] = (
-        C_lin[solve] - (1.0 - alpha[solve, None]) * B_lin.reshape(1, 3)
-    ) / np.maximum(alpha[solve, None], 1e-3)
-    foreground_linear[~solve] = 0.0
-    # Physical-consistency repair before clip. A single-known-background unmix is
-    # underdetermined (3 observations, 4 unknowns), so PyMatting's alpha occasionally
-    # admits an F outside [0,1] -- e.g. an opaque dark-brown outline solved as
-    # alpha~0.78 forces F_g negative, which clip later turns into magenta fringe.
-    # The dirty pixels are flagged by physics, not classification: any F channel
-    # outside [0,1] means the (F, a) pair cannot recomposite onto any background
-    # consistently. We resolve them by borrowing the nearest healthy neighbor's F
-    # and re-projecting C onto the (F_neighbor, B) line to recover a self-consistent
-    # alpha; healthy pixels are not touched.
-    donor_foreground_linear: np.ndarray | None = None
-    if proxy_subject_mask is not None:
-        donor_foreground_linear = foreground_linear.copy()
-        original_rgb_linear = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
-        donor_foreground_linear[proxy_subject_mask] = original_rgb_linear[proxy_subject_mask]
-    alpha, foreground_linear, consistency_repair = _repair_known_b_unmix_consistency(
-        alpha,
-        foreground_linear,
-        C_lin=C_lin,
-        B_lin=B_lin,
-        solve=solve,
-        donor_foreground_linear=donor_foreground_linear,
-    )
-    foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
-    foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
-    timings["foreground_unmix_repair_sec"] = time.perf_counter() - step_started
+        C_lin = ermbg_io.srgb_to_linear(processing_rgb).astype(np.float32)
+        B_lin = ermbg_io.srgb_to_linear(np.asarray(selected_bg, dtype=np.uint8).reshape(1, 1, 3))[0, 0].astype(np.float32)
+        foreground_linear = C_lin.copy()
+        solve = alpha > 1e-3
+        # Mechanism: once PyMatting has solved the narrow antialiasing band, recover
+        # straight foreground against the measured known-B color so the exported RGB
+        # does not retain green/blue-screen contribution at the edge.
+        foreground_linear[solve] = (
+            C_lin[solve] - (1.0 - alpha[solve, None]) * B_lin.reshape(1, 3)
+        ) / np.maximum(alpha[solve, None], 1e-3)
+        foreground_linear[~solve] = 0.0
+        # Physical-consistency repair before clip. A single-known-background unmix is
+        # underdetermined (3 observations, 4 unknowns), so PyMatting's alpha occasionally
+        # admits an F outside [0,1] -- e.g. an opaque dark-brown outline solved as
+        # alpha~0.78 forces F_g negative, which clip later turns into magenta fringe.
+        # The dirty pixels are flagged by physics, not classification: any F channel
+        # outside [0,1] means the (F, a) pair cannot recomposite onto any background
+        # consistently. We resolve them by borrowing the nearest healthy neighbor's F
+        # and re-projecting C onto the (F_neighbor, B) line to recover a self-consistent
+        # alpha; healthy pixels are not touched.
+        donor_foreground_linear: np.ndarray | None = None
+        if proxy_subject_mask is not None:
+            donor_foreground_linear = foreground_linear.copy()
+            original_rgb_linear = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
+            donor_foreground_linear[proxy_subject_mask] = original_rgb_linear[proxy_subject_mask]
+        alpha, foreground_linear, consistency_repair = _repair_known_b_unmix_consistency(
+            alpha,
+            foreground_linear,
+            C_lin=C_lin,
+            B_lin=B_lin,
+            solve=solve,
+            donor_foreground_linear=donor_foreground_linear,
+        )
+        foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
+        foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
+        pm_debug = pm.debug
+        timings["foreground_unmix_repair_sec"] = time.perf_counter() - step_started
 
     step_started = time.perf_counter()
     pymatting_alpha_before_inner_floor = alpha.copy()
@@ -1097,7 +1125,7 @@ def _matte_image_pymatting_known_b(
             "foreground_source": "solver_foreground",
             "same_key_source_replay": True,
         }
-        if same_key_color_restore_mask is not None:
+        if same_key_color_restore_mask is not None and not same_key_opaque_edge_solver_info.get("enabled", False):
             # Shadow evidence for same-key opaque assets must be measured against
             # the source/preprocessed pixels, not the proxy-painted solver colors.
             # Restore measured subject support before the ownership contest so
@@ -1106,13 +1134,21 @@ def _matte_image_pymatting_known_b(
             shadow_patch_foreground_srgb[same_key_color_restore_mask] = rgb[same_key_color_restore_mask]
             shadow_patch_source_info["foreground_source"] = "source_restored_same_key_support"
             shadow_patch_source_info["restored_foreground_pixels"] = int(same_key_color_restore_mask.sum())
+    shadow_repair_domain = trimap.unknown
+    if same_key_opaque_edge_solver_info.get("enabled", False) and same_key_color_restore_mask is not None:
+        # In the opaque same-key solver path, measured support has already been
+        # explained by subject alpha + straight foreground with low known-B
+        # replay error. Let ShadowPatch consider only unknown pixels outside that
+        # support so it cannot reclassify the solved outline as shadow.
+        shadow_repair_domain = trimap.unknown & ~same_key_color_restore_mask
+        shadow_patch_source_info["repair_domain_source"] = "unknown_outside_same_key_support"
     alpha, rgba_rgb_srgb, shadow_alpha, shadow_alpha_physical, shadow_info = _pymatting_known_b_shadow_patch(
         shadow_patch_rgb,
         subject_alpha=subject_alpha,
         subject_foreground_srgb=shadow_patch_foreground_srgb,
         background_color=selected_bg,
         shadow_mode=shadow_mode,
-        repair_domain=trimap.unknown,
+        repair_domain=shadow_repair_domain,
     )
     shadow_info["input_source"] = shadow_patch_source_info
     timings["shadow_patch_sec"] = time.perf_counter() - step_started
@@ -1135,7 +1171,18 @@ def _matte_image_pymatting_known_b(
         # layer. Shadow-owned pixels must keep the black shadow RGB produced by
         # the source replay; restoring blue/green source RGB there turns a
         # correct shadow alpha back into same-key colored fringe.
-        restore_after_shadow = same_key_color_restore_mask & (shadow_alpha <= (1.0 / 255.0))
+        if same_key_opaque_edge_solver_info.get("enabled", False):
+            # The known-B opaque edge solver already unmixed straight foreground
+            # for soft exterior AA. Restoring source RGB on those pixels would
+            # reintroduce known-background contribution, so only opaque material
+            # pixels are restored verbatim.
+            restore_after_shadow = (
+                same_key_color_restore_mask
+                & (shadow_alpha <= (1.0 / 255.0))
+                & (subject_alpha >= (254.0 / 255.0))
+            )
+        else:
+            restore_after_shadow = same_key_color_restore_mask & (shadow_alpha <= (1.0 / 255.0))
         blocked_by_shadow = same_key_color_restore_mask & ~restore_after_shadow
         same_key_color_restore_info = {
             **same_key_color_restore_info,
@@ -1178,7 +1225,7 @@ def _matte_image_pymatting_known_b(
             "notes": "PyMatting alpha on a measured or specified known background.",
             "extras": {
                 "background": bg_info,
-                "pymatting": pm.debug,
+                "pymatting": pm_debug,
                 "trimap": trimap_info,
                 "alpha_pinhole_repair": alpha_pinhole_repair,
                 "unmix_consistency_repair": consistency_repair,
@@ -1205,6 +1252,7 @@ def _matte_image_pymatting_known_b(
                 "same_key_proxy_subject": proxy_subject_info,
                 "same_key_inner_opaque_floor": same_key_inner_floor_info,
                 "same_key_color_restore": same_key_color_restore_info,
+                "same_key_opaque_edge_solver": same_key_opaque_edge_solver_info,
                 "timings": timings,
             },
         },
@@ -1320,7 +1368,7 @@ def _matte_image_pymatting_known_b(
         "pymatting_known_b": {
             "background": bg_info,
             "trimap": trimap_info,
-            "pymatting": pm.debug,
+            "pymatting": pm_debug,
             "alpha_pinhole_repair": alpha_pinhole_repair,
             "parameters": report["strategy"]["extras"]["parameters"],
             "semantic_decision": semantic_decision_payload,
@@ -1328,6 +1376,7 @@ def _matte_image_pymatting_known_b(
             "same_key_proxy_subject": proxy_subject_info,
             "same_key_inner_opaque_floor": same_key_inner_floor_info,
             "same_key_color_restore": same_key_color_restore_info,
+            "same_key_opaque_edge_solver": same_key_opaque_edge_solver_info,
         },
         "shadow": shadow_info,
         "timings": timings,
@@ -1690,6 +1739,187 @@ def _pymatting_known_b_shadow_patch(
         repair_domain=repair_domain,
         force_shadow_layer=force_shadow_layer,
     )
+
+
+def _solve_same_key_opaque_known_b_edge(
+    image_srgb: np.ndarray,
+    *,
+    background_color: tuple[int, int, int],
+    support_mask: np.ndarray,
+    trimap_sure_bg: np.ndarray,
+    inner_opaque_mask: np.ndarray | None,
+    aa_width_px: float = 1.75,
+    edge_bias_px: float = -0.25,
+    contour_coverage_scale: int = 8,
+    contour_smoothing_epsilon_px: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Known-B contour-coverage unmix for same-key opaque UI silhouettes.
+
+    Same-key opaque buttons are not a natural-alpha matting problem: their body
+    can be nearly identical to the known background, while the outline can be
+    explained either as subject AA or as darkened background. This solver makes
+    the route-level opaque-UI decision explicit, converts the measured subject
+    support contour into a subpixel coverage alpha, then derives straight
+    foreground from known-B so same-background replay remains physically checked.
+    """
+    if image_srgb.dtype != np.uint8 or image_srgb.ndim != 3 or image_srgb.shape[2] != 3:
+        raise ValueError("image_srgb must be HxWx3 uint8")
+    shape = image_srgb.shape[:2]
+    support = np.asarray(support_mask, dtype=bool)
+    sure_bg = np.asarray(trimap_sure_bg, dtype=bool)
+    if support.shape != shape:
+        raise ValueError("support_mask must match image shape")
+    if sure_bg.shape != shape:
+        raise ValueError("trimap_sure_bg must match image shape")
+    support = support & ~sure_bg
+    if inner_opaque_mask is not None:
+        inner_opaque = np.asarray(inner_opaque_mask, dtype=bool)
+        if inner_opaque.shape != shape:
+            raise ValueError("inner_opaque_mask must match image shape")
+        inner_opaque = inner_opaque & support
+    else:
+        inner_opaque = np.zeros(shape, dtype=bool)
+
+    alpha = np.zeros(shape, dtype=np.float32)
+    foreground = np.zeros_like(image_srgb)
+    info: dict[str, Any] = {
+        "enabled": True,
+        "method": "known_b_opaque_ui_contour_coverage_unmix",
+        "support_pixels": int(support.sum()),
+        "inner_opaque_pixels": int(inner_opaque.sum()),
+        "aa_width_px": float(aa_width_px),
+        "edge_bias_px": float(edge_bias_px),
+        "contour_coverage_scale": int(contour_coverage_scale),
+        "contour_smoothing_epsilon_px": float(contour_smoothing_epsilon_px),
+        "soft_pixels": 0,
+        "physical_alpha_lift_pixels": 0,
+        "known_b_replay_error_mean_u8": 0.0,
+        "known_b_replay_error_p95_u8": 0.0,
+        "known_b_replay_error_max_u8": 0.0,
+        "reason": "",
+    }
+    if not bool(support.any()):
+        info["reason"] = "empty same-key support"
+        return alpha, foreground, info
+
+    coverage_alpha, coverage_info = _same_key_support_contour_coverage_alpha(
+        support,
+        scale=int(contour_coverage_scale),
+        epsilon_px=float(contour_smoothing_epsilon_px),
+    )
+    inside_distance = cv2.distanceTransform(support.astype(np.uint8), cv2.DIST_L2, 3).astype(np.float32)
+    geometric_alpha = np.clip((inside_distance + float(edge_bias_px)) / max(float(aa_width_px), 1.0e-6), 0.0, 1.0)
+    alpha_source = "contour_coverage" if coverage_info.get("enabled", False) else "geometric_distance"
+    if coverage_info.get("enabled", False):
+        # The support mask is measured on integer pixels and can carry stair
+        # steps from the same-key trace. Treat the largest support contour as
+        # the measured silhouette, rasterize it at subpixel resolution, and use
+        # that coverage only inside the measured support. This smooths AA
+        # without inventing exterior subject pixels from tiny background drift.
+        alpha[support] = coverage_alpha[support]
+    else:
+        alpha[support] = geometric_alpha[support]
+    alpha[inner_opaque] = 1.0
+
+    image = image_srgb.astype(np.float32)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    min_physical_alpha = _known_b_min_alpha_for_physical_foreground(image, bg)
+    before_lift = alpha.copy()
+    alpha[support] = np.maximum(alpha[support], np.minimum(1.0, min_physical_alpha[support] + 1.0e-4))
+    alpha = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+    solve = alpha > 1.0e-6
+    foreground_f = np.zeros_like(image)
+    foreground_f[solve] = (
+        image[solve] - (1.0 - alpha[solve, None]) * bg.reshape(1, 3)
+    ) / np.maximum(alpha[solve, None], 1.0e-6)
+    foreground = np.clip(foreground_f, 0.0, 255.0).astype(np.uint8)
+
+    replay = alpha[..., None] * foreground.astype(np.float32) + (1.0 - alpha[..., None]) * bg
+    replay_error = np.mean(np.abs(replay - image), axis=2)
+    replay_domain = cv2.dilate(support.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1).astype(bool)
+    replay_values = replay_error[replay_domain]
+    soft = (alpha > (1.0 / 255.0)) & (alpha < (254.0 / 255.0))
+    physical_lift = support & (alpha > before_lift + (1.0 / 255.0))
+    info.update(
+        {
+            "soft_pixels": int(soft.sum()),
+            "physical_alpha_lift_pixels": int(physical_lift.sum()),
+            "alpha_mean_on_support": float(alpha[support].mean()),
+            "alpha_min_on_support": float(alpha[support].min()),
+            "alpha_source": alpha_source,
+            "contour_coverage": coverage_info,
+            "known_b_replay_error_mean_u8": float(replay_values.mean()) if replay_values.size else 0.0,
+            "known_b_replay_error_p95_u8": float(np.percentile(replay_values, 95.0)) if replay_values.size else 0.0,
+            "known_b_replay_error_max_u8": float(replay_values.max()) if replay_values.size else 0.0,
+        }
+    )
+    return alpha, foreground, info
+
+
+def _same_key_support_contour_coverage_alpha(
+    support_mask: np.ndarray,
+    *,
+    scale: int,
+    epsilon_px: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Subpixel coverage alpha for a measured same-key UI support contour."""
+    support = np.asarray(support_mask, dtype=bool)
+    h, w = support.shape
+    empty = np.zeros((h, w), dtype=np.float32)
+    scale_i = int(np.clip(scale, 2, 16))
+    epsilon = max(0.0, float(epsilon_px))
+    contours, _ = cv2.findContours(support.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return empty, {
+            "enabled": False,
+            "reason": "missing support contour",
+            "scale": scale_i,
+            "epsilon_px": epsilon,
+        }
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 3:
+        return empty, {
+            "enabled": False,
+            "reason": "support contour has fewer than three points",
+            "scale": scale_i,
+            "epsilon_px": epsilon,
+            "contour_points": int(len(contour)),
+        }
+    approx = cv2.approxPolyDP(contour, epsilon=epsilon, closed=True)
+    if len(approx) < 3:
+        approx = contour
+
+    high = np.zeros((h * scale_i, w * scale_i), dtype=np.uint8)
+    high_contour = (approx.astype(np.float32) * float(scale_i) + (float(scale_i) * 0.5)).astype(np.int32)
+    cv2.drawContours(high, [high_contour], -1, 255, thickness=cv2.FILLED, lineType=cv2.LINE_AA)
+    coverage = cv2.resize(high, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    coverage = np.clip(coverage, 0.0, 1.0).astype(np.float32)
+    soft = (coverage > (1.0 / 255.0)) & (coverage < (254.0 / 255.0))
+    return coverage, {
+        "enabled": True,
+        "method": "supersampled_largest_contour_coverage",
+        "scale": scale_i,
+        "epsilon_px": epsilon,
+        "contour_points": int(len(contour)),
+        "approx_points": int(len(approx)),
+        "soft_pixels": int(soft.sum()),
+    }
+
+
+def _known_b_min_alpha_for_physical_foreground(image_srgb: np.ndarray, background_srgb: np.ndarray) -> np.ndarray:
+    """Minimum alpha that keeps known-B straight foreground inside sRGB gamut."""
+    image = image_srgb.astype(np.float32)
+    bg = background_srgb.astype(np.float32).reshape(1, 1, 3)
+    min_alpha = np.zeros(image.shape[:2], dtype=np.float32)
+    for channel in range(3):
+        c = image[..., channel]
+        b = bg[..., channel]
+        lower = (b - c) / np.maximum(b, 1.0e-6)
+        upper = (c - b) / np.maximum(255.0 - b, 1.0e-6)
+        required = np.where(c < b, lower, np.where(c > b, upper, 0.0))
+        min_alpha = np.maximum(min_alpha, required.astype(np.float32))
+    return np.clip(min_alpha, 0.0, 1.0).astype(np.float32)
 
 
 def _pymatting_known_b_unknown_domain_shadow_patch(

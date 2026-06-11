@@ -1318,6 +1318,16 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solv
     assert proxy_info["proxy_color"] == [254, 160, 7]
     assert proxy_info["proxy_color_source"] == "background_complement"
     assert proxy_info["solver_trimap_mode"] == "same_key_opaque_body_outline"
+    edge_solver = result.debug["pymatting_known_b"]["same_key_opaque_edge_solver"]
+    pymatting_info = result.debug["pymatting_known_b"]["pymatting"]
+    assert edge_solver["enabled"] is True
+    assert edge_solver["method"] == "known_b_opaque_ui_contour_coverage_unmix"
+    assert edge_solver["alpha_source"] == "contour_coverage"
+    assert edge_solver["contour_coverage"]["enabled"] is True
+    assert edge_solver["soft_pixels"] > 0
+    assert edge_solver["known_b_replay_error_p95_u8"] < 2.0
+    assert pymatting_info["used"] is False
+    assert pymatting_info["method"] == "known_b_opaque_ui_edge_solver"
     assert result.report["strategy"]["extras"]["parameters"]["trimap_mode"] == "same_key_opaque_body_outline"
     assert result.report["strategy"]["extras"]["parameters"]["effective_trimap_mode"] == "same_key_opaque_body_outline"
     assert result.debug["pymatting_known_b"]["trimap"]["method"] == "same_key_opaque_body_outline"
@@ -1336,7 +1346,10 @@ def test_same_key_opaque_pymatting_uses_proxy_subject_mask_for_body_outline_solv
     assert np.all(result.alpha[floor_mask] == 1.0)
     assert np.all(result.rgba[..., 3][floor_mask] == 255)
     assert np.all(result.rgba[..., :3][floor_mask] == image[floor_mask])
-    assert np.all(result.rgba[..., :3][restore_mask] == image[restore_mask])
+    opaque_restore = restore_mask & (result.rgba[..., 3] >= 254)
+    soft_restore = restore_mask & (result.rgba[..., 3] > 1) & (result.rgba[..., 3] < 254)
+    assert np.all(result.rgba[..., :3][opaque_restore] == image[opaque_restore])
+    assert int(soft_restore.sum()) > 0
     assert result.debug["pymatting_subject_alpha_raw"].shape == image.shape[:2]
 
 
@@ -1355,12 +1368,16 @@ def test_same_key_opaque_shadow_patch_uses_source_replay_not_proxy_colors():
 
     shadow = result.debug["shadow"]
     objective = shadow["objective_shadow"]
+    edge_solver = result.debug["pymatting_known_b"]["same_key_opaque_edge_solver"]
+    pymatting_info = result.debug["pymatting_known_b"]["pymatting"]
+    assert edge_solver["enabled"] is True
+    assert edge_solver["known_b_replay_error_p95_u8"] < 2.0
+    assert pymatting_info["used"] is False
     assert shadow["input_source"]["same_key_source_replay"] is True
     assert shadow["input_source"]["image_source"] == "pre_proxy_known_b_input"
-    assert shadow["input_source"]["foreground_source"] == "source_restored_same_key_support"
-    assert objective["subject_edge_aa_written_pixels"] > 100
-    assert objective["p95_abs_error_after_u8"] < 20.0
-    assert objective["p95_abs_error_after_u8"] < objective["p95_abs_error_before_u8"]
+    assert shadow["input_source"]["foreground_source"] == "solver_foreground"
+    assert objective["candidate_pixels"] < 64
+    assert objective["p95_abs_error_after_u8"] < 2.0
 
 
 def test_pymatting_known_b_hard_shadow_evidence_release_prevents_green_foreground_solve():
