@@ -3,11 +3,11 @@
 [![Python Version](https://img.shields.io/badge/Python-3.12-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-orange?style=flat-square)](https://github.com/ethanhubin/ermbg)
 
-`ERMBG` 是一款专为游戏 UI、图标、特效、角色等资产量身定制的高精度、工业级自动抠图解决方案。
+`ERMBG` 是面向游戏 UI、图标、特效和角色资产的自动抠图工具。
 
 ## 解决的行业痛点
 
-当前 AI 生成图像技术已广泛应用，但直接生成带透明通道（Alpha）的资产仍不可靠。最常见的问题是: 要求透明背景时,AI会生成黑白格的"假透明"。而目前市面上的抠图工具,又会遇到边缘残留白边/杂色，半透明玻璃、特效资产的通道破损。无法直接满足游戏引擎（Unity / Unreal）的渲染规范。
+AI 生成游戏资产时，透明通道（Alpha）仍不稳定。常见问题包括黑白格“假透明”、边缘白边/杂色，以及玻璃、特效等半透明区域破损。这些结果很难直接用于 Unity / Unreal 等游戏引擎。
 
 **ERMBG 的解法是：借鉴影视行业绿幕经验，主动制造纯色背景约束。**
 在资产生成阶段，引导 AI 将目标物体生成在纯色（绿幕/蓝幕）背景上。随后由 ERMBG 进行精准的背景扣除与边缘修复，输出像素级干净、可直接投入游戏 UI、动效及角色链路的透明 RGBA PNG。
