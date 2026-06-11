@@ -3925,6 +3925,7 @@ def _slice_page_html() -> str:
       return {
         minArea: minArea.value || "64",
         padding: padding.value || "4",
+        backgroundRepair: backgroundRepair.checked ? "true" : "false",
       };
     }
 
@@ -4205,9 +4206,10 @@ def _slice_page_html() -> str:
       uploadedPreviewUrl = URL.createObjectURL(file.files[0]);
       renderPreviewImage(uploadedPreviewUrl, "上传图片预览");
       list.innerHTML = '<span class="empty">切图列表会显示在这里</span>';
-      statusEl.textContent = "已载入图片，点击预览";
       backgroundRepair.checked = true;
       setSliceBusy(false);
+      statusEl.textContent = "已载入图片，正在自动标注";
+      runAnnotate();
     });
 
     function invalidatePreview() {
@@ -4219,8 +4221,9 @@ def _slice_page_html() -> str:
       confirmButton.disabled = true;
       batchAll.disabled = true;
       lastPreviewSettingsKey = "";
-      list.innerHTML = '<span class="empty">参数已修改，点击预览后再切图</span>';
-      statusEl.textContent = "参数已修改，点击预览";
+      list.innerHTML = '<span class="empty">参数已修改，正在重新标注</span>';
+      statusEl.textContent = "参数已修改，正在自动标注";
+      runAnnotate();
     }
 
     minArea.addEventListener("change", invalidatePreview);
