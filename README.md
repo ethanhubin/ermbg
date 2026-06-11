@@ -44,6 +44,156 @@ ERMBG 的核心思路是：先识别素材类型，再选择合适的处理路�
 
 ---
 
+<!-- ERMBG_EVAL_GALLERY:START -->
+## 全量样本结果
+
+来源 batch: `out/direct_worker_game_input_20260610_v002`。后端: `direct-worker`。结果: `88/88` ok。覆盖: button 57 / character 9 / icon 22。
+
+完整展示页见 [docs/eval-gallery.md](docs/eval-gallery.md)。
+
+<details>
+<summary>展开 88 个样本缩略图</summary>
+
+<table>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b001" title="B001 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B001.jpg" width="220" alt="B001 result contact sheet"></a><br><sub><b>B001</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b002" title="B002 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B002.jpg" width="220" alt="B002 result contact sheet"></a><br><sub><b>B002</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b003" title="B003 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B003.jpg" width="220" alt="B003 result contact sheet"></a><br><sub><b>B003</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b004" title="B004 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B004.jpg" width="220" alt="B004 result contact sheet"></a><br><sub><b>B004</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b005" title="B005 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B005.jpg" width="220" alt="B005 result contact sheet"></a><br><sub><b>B005</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b006" title="B006 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B006.jpg" width="220" alt="B006 result contact sheet"></a><br><sub><b>B006</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b007" title="B007 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B007.jpg" width="220" alt="B007 result contact sheet"></a><br><sub><b>B007</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b008" title="B008 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B008.jpg" width="220" alt="B008 result contact sheet"></a><br><sub><b>B008</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b009" title="B009 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B009.jpg" width="220" alt="B009 result contact sheet"></a><br><sub><b>B009</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b010" title="B010 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B010.jpg" width="220" alt="B010 result contact sheet"></a><br><sub><b>B010</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b011" title="B011 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B011.jpg" width="220" alt="B011 result contact sheet"></a><br><sub><b>B011</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b012" title="B012 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B012.jpg" width="220" alt="B012 result contact sheet"></a><br><sub><b>B012</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b013" title="B013 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B013.jpg" width="220" alt="B013 result contact sheet"></a><br><sub><b>B013</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b014" title="B014 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B014.jpg" width="220" alt="B014 result contact sheet"></a><br><sub><b>B014</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b015" title="B015 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B015.jpg" width="220" alt="B015 result contact sheet"></a><br><sub><b>B015</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b016" title="B016 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B016.jpg" width="220" alt="B016 result contact sheet"></a><br><sub><b>B016</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b017" title="B017 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B017.jpg" width="220" alt="B017 result contact sheet"></a><br><sub><b>B017</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b018" title="B018 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B018.jpg" width="220" alt="B018 result contact sheet"></a><br><sub><b>B018</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b019" title="B019 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B019.jpg" width="220" alt="B019 result contact sheet"></a><br><sub><b>B019</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b020" title="B020 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B020.jpg" width="220" alt="B020 result contact sheet"></a><br><sub><b>B020</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b021" title="B021 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B021.jpg" width="220" alt="B021 result contact sheet"></a><br><sub><b>B021</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b022" title="B022 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B022.jpg" width="220" alt="B022 result contact sheet"></a><br><sub><b>B022</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b023" title="B023 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B023.jpg" width="220" alt="B023 result contact sheet"></a><br><sub><b>B023</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b024" title="B024 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B024.jpg" width="220" alt="B024 result contact sheet"></a><br><sub><b>B024</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b025" title="B025 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B025.jpg" width="220" alt="B025 result contact sheet"></a><br><sub><b>B025</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b026" title="B026 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B026.jpg" width="220" alt="B026 result contact sheet"></a><br><sub><b>B026</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b027" title="B027 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B027.jpg" width="220" alt="B027 result contact sheet"></a><br><sub><b>B027</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b028" title="B028 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B028.jpg" width="220" alt="B028 result contact sheet"></a><br><sub><b>B028</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b029" title="B029 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B029.jpg" width="220" alt="B029 result contact sheet"></a><br><sub><b>B029</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b030" title="B030 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B030.jpg" width="220" alt="B030 result contact sheet"></a><br><sub><b>B030</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b031" title="B031 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B031.jpg" width="220" alt="B031 result contact sheet"></a><br><sub><b>B031</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b032" title="B032 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B032.jpg" width="220" alt="B032 result contact sheet"></a><br><sub><b>B032</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b033" title="B033 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B033.jpg" width="220" alt="B033 result contact sheet"></a><br><sub><b>B033</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b034" title="B034 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B034.jpg" width="220" alt="B034 result contact sheet"></a><br><sub><b>B034</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b035" title="B035 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B035.jpg" width="220" alt="B035 result contact sheet"></a><br><sub><b>B035</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b036" title="B036 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B036.jpg" width="220" alt="B036 result contact sheet"></a><br><sub><b>B036</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b037" title="B037 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B037.jpg" width="220" alt="B037 result contact sheet"></a><br><sub><b>B037</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b038" title="B038 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B038.jpg" width="220" alt="B038 result contact sheet"></a><br><sub><b>B038</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b039" title="B039 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B039.jpg" width="220" alt="B039 result contact sheet"></a><br><sub><b>B039</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b040" title="B040 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B040.jpg" width="220" alt="B040 result contact sheet"></a><br><sub><b>B040</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b041" title="B041 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B041.jpg" width="220" alt="B041 result contact sheet"></a><br><sub><b>B041</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b042" title="B042 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B042.jpg" width="220" alt="B042 result contact sheet"></a><br><sub><b>B042</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b043" title="B043 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B043.jpg" width="220" alt="B043 result contact sheet"></a><br><sub><b>B043</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b044" title="B044 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B044.jpg" width="220" alt="B044 result contact sheet"></a><br><sub><b>B044</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b045" title="B045 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B045.jpg" width="220" alt="B045 result contact sheet"></a><br><sub><b>B045</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b046" title="B046 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B046.jpg" width="220" alt="B046 result contact sheet"></a><br><sub><b>B046</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b047" title="B047 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B047.jpg" width="220" alt="B047 result contact sheet"></a><br><sub><b>B047</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b048" title="B048 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B048.jpg" width="220" alt="B048 result contact sheet"></a><br><sub><b>B048</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b049" title="B049 · button · corridorkey-transparent-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B049.jpg" width="220" alt="B049 result contact sheet"></a><br><sub><b>B049</b> · ok<br>corridorkey-transparent-button<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b050" title="B050 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B050.jpg" width="220" alt="B050 result contact sheet"></a><br><sub><b>B050</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b051" title="B051 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B051.jpg" width="220" alt="B051 result contact sheet"></a><br><sub><b>B051</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b052" title="B052 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B052.jpg" width="220" alt="B052 result contact sheet"></a><br><sub><b>B052</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b053" title="B053 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B053.jpg" width="220" alt="B053 result contact sheet"></a><br><sub><b>B053</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b054" title="B054 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B054.jpg" width="220" alt="B054 result contact sheet"></a><br><sub><b>B054</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b055" title="B055 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B055.jpg" width="220" alt="B055 result contact sheet"></a><br><sub><b>B055</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b056" title="B056 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B056.jpg" width="220" alt="B056 result contact sheet"></a><br><sub><b>B056</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#b057" title="B057 · button · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/B057.jpg" width="220" alt="B057 result contact sheet"></a><br><sub><b>B057</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i001" title="I001 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I001.jpg" width="220" alt="I001 result contact sheet"></a><br><sub><b>I001</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i002" title="I002 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I002.jpg" width="220" alt="I002 result contact sheet"></a><br><sub><b>I002</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i003" title="I003 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I003.jpg" width="220" alt="I003 result contact sheet"></a><br><sub><b>I003</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i004" title="I004 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I004.jpg" width="220" alt="I004 result contact sheet"></a><br><sub><b>I004</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i005" title="I005 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I005.jpg" width="220" alt="I005 result contact sheet"></a><br><sub><b>I005</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i006" title="I006 · icon · corridorkey-shaped-icon"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I006.jpg" width="220" alt="I006 result contact sheet"></a><br><sub><b>I006</b> · ok<br>corridorkey-shaped-icon<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i007" title="I007 · icon · corridorkey-shaped-icon"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I007.jpg" width="220" alt="I007 result contact sheet"></a><br><sub><b>I007</b> · ok<br>corridorkey-shaped-icon<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i008" title="I008 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I008.jpg" width="220" alt="I008 result contact sheet"></a><br><sub><b>I008</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i009" title="I009 · icon · pymatting-hard-button"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I009.jpg" width="220" alt="I009 result contact sheet"></a><br><sub><b>I009</b> · ok<br>pymatting-hard-button<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i010" title="I010 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I010.jpg" width="220" alt="I010 result contact sheet"></a><br><sub><b>I010</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i011" title="I011 · icon · known-bg-glow"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I011.jpg" width="220" alt="I011 result contact sheet"></a><br><sub><b>I011</b> · ok<br>known-bg-glow<br>known_bg_glow</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i012" title="I012 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I012.jpg" width="220" alt="I012 result contact sheet"></a><br><sub><b>I012</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i013" title="I013 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I013.jpg" width="220" alt="I013 result contact sheet"></a><br><sub><b>I013</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i014" title="I014 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I014.jpg" width="220" alt="I014 result contact sheet"></a><br><sub><b>I014</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i015" title="I015 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I015.jpg" width="220" alt="I015 result contact sheet"></a><br><sub><b>I015</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i016" title="I016 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I016.jpg" width="220" alt="I016 result contact sheet"></a><br><sub><b>I016</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i017" title="I017 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I017.jpg" width="220" alt="I017 result contact sheet"></a><br><sub><b>I017</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i018" title="I018 · icon · known-bg-glow"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I018.jpg" width="220" alt="I018 result contact sheet"></a><br><sub><b>I018</b> · ok<br>known-bg-glow<br>known_bg_glow</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i019" title="I019 · icon · known-bg-glow"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I019.jpg" width="220" alt="I019 result contact sheet"></a><br><sub><b>I019</b> · ok<br>known-bg-glow<br>known_bg_glow</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i020" title="I020 · icon · known-bg-glow"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I020.jpg" width="220" alt="I020 result contact sheet"></a><br><sub><b>I020</b> · ok<br>known-bg-glow<br>known_bg_glow</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i021" title="I021 · icon · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I021.jpg" width="220" alt="I021 result contact sheet"></a><br><sub><b>I021</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#i022" title="I022 · icon · pymatting-known-bg"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/I022.jpg" width="220" alt="I022 result contact sheet"></a><br><sub><b>I022</b> · ok<br>pymatting-known-bg<br>pymatting_known_b</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c001" title="C001 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C001.jpg" width="220" alt="C001 result contact sheet"></a><br><sub><b>C001</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c002" title="C002 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C002.jpg" width="220" alt="C002 result contact sheet"></a><br><sub><b>C002</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c003" title="C003 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C003.jpg" width="220" alt="C003 result contact sheet"></a><br><sub><b>C003</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c004" title="C004 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C004.jpg" width="220" alt="C004 result contact sheet"></a><br><sub><b>C004</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c005" title="C005 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C005.jpg" width="220" alt="C005 result contact sheet"></a><br><sub><b>C005</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+</tr>
+<tr>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c006" title="C006 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C006.jpg" width="220" alt="C006 result contact sheet"></a><br><sub><b>C006</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c007" title="C007 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C007.jpg" width="220" alt="C007 result contact sheet"></a><br><sub><b>C007</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c008" title="C008 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C008.jpg" width="220" alt="C008 result contact sheet"></a><br><sub><b>C008</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+<td width="25%" valign="top"><a href="docs/eval-gallery.md#c009" title="C009 · character · corridorkey-character"><img src="docs/assets/eval-gallery/direct_worker_game_input_20260610_v002/C009.jpg" width="220" alt="C009 result contact sheet"></a><br><sub><b>C009</b> · ok<br>corridorkey-character<br>corridorkey</sub></td>
+</tr>
+</table>
+
+</details>
+<!-- ERMBG_EVAL_GALLERY:END -->
+
+---
+
 ## 真实执行主线
 
 ```text
