@@ -975,6 +975,33 @@ def _execute_backend_from_analysis(requested_backend: str, analysis_payload: dic
     return requested_backend
 
 
+def _route_decision_algorithm(route_decision: dict[str, Any] | None) -> str:
+    if not isinstance(route_decision, dict):
+        return ""
+    return str(
+        route_decision.get("algorithm")
+        or route_decision.get("backend")
+        or route_decision.get("route")
+        or ""
+    )
+
+
+def _merge_known_b_execution_params_into_route_decision(
+    route_decision: dict[str, Any] | None,
+    pymatting_params: dict[str, object],
+) -> dict[str, Any] | None:
+    if route_decision is None or _route_decision_algorithm(route_decision) != "pymatting_known_b":
+        return route_decision
+    params = route_decision.get("params")
+    return {
+        **route_decision,
+        "params": {
+            **(params if isinstance(params, dict) else {}),
+            **pymatting_params,
+        },
+    }
+
+
 def _known_b_route_for_web_matte(
     image: Image.Image,
     *,
@@ -5167,6 +5194,18 @@ def _shadow_mode_from_semantic_decision(
     return current_shadow_mode
 
 
+def _semantic_decision_requires_explicit_trimap(semantic_decision: dict[str, Any]) -> bool:
+    if not semantic_decision:
+        return False
+    policy = semantic_decision.get("policy")
+    if isinstance(policy, str) and policy == "auto_default" and len(semantic_decision) == 1:
+        return False
+    # Route-only auto-default execution should let the executor build the fresh
+    # Known-B trimap from the normalized image. Semantic ownership choices such
+    # as hole cut/keep still need the Analyze-provided trimap overlay contract.
+    return True
+
+
 def _known_b_execution_overrides_from_semantic_decision(semantic_decision: dict[str, Any]) -> dict[str, object]:
     overrides: dict[str, object] = {}
     trimap_mode = semantic_decision.get("pymatting_trimap_mode")
@@ -5332,6 +5371,10 @@ def _execute_matte_candidates_payload(
         pymatting_params = {**pymatting_params, **known_b_execution_params}
     pymatting_params.update(semantic_known_b_overrides)
     explicit_route_decision = _analysis_route_decision_payload(execution_contract)
+    explicit_route_decision = _merge_known_b_execution_params_into_route_decision(
+        explicit_route_decision,
+        pymatting_params,
+    )
     hint_mask = (
         _load_upload_image(request.corridorkey_hint_mask)
         if request.corridorkey_hint_mask is not None and not request.corridorkey_auto_mask
@@ -5341,16 +5384,25 @@ def _execute_matte_candidates_payload(
     remove_mask = _load_upload_image(request.user_remove_mask) if request.user_remove_mask is not None else None
     execution_request = request.execution_request_payload if isinstance(request.execution_request_payload, dict) else {}
     selected_candidate_id = str(execution_request.get("selected_candidate_id") or "auto_default")
-    explicit_trimap = _explicit_trimap_from_analysis(
-        request.analysis_payload,
-        selected_candidate_id=selected_candidate_id,
-        image_shape=np.asarray(image.convert("RGB"), dtype=np.uint8).shape[:2],
+    explicit_trimap = (
+        _explicit_trimap_from_analysis(
+            request.analysis_payload,
+            selected_candidate_id=selected_candidate_id,
+            image_shape=np.asarray(image.convert("RGB"), dtype=np.uint8).shape[:2],
+        )
+        if _semantic_decision_requires_explicit_trimap(semantic_decision_payload)
+        else None
     )
     server_started_at = time.perf_counter()
     try:
+        execution_backend = (
+            request.backend
+            if explicit_route_decision is not None
+            else _execute_backend_from_analysis(request.backend, execution_contract)
+        )
         result = _run_web_backend(
             image,
-            backend=_execute_backend_from_analysis(request.backend, execution_contract),
+            backend=execution_backend,
             shadow_mode=shadow_mode,
             corridorkey_gamma_space=request.corridorkey_gamma_space,
             corridorkey_despill_strength=request.corridorkey_despill_strength,
