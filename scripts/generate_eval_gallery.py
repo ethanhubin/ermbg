@@ -273,7 +273,7 @@ def _readme_block(readme_path: Path, asset_dir: Path, doc_path: Path, summary: d
             f"完整展示页见 [{doc_rel}]({doc_rel})。",
             "",
             "<details>",
-            "<summary>展开 88 个样本缩略图</summary>",
+            f"<summary>展开 {len(cases)} 个样本缩略图</summary>",
             "",
             table,
             "",

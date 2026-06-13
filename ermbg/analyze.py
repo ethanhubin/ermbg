@@ -2459,6 +2459,16 @@ def _semantic_plan_for_route(
     return semantic_input, effective_preprocess, regions, region_masks, candidates
 
 
+def _should_expand_route_semantics(route: dict[str, Any], *, default_route: dict[str, Any]) -> bool:
+    """Return whether Analyze should materialize semantic candidates for a route."""
+
+    if route.get("algorithm") == default_route.get("algorithm"):
+        return True
+    if default_route.get("algorithm") == "corridorkey" and route.get("algorithm") == "pymatting_known_b":
+        return False
+    return True
+
+
 def analyze_candidates(
     image_srgb: np.ndarray,
     *,
@@ -2491,6 +2501,8 @@ def analyze_candidates(
     for route_candidate in route_candidate_models_for_semantics:
         route_candidate_id = route_candidate.id
         route_payload = _route_payload(route_candidate)
+        if not _should_expand_route_semantics(route_payload, default_route=route):
+            continue
         semantic_input, route_preprocess, regions, region_masks, candidates = _semantic_plan_for_route(
             image_srgb,
             route=route_payload,

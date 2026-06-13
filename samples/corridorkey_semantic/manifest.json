@@ -25,16 +25,16 @@
     "phase2_next_goal": "Run full recognition/matting evaluation over the confirmed samples, inspect failures by sample family, then tune CorridorKey route selection and per-route parameters."
   },
   "category_counts": {
-    "button": 57,
-    "icon": 22,
+    "button": 60,
+    "icon": 23,
     "character": 9
   },
   "screen_counts": {
-    "green": 58,
+    "green": 62,
     "blue": 29,
     "neutral": 1
   },
-  "case_count": 88,
+  "case_count": 92,
   "default_screens": [
     "green",
     "blue"
@@ -1466,6 +1466,81 @@
       "source_batch": "manual_user_regression_20260604_button_003"
     },
     {
+      "id": "button_button_006_paw_plus_green",
+      "sample_id": "B058",
+      "category": "button",
+      "family": "manual_known_b_game_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          2,
+          179,
+          9
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_button_006_paw_plus_green/green.png",
+      "input": "samples/corridorkey_semantic/button/button_button_006_paw_plus_green/green.png",
+      "image_size": [
+        261,
+        98
+      ],
+      "subject_color_family": "yellow_green_cream",
+      "primary_ambiguity": "game UI button with yellow paw badge, cream body, green plus button, antialiased outline, and near-green known-B",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B058",
+      "source_batch": "manual_user_sample_20260614_button_006"
+    },
+    {
+      "id": "button_button_011_yellow_star_green",
+      "sample_id": "B059",
+      "category": "button",
+      "family": "manual_known_b_game_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          2,
+          179,
+          10
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_button_011_yellow_star_green/green.png",
+      "input": "samples/corridorkey_semantic/button/button_button_011_yellow_star_green/green.png",
+      "image_size": [
+        226,
+        96
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "game UI button with yellow star badge, yellow rounded body, antialiased outline, and near-green known-B",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B059",
+      "source_batch": "manual_user_sample_20260614_button_011"
+    },
+    {
+      "id": "button_button_002_checklist_green",
+      "sample_id": "B060",
+      "category": "button",
+      "family": "manual_known_b_game_button",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          2,
+          179,
+          9
+        ]
+      },
+      "green": "samples/corridorkey_semantic/button/button_button_002_checklist_green/green.png",
+      "input": "samples/corridorkey_semantic/button/button_button_002_checklist_green/green.png",
+      "image_size": [
+        215,
+        99
+      ],
+      "subject_color_family": "green_white_orange",
+      "primary_ambiguity": "game UI button with checklist clipboard icon, green rounded body, antialiased outline, and near-green known-B",
+      "target_route": "opaque_hard_ui",
+      "source_review_id": "B060",
+      "source_batch": "manual_user_sample_20260614_button_002"
+    },
+    {
       "id": "icon_icon_a01_hard_boundary_strong_outline",
       "sample_id": "I001",
       "category": "icon",
@@ -2014,6 +2089,31 @@
       "target_route": "pymatting_known_b_neutral_cartoon_review",
       "source_review_id": "ICON-NEUTRAL-001",
       "source_batch": "manual_user_sample_20260609"
+    },
+    {
+      "id": "icon_icon_029_yellow_star_green",
+      "sample_id": "I023",
+      "category": "icon",
+      "family": "manual_known_b_game_icon",
+      "screen": "green",
+      "backgrounds": {
+        "green": [
+          2,
+          199,
+          11
+        ]
+      },
+      "green": "samples/corridorkey_semantic/icon/icon_icon_029_yellow_star_green/green.png",
+      "input": "samples/corridorkey_semantic/icon/icon_icon_029_yellow_star_green/green.png",
+      "image_size": [
+        89,
+        91
+      ],
+      "subject_color_family": "yellow_orange",
+      "primary_ambiguity": "small yellow star game icon with antialiased outline and soft shadow on near-standard green known-B",
+      "target_route": "icon_mechanism_review",
+      "source_review_id": "ICON-029",
+      "source_batch": "manual_user_sample_20260614"
     },
     {
       "id": "character_char_a01_hair_hard_edge_glass_pendant_green",

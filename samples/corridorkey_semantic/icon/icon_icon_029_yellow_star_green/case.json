@@ -1,0 +1,25 @@
+{
+  "id": "icon_icon_029_yellow_star_green",
+  "sample_id": "I023",
+  "category": "icon",
+  "family": "manual_known_b_game_icon",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      2,
+      199,
+      11
+    ]
+  },
+  "green": "samples/corridorkey_semantic/icon/icon_icon_029_yellow_star_green/green.png",
+  "input": "samples/corridorkey_semantic/icon/icon_icon_029_yellow_star_green/green.png",
+  "image_size": [
+    89,
+    91
+  ],
+  "subject_color_family": "yellow_orange",
+  "primary_ambiguity": "small yellow star game icon with antialiased outline and soft shadow on near-standard green known-B",
+  "target_route": "icon_mechanism_review",
+  "source_review_id": "ICON-029",
+  "source_batch": "manual_user_sample_20260614"
+}

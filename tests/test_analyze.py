@@ -409,6 +409,7 @@ def test_analyze_corridorkey_screen_material_returns_semantic_candidates() -> No
         for candidate in result.candidates
         if candidate.route_candidate_id == "route_corridorkey"
     ]
+    assert len(corridorkey_candidates) == len(result.candidates)
     assert [candidate.id for candidate in corridorkey_candidates] == [
         "route_corridorkey__corridorkey_hint_000",
         "route_corridorkey__corridorkey_hint_016",
@@ -452,6 +453,7 @@ def test_analyze_corridorkey_glass_portal_exposes_core_and_gradient_candidates()
         for candidate in result.candidates
         if candidate.route_candidate_id == "route_corridorkey"
     ]
+    assert len(corridorkey_candidates) == len(result.candidates)
     assert [candidate.id for candidate in corridorkey_candidates] == [
         "route_corridorkey__corridorkey_hint_000",
         "route_corridorkey__corridorkey_hint_016",

@@ -1,0 +1,25 @@
+{
+  "id": "button_button_006_paw_plus_green",
+  "sample_id": "B058",
+  "category": "button",
+  "family": "manual_known_b_game_button",
+  "screen": "green",
+  "backgrounds": {
+    "green": [
+      2,
+      179,
+      9
+    ]
+  },
+  "green": "samples/corridorkey_semantic/button/button_button_006_paw_plus_green/green.png",
+  "input": "samples/corridorkey_semantic/button/button_button_006_paw_plus_green/green.png",
+  "image_size": [
+    261,
+    98
+  ],
+  "subject_color_family": "yellow_green_cream",
+  "primary_ambiguity": "game UI button with yellow paw badge, cream body, green plus button, antialiased outline, and near-green known-B",
+  "target_route": "opaque_hard_ui",
+  "source_review_id": "B058",
+  "source_batch": "manual_user_sample_20260614_button_006"
+}
