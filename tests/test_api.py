@@ -342,7 +342,7 @@ def test_pymatting_known_b_shadow_patch_extends_source_shadow_to_connected_scree
     assert float(np.median(shadow_alpha[residue])) > 0.15
 
 
-def test_known_b_unmix_physical_fallback_is_same_key_only():
+def test_known_b_unmix_physical_fallback_is_opt_in():
     import ermbg.api as api
 
     alpha = np.array([[0.10]], dtype=np.float32)
@@ -375,6 +375,34 @@ def test_known_b_unmix_physical_fallback_is_same_key_only():
     assert same_key_info["physical_fallback_enabled"] is True
     assert same_key_info["physical_repaired_pixels"] == 1
     assert same_key_alpha[0, 0] > standard_alpha[0, 0]
+
+
+def test_known_b_physical_fallback_policy_uses_route_owned_edge_cleanup():
+    import ermbg.api as api
+
+    edge_cleanup_route = {
+        "asset_kind": "button",
+        "execution_profile": "pymatting-hard-button",
+        "parameter_profile": "known_b_hard_button_standard",
+        "reasons": ["button_edge_cleanup_uses_known_b_pymatting"],
+    }
+    key_material_route = {
+        "asset_kind": "button",
+        "execution_profile": "pymatting-hard-button",
+        "parameter_profile": "known_b_hard_button_standard",
+        "reasons": ["button_key_color_material_uses_known_b_pymatting"],
+    }
+
+    edge_policy = api._known_b_physical_fallback_policy(edge_cleanup_route, trimap_mode="standard")
+    key_material_policy = api._known_b_physical_fallback_policy(key_material_route, trimap_mode="standard")
+    same_key_policy = api._known_b_physical_fallback_policy(None, trimap_mode="same_key_opaque_body_outline")
+
+    assert edge_policy["enabled"] is True
+    assert edge_policy["owner"] == "hard_button_edge_cleanup"
+    assert key_material_policy["enabled"] is False
+    assert key_material_policy["reason"] == "route did not request hard-button exterior cleanup"
+    assert same_key_policy["enabled"] is True
+    assert same_key_policy["owner"] == "same_key_opaque_body_outline"
 
 
 def test_known_b_hard_button_guard_cleans_exterior_subject_leaks_without_erasing_shadow():

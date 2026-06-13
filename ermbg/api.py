@@ -1068,6 +1068,10 @@ def _matte_image_pymatting_known_b(
             donor_foreground_linear = foreground_linear.copy()
             original_rgb_linear = ermbg_io.srgb_to_linear(rgb).astype(np.float32)
             donor_foreground_linear[proxy_subject_mask] = original_rgb_linear[proxy_subject_mask]
+        physical_fallback_policy = _known_b_physical_fallback_policy(
+            auto_route,
+            trimap_mode=requested_trimap_mode,
+        )
         alpha, foreground_linear, consistency_repair = _repair_known_b_unmix_consistency(
             alpha,
             foreground_linear,
@@ -1075,12 +1079,18 @@ def _matte_image_pymatting_known_b(
             B_lin=B_lin,
             solve=solve,
             donor_foreground_linear=donor_foreground_linear,
-            enable_physical_fallback=requested_trimap_mode == "same_key_opaque_body_outline",
+            enable_physical_fallback=bool(physical_fallback_policy["enabled"]),
         )
+        consistency_repair["physical_fallback_policy"] = physical_fallback_policy
         foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
         foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
         pm_debug = pm.debug
         timings["foreground_unmix_repair_sec"] = time.perf_counter() - step_started
+    if "physical_fallback_policy" not in consistency_repair:
+        consistency_repair["physical_fallback_policy"] = _known_b_physical_fallback_policy(
+            auto_route,
+            trimap_mode=requested_trimap_mode,
+        )
 
     step_started = time.perf_counter()
     pymatting_alpha_before_inner_floor = alpha.copy()
@@ -1112,12 +1122,18 @@ def _matte_image_pymatting_known_b(
         }
     subject_alpha = alpha
     subject_foreground_srgb = foreground_srgb
-    # The hard-button exterior cleanup is a compensating guard for the physical
-    # min-alpha repair: when that repair has not actually lifted pixels, standard
-    # Known-B should keep the PyMatting/ShadowPatch result untouched.
     hard_button_profile_enabled = _hard_button_profile_enabled(auto_route, trimap_mode=requested_trimap_mode)
+    physical_fallback_policy = consistency_repair.get("physical_fallback_policy")
+    hard_button_cleanup_requested = (
+        isinstance(physical_fallback_policy, dict)
+        and physical_fallback_policy.get("owner") == "hard_button_edge_cleanup"
+    )
+    # The hard-button exterior cleanup is a compensating guard for the physical
+    # min-alpha repair. It is only valid for routes whose router evidence already
+    # requested edge cleanup; key-color material icons keep the donor-only solve.
     hard_button_guard_enabled = (
         hard_button_profile_enabled
+        and hard_button_cleanup_requested
         and int(consistency_repair.get("physical_repaired_pixels") or 0) > 0
     )
     subject_alpha, subject_foreground_srgb, hard_button_subject_leak_guard_info = (
@@ -1132,7 +1148,11 @@ def _matte_image_pymatting_known_b(
         )
     )
     if hard_button_profile_enabled and not hard_button_guard_enabled:
-        hard_button_subject_leak_guard_info["reason"] = "physical min-alpha repair did not run"
+        hard_button_subject_leak_guard_info["reason"] = (
+            str(physical_fallback_policy.get("reason") or "")
+            if isinstance(physical_fallback_policy, dict) and not hard_button_cleanup_requested
+            else "physical min-alpha repair did not run"
+        )
     shadow_patch_rgb = processing_rgb
     shadow_patch_foreground_srgb = subject_foreground_srgb
     shadow_patch_source_info = {
@@ -1247,7 +1267,11 @@ def _matte_image_pymatting_known_b(
         enabled=hard_button_guard_enabled,
     )
     if hard_button_profile_enabled and not hard_button_guard_enabled:
-        known_b_unknown_residue_cleanup_info["reason"] = "physical min-alpha repair did not run"
+        known_b_unknown_residue_cleanup_info["reason"] = (
+            str(physical_fallback_policy.get("reason") or "")
+            if isinstance(physical_fallback_policy, dict) and not hard_button_cleanup_requested
+            else "physical min-alpha repair did not run"
+        )
     timings["known_b_residue_cleanup_sec"] = time.perf_counter() - cleanup_started
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
@@ -1823,6 +1847,49 @@ def _hard_button_profile_enabled(auto_route: dict[str, Any] | None, *, trimap_mo
         or parameter_profile == "known_b_hard_button_standard"
         or (asset_kind == "button" and "hard_button" in parameter_profile)
     )
+
+
+def _known_b_physical_fallback_policy(
+    auto_route: dict[str, Any] | None,
+    *,
+    trimap_mode: str,
+) -> dict[str, Any]:
+    """Return the route-owned policy for no-donor physical alpha fallback.
+
+    The fallback has two narrow owners:
+    same-key opaque ownership repair, and hard-button exterior cleanup when the
+    router explicitly selected the edge-cleanup profile. Key-color material
+    icons can also route through ``pymatting-hard-button``, but they must not
+    inherit the cleanup trigger because their near-B antialiasing is material.
+    """
+
+    if str(trimap_mode or "standard") == "same_key_opaque_body_outline":
+        return {
+            "enabled": True,
+            "owner": "same_key_opaque_body_outline",
+            "reason": "",
+        }
+    if not _hard_button_profile_enabled(auto_route, trimap_mode=trimap_mode):
+        return {
+            "enabled": False,
+            "owner": "",
+            "reason": "not hard-button standard profile",
+        }
+    reasons = auto_route.get("reasons") if isinstance(auto_route, dict) else None
+    route_reasons = [str(item) for item in reasons] if isinstance(reasons, list) else []
+    if "button_edge_cleanup_uses_known_b_pymatting" in route_reasons:
+        return {
+            "enabled": True,
+            "owner": "hard_button_edge_cleanup",
+            "reason": "",
+            "route_reason": "button_edge_cleanup_uses_known_b_pymatting",
+        }
+    return {
+        "enabled": False,
+        "owner": "",
+        "reason": "route did not request hard-button exterior cleanup",
+        "route_reasons": route_reasons,
+    }
 
 
 def _guard_known_b_hard_button_exterior_subject_leaks(
