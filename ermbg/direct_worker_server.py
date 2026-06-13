@@ -390,6 +390,21 @@ def _apply_execution_backend_override(
     )
 
 
+def _execution_backend_matches_decision(decision: RouteDecision, execution_backend: str) -> bool:
+    requested = execution_backend.strip().lower()
+    if requested in {"", "auto", "direct-worker"}:
+        return True
+    backend = str(decision.backend or decision.route or "").strip().lower()
+    route = str(decision.route or "").strip().lower()
+    if requested in {"direct-pymatting-known-b", "pymatting-known-b", "pymatting_known_b"}:
+        return backend in {"pymatting_known_b", "pymatting_fallback"} or route == "pymatting_known_b"
+    if requested == "direct-corridorkey":
+        return backend == "corridorkey" or route == "corridorkey"
+    if requested == "direct-known-bg-glow":
+        return backend == "known_bg_glow" or route == "known_bg_glow"
+    return False
+
+
 def _with_corridorkey_params(decision: RouteDecision, params: dict[str, Any]) -> RouteDecision:
     if not params:
         return decision
@@ -848,12 +863,13 @@ async def matte_endpoint(
                 fallback_bg_color=bg,
             )
             decision = prepared.decision
-        decision = _apply_execution_backend_override(
-            decision,
-            execution_backend,
-            rgb=prepared.rgb,
-            fallback_bg_color=bg,
-        )
+        if route_decision_payload is None or not _execution_backend_matches_decision(decision, execution_backend):
+            decision = _apply_execution_backend_override(
+                decision,
+                execution_backend,
+                rgb=prepared.rgb,
+                fallback_bg_color=bg,
+            )
         decision = _with_known_bg_glow_params(
             decision,
             known_bg_glow_material_strength=known_bg_glow_material_strength,

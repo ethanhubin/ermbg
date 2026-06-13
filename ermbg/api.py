@@ -1111,6 +1111,18 @@ def _matte_image_pymatting_known_b(
         }
     subject_alpha = alpha
     subject_foreground_srgb = foreground_srgb
+    hard_button_guard_enabled = _hard_button_profile_enabled(auto_route, trimap_mode=requested_trimap_mode)
+    subject_alpha, subject_foreground_srgb, hard_button_subject_leak_guard_info = (
+        _guard_known_b_hard_button_exterior_subject_leaks(
+            processing_rgb,
+            subject_alpha=subject_alpha,
+            subject_foreground_srgb=subject_foreground_srgb,
+            background_color=selected_bg,
+            trimap=trimap,
+            trimap_info=trimap_info,
+            enabled=hard_button_guard_enabled,
+        )
+    )
     shadow_patch_rgb = processing_rgb
     shadow_patch_foreground_srgb = subject_foreground_srgb
     shadow_patch_source_info = {
@@ -1202,6 +1214,29 @@ def _matte_image_pymatting_known_b(
         rgba_rgb_srgb = rgba_rgb_srgb.copy()
         subject_foreground_srgb[proxy_restore_after_shadow] = rgb[proxy_restore_after_shadow]
         rgba_rgb_srgb[proxy_restore_after_shadow] = rgb[proxy_restore_after_shadow]
+    cleanup_started = time.perf_counter()
+    (
+        alpha,
+        rgba_rgb_srgb,
+        subject_alpha,
+        subject_foreground_srgb,
+        shadow_alpha,
+        shadow_alpha_physical,
+        known_b_unknown_residue_cleanup_info,
+    ) = _cleanup_known_b_unknown_screen_residue(
+        shadow_patch_rgb,
+        alpha=alpha,
+        rgba_rgb_srgb=rgba_rgb_srgb,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground_srgb,
+        shadow_alpha=shadow_alpha,
+        shadow_alpha_physical=shadow_alpha_physical,
+        background_color=selected_bg,
+        trimap=trimap,
+        trimap_info=trimap_info,
+        enabled=hard_button_guard_enabled,
+    )
+    timings["known_b_residue_cleanup_sec"] = time.perf_counter() - cleanup_started
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
     timings["compose_sec"] = time.perf_counter() - step_started
@@ -1253,6 +1288,8 @@ def _matte_image_pymatting_known_b(
                 "same_key_inner_opaque_floor": same_key_inner_floor_info,
                 "same_key_color_restore": same_key_color_restore_info,
                 "same_key_opaque_edge_solver": same_key_opaque_edge_solver_info,
+                "hard_button_exterior_subject_leak_guard": hard_button_subject_leak_guard_info,
+                "known_b_unknown_residue_cleanup": known_b_unknown_residue_cleanup_info,
                 "timings": timings,
             },
         },
@@ -1377,6 +1414,8 @@ def _matte_image_pymatting_known_b(
             "same_key_inner_opaque_floor": same_key_inner_floor_info,
             "same_key_color_restore": same_key_color_restore_info,
             "same_key_opaque_edge_solver": same_key_opaque_edge_solver_info,
+            "hard_button_exterior_subject_leak_guard": hard_button_subject_leak_guard_info,
+            "known_b_unknown_residue_cleanup": known_b_unknown_residue_cleanup_info,
         },
         "shadow": shadow_info,
         "timings": timings,
@@ -1705,6 +1744,272 @@ def _repair_known_b_alpha_pinholes(
         "components": components[:12],
         "omitted_components": max(0, len(components) - 12),
     }
+
+
+def _known_b_oklab_background_distance(
+    image_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+) -> np.ndarray:
+    from .colorspace import oklab_distance, srgb_to_oklab
+
+    bg = np.asarray(background_color, dtype=np.uint8).reshape(1, 1, 3)
+    return oklab_distance(srgb_to_oklab(image_srgb), srgb_to_oklab(bg)[0, 0]).astype(np.float32)
+
+
+def _known_b_trimap_scale_params(trimap_info: dict[str, Any]) -> dict[str, float]:
+    bg_threshold = float(trimap_info.get("bg_threshold_effective") or trimap_info.get("bg_threshold") or 3.5)
+    fg_threshold = float(trimap_info.get("fg_threshold_effective") or trimap_info.get("fg_threshold") or 24.0)
+    boundary_px = float(trimap_info.get("boundary_band_px_effective") or trimap_info.get("boundary_band_px") or 2.0)
+    foreground_seed_inset_px = float(trimap_info.get("foreground_seed_inset_px") or max(2.0, boundary_px + 1.0))
+    fg_threshold = max(fg_threshold, bg_threshold + 1.0)
+    return {
+        "bg_threshold": bg_threshold,
+        "fg_threshold": fg_threshold,
+        "boundary_px": max(0.0, boundary_px),
+        "foreground_seed_inset_px": max(0.0, foreground_seed_inset_px),
+    }
+
+
+def _known_b_screen_dominant_mask(
+    rgb_srgb: np.ndarray,
+    *,
+    background_color: tuple[int, int, int],
+    alpha: np.ndarray | None = None,
+) -> np.ndarray:
+    bg = np.asarray(background_color, dtype=np.float32).reshape(3)
+    dominant = int(np.argmax(bg))
+    others = [idx for idx in range(3) if idx != dominant]
+    if float(bg[dominant]) < 64.0 or float(bg[dominant] - np.max(bg[others])) < 48.0:
+        return np.zeros(rgb_srgb.shape[:2], dtype=bool)
+    rgb = rgb_srgb.astype(np.float32)
+    other_max = np.max(rgb[..., others], axis=2)
+    screen_like = (
+        (rgb[..., dominant] > other_max + max(6.0, float(bg[dominant]) * 0.03))
+        & (rgb[..., dominant] >= max(16.0, float(bg[dominant]) * 0.10))
+        & (rgb[..., dominant] <= min(255.0, float(bg[dominant]) + 24.0))
+        & (other_max <= max(40.0, float(np.max(bg[others])) + 40.0))
+    )
+    if alpha is not None:
+        screen_like &= np.asarray(alpha, dtype=np.float32) > (1.0 / 255.0)
+    return screen_like
+
+
+def _hard_button_profile_enabled(auto_route: dict[str, Any] | None, *, trimap_mode: str) -> bool:
+    if str(trimap_mode or "standard") != "standard":
+        return False
+    if not isinstance(auto_route, dict):
+        return False
+    execution_profile = str(auto_route.get("execution_profile") or "")
+    parameter_profile = str(auto_route.get("parameter_profile") or "")
+    asset_kind = str(auto_route.get("asset_kind") or "")
+    return (
+        execution_profile == "pymatting-hard-button"
+        or parameter_profile == "known_b_hard_button_standard"
+        or (asset_kind == "button" and "hard_button" in parameter_profile)
+    )
+
+
+def _guard_known_b_hard_button_exterior_subject_leaks(
+    image_srgb: np.ndarray,
+    *,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    background_color: tuple[int, int, int],
+    trimap: Trimap,
+    trimap_info: dict[str, Any],
+    enabled: bool,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Demote hard-button subject alpha that escapes the measured subject envelope.
+
+    In the hard button recipe, foreground material is constrained by the
+    BG-seed outline. Unknown outside that outline can be AA or shadow, but it
+    should not become high-confidence subject. Demoting those leaks before
+    ShadowPatch lets source-proven scalar darkening become a shadow layer and
+    lets later residue cleanup erase plain known-B background.
+    """
+
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    foreground = subject_foreground_srgb.astype(np.uint8, copy=True)
+    info: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "method": "hard_button_unknown_subject_envelope_guard",
+        "candidate_pixels": 0,
+        "demoted_pixels": 0,
+        "source_near_background_pixels": 0,
+        "source_shadow_like_pixels": 0,
+        "reason": "",
+    }
+    if not enabled:
+        info["reason"] = "not hard-button standard profile"
+        return subject, foreground, info
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("image_srgb must be uint8")
+    if subject.shape != trimap.shape:
+        raise ValueError("subject_alpha shape must match trimap")
+    if not bool(trimap.sure_fg.any()) or not bool(trimap.unknown.any()):
+        info["reason"] = "missing sure-FG or unknown trimap domain"
+        return subject, foreground, info
+
+    scales = _known_b_trimap_scale_params(trimap_info)
+    dist_to_core = cv2.distanceTransform((~trimap.sure_fg).astype(np.uint8), cv2.DIST_L2, 3).astype(np.float32)
+    # The foreground seed is deliberately inset from the true button outline.
+    # Allow that measured inset plus a small AA allowance; farther subject
+    # alpha is outside the button material envelope and must be re-proved as
+    # subject rather than inherited from the PyMatting solve.
+    allowed_edge_px = float(
+        max(
+            2.0,
+            min(
+                8.0,
+                scales["foreground_seed_inset_px"] + 0.5,
+            ),
+        )
+    )
+    exterior_unknown = trimap.unknown & (dist_to_core > allowed_edge_px)
+    subject_present = subject >= 0.25
+    high_subject = subject >= 0.95
+    if not bool((exterior_unknown & subject_present).any()):
+        info.update(
+            {
+                "reason": "",
+                "allowed_edge_px": allowed_edge_px,
+                "exterior_unknown_pixels": int(exterior_unknown.sum()),
+            }
+        )
+        return subject, foreground, info
+
+    distance = _known_b_oklab_background_distance(image_srgb, background_color)
+    near_bg_limit = float(min(scales["fg_threshold"] - 1.0, scales["bg_threshold"] + max(2.0, scales["boundary_px"] * 2.0)))
+    near_bg_limit = max(scales["bg_threshold"] + 0.5, near_bg_limit)
+    source_near_bg = distance <= near_bg_limit
+
+    source_shadow = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    bg = np.asarray(background_color, dtype=np.float32).reshape(1, 1, 3)
+    source_shadow_replay = (1.0 - source_shadow[..., None]) * bg
+    source_shadow_error = np.mean(np.abs(source_shadow_replay - image_srgb.astype(np.float32)), axis=2)
+    source_shadow_like = (source_shadow >= (6.0 / 255.0)) & (source_shadow_error < 8.0)
+
+    near_bg_leak = high_subject & source_near_bg
+    shadow_like_leak = subject_present & source_shadow_like
+    candidate = exterior_unknown & (near_bg_leak | shadow_like_leak)
+    if bool(candidate.any()):
+        subject = subject.copy()
+        foreground = foreground.copy()
+        subject[candidate] = 0.0
+        foreground[candidate] = 0
+
+    info.update(
+        {
+            "allowed_edge_px": allowed_edge_px,
+            "exterior_unknown_pixels": int(exterior_unknown.sum()),
+            "candidate_pixels": int((exterior_unknown & subject_present).sum()),
+            "demoted_pixels": int(candidate.sum()),
+            "source_near_background_pixels": int((candidate & source_near_bg).sum()),
+            "source_shadow_like_pixels": int((candidate & source_shadow_like).sum()),
+            "high_subject_pixels": int((exterior_unknown & high_subject).sum()),
+            "subject_present_threshold": 0.25,
+            "high_subject_threshold": 0.95,
+            "near_background_distance_limit": near_bg_limit,
+            "source_shadow_min_alpha": float(6.0 / 255.0),
+            "source_shadow_max_error_u8": 8.0,
+        }
+    )
+    return subject, foreground, info
+
+
+def _cleanup_known_b_unknown_screen_residue(
+    image_srgb: np.ndarray,
+    *,
+    alpha: np.ndarray,
+    rgba_rgb_srgb: np.ndarray,
+    subject_alpha: np.ndarray,
+    subject_foreground_srgb: np.ndarray,
+    shadow_alpha: np.ndarray,
+    shadow_alpha_physical: np.ndarray,
+    background_color: tuple[int, int, int],
+    trimap: Trimap,
+    trimap_info: dict[str, Any],
+    enabled: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Clear screen-colored known-B residue left in the unknown domain."""
+
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+    rgba_rgb = rgba_rgb_srgb.astype(np.uint8, copy=True)
+    subject = np.clip(subject_alpha.astype(np.float32), 0.0, 1.0)
+    subject_fg = subject_foreground_srgb.astype(np.uint8, copy=True)
+    shadow = np.clip(shadow_alpha.astype(np.float32), 0.0, 1.0)
+    shadow_physical = np.clip(shadow_alpha_physical.astype(np.float32), 0.0, 1.0)
+    info: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "method": "known_b_unknown_source_background_residue_cleanup",
+        "candidate_pixels": 0,
+        "cleared_pixels": 0,
+        "protected_shadow_pixels": 0,
+        "protected_subject_edge_pixels": 0,
+        "reason": "",
+    }
+    if not enabled:
+        info["reason"] = "not hard-button standard profile"
+        return a, rgba_rgb, subject, subject_fg, shadow, shadow_physical, info
+    if image_srgb.dtype != np.uint8:
+        raise ValueError("image_srgb must be uint8")
+    if a.shape != trimap.shape:
+        raise ValueError("alpha shape must match trimap")
+    if not bool(trimap.unknown.any()) or not bool(trimap.sure_fg.any()):
+        info["reason"] = "missing sure-FG or unknown trimap domain"
+        return a, rgba_rgb, subject, subject_fg, shadow, shadow_physical, info
+
+    scales = _known_b_trimap_scale_params(trimap_info)
+    distance = _known_b_oklab_background_distance(image_srgb, background_color)
+    near_bg_limit = float(min(scales["fg_threshold"] - 1.0, scales["bg_threshold"] + max(2.0, scales["boundary_px"] * 2.0)))
+    near_bg_limit = max(scales["bg_threshold"] + 0.5, near_bg_limit)
+    source_near_bg = distance <= near_bg_limit
+
+    source_shadow = _known_bg_display_shadow_alpha(image_srgb, background_color)
+    weak_source_shadow = source_shadow <= (40.0 / 255.0)
+    screen_like_output = _known_b_screen_dominant_mask(rgba_rgb, background_color=background_color, alpha=a)
+    dist_to_core = cv2.distanceTransform((~trimap.sure_fg).astype(np.uint8), cv2.DIST_L2, 3).astype(np.float32)
+    edge_protect_px = float(max(2.0, min(4.0, scales["boundary_px"] + 0.5)))
+    protected_subject_edge = (dist_to_core <= edge_protect_px) & (subject > (1.0 / 255.0))
+    protected_shadow = shadow > (1.0 / 255.0)
+    candidate = (
+        trimap.unknown
+        & (a > (1.0 / 255.0))
+        & screen_like_output
+        & source_near_bg
+        & weak_source_shadow
+        & ~protected_shadow
+        & ~protected_subject_edge
+    )
+    raw_screen_residue = trimap.unknown & (a > (1.0 / 255.0)) & screen_like_output
+    if bool(candidate.any()):
+        a = a.copy()
+        rgba_rgb = rgba_rgb.copy()
+        subject = subject.copy()
+        subject_fg = subject_fg.copy()
+        shadow = shadow.copy()
+        shadow_physical = shadow_physical.copy()
+        a[candidate] = 0.0
+        rgba_rgb[candidate] = 0
+        subject[candidate] = 0.0
+        subject_fg[candidate] = 0
+        shadow[candidate] = 0.0
+        shadow_physical[candidate] = 0.0
+
+    info.update(
+        {
+            "candidate_pixels": int(raw_screen_residue.sum()),
+            "cleared_pixels": int(candidate.sum()),
+            "source_near_background_pixels": int((trimap.unknown & source_near_bg).sum()),
+            "screen_like_output_pixels": int((trimap.unknown & screen_like_output).sum()),
+            "protected_shadow_pixels": int((trimap.unknown & protected_shadow & screen_like_output).sum()),
+            "protected_subject_edge_pixels": int((trimap.unknown & protected_subject_edge & screen_like_output).sum()),
+            "near_background_distance_limit": near_bg_limit,
+            "weak_source_shadow_max_alpha": float(40.0 / 255.0),
+            "edge_protect_px": edge_protect_px,
+        }
+    )
+    return a, rgba_rgb, subject, subject_fg, shadow, shadow_physical, info
 
 
 def _pymatting_known_b_shadow_patch(

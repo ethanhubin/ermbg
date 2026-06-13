@@ -310,6 +310,63 @@ def test_direct_worker_server_matte_endpoint_consumes_explicit_route_decision(mo
     assert payload["execution_backend"] == "direct-pymatting-known-b"
 
 
+def test_direct_worker_server_matching_fixed_backend_preserves_route_profile(monkeypatch):
+    rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
+    captured: dict[str, object] = {}
+
+    def fail_classify(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("execute stage must not classify when route_decision is provided")
+
+    def fake_run(prepared, **kwargs):
+        del kwargs
+        captured["decision"] = prepared.decision
+        return _result(prepared.rgb, execution_profile=prepared.decision.params["execution_profile"])
+
+    monkeypatch.setattr(server, "classify_route", fail_classify)
+    monkeypatch.setattr(server, "_run_prepared_main", fake_run)
+
+    route_decision = {
+        "route": "pymatting_known_b",
+        "algorithm": "pymatting_known_b",
+        "backend": "pymatting_known_b",
+        "asset_kind": "button",
+        "execution_profile": "pymatting-hard-button",
+        "parameter_profile": "known_b_hard_button_standard",
+        "confidence": 0.93,
+        "reasons": ["analyze_contract"],
+        "params": {
+            "execution_profile": "pymatting-hard-button",
+            "parameter_profile": "known_b_hard_button_standard",
+            "pymatting_bg_source": "custom",
+            "pymatting_bg_color": [0, 200, 0],
+        },
+    }
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/matte",
+        files={"image": ("case.png", _png_bytes(rgb), "image/png")},
+        data={
+            "include_image": "false",
+            "route_decision": json.dumps(route_decision),
+            "execution_backend": "direct-pymatting-known-b",
+        },
+    )
+
+    assert response.status_code == 200
+    decision = captured["decision"]
+    assert isinstance(decision, RouteDecision)
+    assert decision.route == "pymatting_known_b"
+    assert decision.backend == "pymatting_known_b"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.params["parameter_profile"] == "known_b_hard_button_standard"
+    assert "manual_pymatting_known_b_algorithm" not in decision.reasons
+    payload = response.json()
+    assert payload["execution_backend"] == "direct-pymatting-known-b"
+    assert payload["execution_profile"] == "pymatting-hard-button"
+
+
 def test_direct_worker_server_explicit_route_decision_can_still_force_backend(monkeypatch):
     rgb = np.full((2, 3, 3), (0, 200, 0), dtype=np.uint8)
     captured: dict[str, object] = {}

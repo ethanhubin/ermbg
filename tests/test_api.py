@@ -342,6 +342,94 @@ def test_pymatting_known_b_shadow_patch_extends_source_shadow_to_connected_scree
     assert float(np.median(shadow_alpha[residue])) > 0.15
 
 
+def test_known_b_hard_button_guard_cleans_exterior_subject_leaks_without_erasing_shadow():
+    import ermbg.api as api
+    from ermbg.types import Trimap
+
+    bg = (0, 200, 0)
+    image = np.full((36, 48, 3), bg, dtype=np.uint8)
+    sure_fg = np.zeros((36, 48), dtype=bool)
+    sure_fg[10:18, 12:36] = True
+    unknown = np.zeros((36, 48), dtype=bool)
+    unknown[6:22, 8:40] = True
+    unknown[24:28, 14:34] = True
+    unknown &= ~sure_fg
+    trimap = Trimap(sure_fg=sure_fg, sure_bg=~(sure_fg | unknown), unknown=unknown)
+    trimap_info = {
+        "bg_threshold_effective": 3.5,
+        "fg_threshold_effective": 24.0,
+        "boundary_band_px_effective": 2,
+        "foreground_seed_inset_px": 2,
+    }
+
+    near_bg_leak = (26, 22)
+    shadow_leak = (25, 18)
+    shadow_protected = (26, 26)
+    image[near_bg_leak] = (0, 198, 0)
+    image[shadow_leak] = (0, 140, 0)
+    image[shadow_protected] = (0, 198, 0)
+
+    subject_alpha = np.zeros((36, 48), dtype=np.float32)
+    subject_alpha[sure_fg] = 1.0
+    subject_alpha[near_bg_leak] = 1.0
+    subject_alpha[shadow_leak] = 0.60
+    subject_foreground = np.zeros((36, 48, 3), dtype=np.uint8)
+    subject_foreground[sure_fg] = (220, 120, 10)
+    subject_foreground[near_bg_leak] = (0, 198, 0)
+    subject_foreground[shadow_leak] = (0, 120, 0)
+
+    guarded_alpha, guarded_foreground, guard_info = api._guard_known_b_hard_button_exterior_subject_leaks(
+        image,
+        subject_alpha=subject_alpha,
+        subject_foreground_srgb=subject_foreground,
+        background_color=bg,
+        trimap=trimap,
+        trimap_info=trimap_info,
+        enabled=True,
+    )
+
+    assert guard_info["enabled"] is True
+    assert guard_info["demoted_pixels"] >= 2
+    assert guarded_alpha[near_bg_leak] == 0.0
+    assert guarded_alpha[shadow_leak] == 0.0
+    assert tuple(guarded_foreground[near_bg_leak]) == (0, 0, 0)
+
+    final_alpha = guarded_alpha.copy()
+    final_rgb = guarded_foreground.copy()
+    final_alpha[near_bg_leak] = 0.20
+    final_rgb[near_bg_leak] = (0, 198, 0)
+    final_alpha[shadow_protected] = 0.20
+    final_rgb[shadow_protected] = (0, 198, 0)
+    shadow_alpha = np.zeros((36, 48), dtype=np.float32)
+    shadow_alpha[shadow_protected] = 0.10
+    shadow_physical = shadow_alpha.copy()
+
+    cleaned_alpha, cleaned_rgb, cleaned_subject, _cleaned_fg, cleaned_shadow, _cleaned_physical, cleanup_info = (
+        api._cleanup_known_b_unknown_screen_residue(
+            image,
+            alpha=final_alpha,
+            rgba_rgb_srgb=final_rgb,
+            subject_alpha=guarded_alpha,
+            subject_foreground_srgb=guarded_foreground,
+            shadow_alpha=shadow_alpha,
+            shadow_alpha_physical=shadow_physical,
+            background_color=bg,
+            trimap=trimap,
+            trimap_info=trimap_info,
+            enabled=True,
+        )
+    )
+
+    assert cleanup_info["enabled"] is True
+    assert cleanup_info["cleared_pixels"] >= 1
+    assert cleanup_info["protected_shadow_pixels"] >= 1
+    assert cleaned_alpha[near_bg_leak] == 0.0
+    assert tuple(cleaned_rgb[near_bg_leak]) == (0, 0, 0)
+    assert cleaned_subject[near_bg_leak] == 0.0
+    assert cleaned_alpha[shadow_protected] > 0.0
+    assert cleaned_shadow[shadow_protected] > 0.0
+
+
 def test_pymatting_known_b_shadow_patch_arbitrates_subject_edge_aa_before_shadow():
     path = (
         Path(__file__).resolve().parents[1]
