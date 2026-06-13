@@ -337,6 +337,29 @@ def test_analyze_same_key_button_returns_opaque_and_corridorkey_candidates() -> 
     assert result.candidates[1].decision["corridorkey_hint_value"] == 0.32
 
 
+def test_analyze_same_key_icon_closed_outline_keeps_internal_texture_out_of_unknown() -> None:
+    image = np.asarray(
+        Image.open(
+            PROJECT_ROOT
+            / "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    result = analyze_candidates(image)
+
+    assert result.status == "needs_decision"
+    assert result.default_route_candidate_id == "route_pymatting_known_b_same_key_opaque"
+    assert result.candidates[0].decision["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    trimap_ref = result.candidates[0].preview["assets"]["trimap"]
+    trimap = _decode_preview_luma(result.preview_assets[trimap_ref]["data_url"])
+    unknown = (trimap >= 64) & (trimap <= 191)
+    subject_domain = trimap > 32
+    assert float(np.count_nonzero(unknown)) / float(np.count_nonzero(subject_domain)) < 0.16
+    distance_to_exterior = cv2.distanceTransform(subject_domain.astype(np.uint8), cv2.DIST_L2, 3)
+    assert np.count_nonzero(unknown & (distance_to_exterior >= 6.0)) == 0
+
+
 def test_analyze_b001_no_shadow_button_has_stable_boundary_trimap() -> None:
     image = np.asarray(
         Image.open(

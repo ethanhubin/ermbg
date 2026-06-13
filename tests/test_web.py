@@ -2047,6 +2047,92 @@ def test_execute_candidate_endpoint_skips_auto_default_preview_trimap(monkeypatc
     assert isinstance(captured["route_decision"], dict)
 
 
+def test_execute_candidate_endpoint_skips_same_key_opaque_preview_trimap(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+    trimap = np.full((16, 16), 128, dtype=np.uint8)
+    decision = {
+        "policy": "same_key_opaque_outline",
+        "button_body_policy": "opaque_subject",
+        "pymatting_trimap_mode": "same_key_opaque_body_outline",
+        "pymatting_unknown_grow_px": 0,
+    }
+    route_decision = {
+        "id": "route_pymatting_known_b_same_key_opaque",
+        "algorithm": "pymatting_known_b",
+        "route": "pymatting_known_b",
+        "backend": "pymatting_known_b",
+        "params": {"pymatting_trimap_mode": "same_key_opaque_body_outline"},
+    }
+    analysis = {
+        "status": "needs_decision",
+        "analysis_id": "analysis_same_key_trimap",
+        "default_route_candidate_id": "route_pymatting_known_b_same_key_opaque",
+        "default_candidate_id": "same_key_opaque",
+        "route_candidates": [route_decision],
+        "preview_assets": {
+            "candidate:same_key_opaque:trimap": {
+                "kind": "trimap",
+                "execution_role": "pymatting_explicit_trimap",
+                "data_url": _gray_png_data_url(trimap),
+            },
+        },
+        "candidates": [
+            {
+                "id": "same_key_opaque",
+                "route_candidate_id": "route_pymatting_known_b_same_key_opaque",
+                "decision": decision,
+                "preview": {"assets": {"trimap": "candidate:same_key_opaque:trimap"}},
+            }
+        ],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "same_key_opaque",
+            "semantic_decision": json.dumps(decision),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    assert "pymatting_explicit_trimap" not in captured
+    captured_route = captured["route_decision"]
+    assert isinstance(captured_route, dict)
+    assert captured_route["route"] == "pymatting_known_b"
+    assert captured_route["params"]["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+
+
 def test_execute_candidate_endpoint_passes_analysis_route_decision_to_direct_worker(monkeypatch):
     captured: dict[str, object] = {}
 

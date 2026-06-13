@@ -23,6 +23,45 @@ def _load_script_module():
     return module
 
 
+def _gray_png_data_url(gray: np.ndarray) -> str:
+    buf = io.BytesIO()
+    Image.fromarray(gray.astype(np.uint8), mode="L").save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_game_eval_skips_same_key_opaque_preview_trimap():
+    module = _load_script_module()
+    trimap = np.full((8, 10), 128, dtype=np.uint8)
+    candidate = {
+        "id": "same_key_opaque",
+        "route_candidate_id": "route_pymatting_known_b_same_key_opaque",
+        "decision": {
+            "policy": "same_key_opaque_outline",
+            "button_body_policy": "opaque_subject",
+            "pymatting_trimap_mode": "same_key_opaque_body_outline",
+            "pymatting_unknown_grow_px": 0,
+        },
+        "preview": {"assets": {"trimap": "candidate:same_key_opaque:trimap"}},
+    }
+    analysis = {
+        "route_candidates": [
+            {
+                "id": "route_pymatting_known_b_same_key_opaque",
+                "algorithm": "pymatting_known_b",
+            }
+        ],
+        "preview_assets": {
+            "candidate:same_key_opaque:trimap": {
+                "kind": "trimap",
+                "execution_role": "pymatting_explicit_trimap",
+                "data_url": _gray_png_data_url(trimap),
+            }
+        },
+    }
+
+    assert module._candidate_explicit_trimap(analysis, candidate, trimap.shape) is None
+
+
 def test_game_eval_direct_worker_writes_standard_outputs(monkeypatch, tmp_path):
     module = _load_script_module()
     monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)

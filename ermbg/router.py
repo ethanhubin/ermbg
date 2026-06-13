@@ -857,6 +857,16 @@ def _opaque_known_b_model_evidence(ck_analysis: Any) -> tuple[bool, dict[str, An
     }
 
 
+def _same_key_outline_internal_clean_bg_pixels(outline_info: dict[str, Any]) -> int:
+    holes = outline_info.get("internal_clean_bg_holes")
+    if not isinstance(holes, dict):
+        return 0
+    try:
+        return int(holes.get("pixels") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _fine_detail_composite_evidence(
     image_srgb: np.ndarray,
     background_color: tuple[int, int, int],
@@ -1216,17 +1226,53 @@ def build_route_candidates(
                 "accepted": False,
                 "reason": f"same_key_outline_probe_failed: {exc}",
             }
-        same_key_opaque_button = bool(
-            opaque_known_b_info.get("same_key_plateau", False)
-            and same_key_opaque_button_outline.get("accepted", False)
+        same_key_outline_accepted = bool(same_key_opaque_button_outline.get("accepted", False))
+        same_key_plateau = bool(opaque_known_b_info.get("same_key_plateau", False))
+        same_key_plateau_confidence = float(
+            opaque_known_b_info.get("same_key_opaque_plateau_confidence") or 0.0
         )
+        same_key_plateau_min = float(opaque_known_b_info.get("same_key_plateau_confidence_min") or 0.85)
+        # A closed plateau outline is direct ownership evidence: the measured
+        # exterior contour encloses one compact same-key body. Let that evidence
+        # rescue near-threshold plateau scores, but keep ordinary lower-perimeter
+        # shadow traces on the standard trimap path.
+        outline_confirmed_plateau_margin = 0.05
+        translucent_counter_evidence = bool(button_translucency_model or fine_detail_composite)
+        internal_clean_bg_pixels = _same_key_outline_internal_clean_bg_pixels(same_key_opaque_button_outline)
+        outline_confirmed_plateau = bool(
+            same_key_outline_accepted
+            and same_key_opaque_button_outline.get("outline_recipe") == "closed_plateau_outline"
+            and opaque_known_b_info.get("solid_hard_band", False)
+            and same_key_plateau_confidence >= max(0.0, same_key_plateau_min - outline_confirmed_plateau_margin)
+            and internal_clean_bg_pixels == 0
+            and not translucent_counter_evidence
+        )
+        same_key_opaque_button = bool(
+            same_key_outline_accepted
+            and (same_key_plateau or outline_confirmed_plateau)
+        )
+    else:
+        same_key_outline_accepted = False
+        same_key_plateau = False
+        same_key_plateau_confidence = 0.0
+        same_key_plateau_min = 0.85
+        outline_confirmed_plateau_margin = 0.05
+        outline_confirmed_plateau = False
+        translucent_counter_evidence = False
+        internal_clean_bg_pixels = 0
     analysis["same_key_opaque_button_outline"] = same_key_opaque_button_outline
     analysis["same_key_button_model"] = {
         "enabled": bool(known_corridor_screen and asset_kind == "button"),
         "accepted": bool(same_key_opaque_button),
         "screen_mode": ck.screen_mode,
-        "opaque_plateau": bool(opaque_known_b_info.get("same_key_plateau", False)),
-        "outline_accepted": bool(same_key_opaque_button_outline.get("accepted", False)),
+        "opaque_plateau": bool(same_key_plateau),
+        "outline_accepted": bool(same_key_outline_accepted),
+        "outline_confirmed_plateau": bool(outline_confirmed_plateau),
+        "outline_confirmed_plateau_margin": float(outline_confirmed_plateau_margin),
+        "same_key_opaque_plateau_confidence": float(same_key_plateau_confidence),
+        "same_key_plateau_confidence_min": float(same_key_plateau_min),
+        "internal_clean_bg_pixels": int(internal_clean_bg_pixels),
+        "translucent_counter_evidence": bool(translucent_counter_evidence),
         "policy": "offer_corridorkey_translucent_and_known_b_opaque_outline"
         if same_key_opaque_button
         else "standard_route_candidates",

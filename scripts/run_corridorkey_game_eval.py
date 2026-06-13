@@ -93,6 +93,22 @@ def _candidate_explicit_trimap(
         return None
     if not isinstance(candidate, dict):
         return None
+    decision = candidate.get("decision")
+    if (
+        isinstance(decision, dict)
+        and decision.get("policy") == "same_key_opaque_outline"
+        and decision.get("button_body_policy") == "opaque_subject"
+        and decision.get("pymatting_trimap_mode") == "same_key_opaque_body_outline"
+        and set(decision).issubset(
+            {
+                "policy",
+                "button_body_policy",
+                "pymatting_trimap_mode",
+                "pymatting_unknown_grow_px",
+            }
+        )
+    ):
+        return None
     preview = candidate.get("preview")
     assets = preview.get("assets") if isinstance(preview, dict) else None
     asset_ref = str(assets.get("trimap") or "") if isinstance(assets, dict) else ""

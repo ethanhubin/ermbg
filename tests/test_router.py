@@ -604,6 +604,27 @@ def test_route_same_key_opaque_button_uses_outline_trimap_when_outline_is_measur
     assert decision.analysis["same_key_opaque_button_outline"]["accepted"] is True
 
 
+def test_route_same_key_icon_uses_closed_outline_trimap_near_plateau_threshold():
+    img = np.asarray(
+        Image.open(
+            Path(__file__).resolve().parents[1]
+            / "samples/corridorkey_semantic/icon/icon_icon_a03_hard_boundary_weak_contrast/green.png"
+        ).convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.params["parameter_profile"] == "known_b_same_key_opaque_outline"
+    assert decision.params["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    model = decision.analysis["same_key_button_model"]
+    assert model["opaque_plateau"] is False
+    assert model["outline_confirmed_plateau"] is True
+    assert model["internal_clean_bg_pixels"] == 0
+    assert model["translucent_counter_evidence"] is False
+
+
 def test_route_unknown_unstable_background_uses_pymatting_fallback():
     rng = np.random.default_rng(123)
     img = rng.integers(0, 256, (128, 128, 3), dtype=np.uint8)

@@ -5200,9 +5200,26 @@ def _semantic_decision_requires_explicit_trimap(semantic_decision: dict[str, Any
     policy = semantic_decision.get("policy")
     if isinstance(policy, str) and policy == "auto_default" and len(semantic_decision) == 1:
         return False
+    if (
+        policy == "same_key_opaque_outline"
+        and semantic_decision.get("button_body_policy") == "opaque_subject"
+        and semantic_decision.get("pymatting_trimap_mode") == "same_key_opaque_body_outline"
+        and set(semantic_decision).issubset(
+            {
+                "policy",
+                "button_body_policy",
+                "pymatting_trimap_mode",
+                "pymatting_unknown_grow_px",
+            }
+        )
+    ):
+        return False
     # Route-only auto-default execution should let the executor build the fresh
     # Known-B trimap from the normalized image. Semantic ownership choices such
     # as hole cut/keep still need the Analyze-provided trimap overlay contract.
+    # Same-key opaque outline is also route/mode evidence: the executor must build
+    # the trimap itself so its opaque edge solver and color-restore masks share the
+    # same measured contour instead of replaying the Analyze preview trimap.
     return True
 
 
