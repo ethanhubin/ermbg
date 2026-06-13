@@ -549,7 +549,7 @@ def test_slice_page_serves_slice_mode_entry():
     assert 'uploadedPreviewUrl = URL.createObjectURL(file.files[0]);' in response.text
     assert 'renderPreviewImage(uploadedPreviewUrl, "上传图片预览");' in response.text
     assert "previewViewport.clear('<span class=\"empty\">自动标注会显示在这里</span>');" not in response.text
-    assert 'statusEl.textContent = "已载入图片，点击预览";' in response.text
+    assert 'statusEl.textContent = "已载入图片，正在自动标注";' in response.text
     assert 'id="background-repair" name="background_repair" type="checkbox"' in response.text
     assert '<label class="checkbox-field background-repair-field"><input id="background-repair" name="background_repair" type="checkbox" checked><span>背景修复</span></label>' in response.text
     assert 'data.append("background_repair", backgroundRepair.checked ? "true" : "false")' in response.text
@@ -1896,8 +1896,10 @@ def test_execute_candidate_endpoint_applies_shadow_candidate_mode(monkeypatch):
 
     assert response.status_code == 200
     assert captured["shadow_mode"] == "auto"
-    assert captured["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
-    assert captured["pymatting_unknown_grow_px"] == 2
+    route_decision = captured["route_decision"]
+    assert isinstance(route_decision, dict)
+    assert route_decision["params"]["pymatting_trimap_mode"] == "same_key_opaque_body_outline"
+    assert route_decision["params"]["pymatting_unknown_grow_px"] == 2
     assert captured["semantic_decision"] == {
         "button_body_policy": "opaque_subject",
         "pymatting_trimap_mode": "same_key_opaque_body_outline",
@@ -1976,6 +1978,75 @@ def test_execute_candidate_endpoint_passes_selected_candidate_trimap_to_direct_w
     np.testing.assert_array_equal(explicit, trimap)
 
 
+def test_execute_candidate_endpoint_skips_auto_default_preview_trimap(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_direct_worker(image, **kwargs):
+        captured.update(kwargs)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., :3] = rgb
+        rgba[..., 3] = 255
+        return MatteResponse(
+            rgba=rgba,
+            alpha=np.ones((h, w), dtype=np.float32),
+            foreground_srgb=rgba[..., :3],
+            strategy_name="direct_pymatting_known_b",
+            background_color=(0, 200, 0),
+            debug={
+                "backend": "direct-worker",
+                "direct_worker": {"execution_backend": "direct-pymatting-known-b"},
+                "auto_route": {
+                    "requested_backend": "direct-worker",
+                    "route": "pymatting_known_b",
+                    "execution_backend": "direct-pymatting-known-b",
+                },
+            },
+        )
+
+    monkeypatch.setattr(web, "WEB_AUTO_BACKEND", "direct-worker")
+    monkeypatch.setattr(web, "matte_image_direct_worker", fake_direct_worker)
+    trimap = np.full((16, 16), 128, dtype=np.uint8)
+    analysis = {
+        "status": "ready",
+        "analysis_id": "analysis_auto_default_trimap",
+        "default_candidate_id": "auto_default",
+        "route": {"route": "pymatting_known_b", "algorithm": "pymatting_known_b"},
+        "preview_assets": {
+            "candidate:auto_default:trimap": {
+                "kind": "trimap",
+                "execution_role": "pymatting_explicit_trimap",
+                "data_url": _gray_png_data_url(trimap),
+            },
+        },
+        "candidates": [
+            {
+                "id": "auto_default",
+                "decision": {"policy": "auto_default"},
+                "preview": {"assets": {"trimap": "candidate:auto_default:trimap"}},
+            }
+        ],
+    }
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/execute-candidate",
+        files={"file": ("input.png", _png_bytes(), "image/png")},
+        data={
+            "backend": "auto",
+            "selected_candidate_id": "auto_default",
+            "semantic_decision": json.dumps({"policy": "auto_default"}),
+            "analysis_payload": json.dumps(analysis),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["execution_backend"] == "auto"
+    assert "pymatting_explicit_trimap" not in captured
+    assert isinstance(captured["route_decision"], dict)
+
+
 def test_execute_candidate_endpoint_passes_analysis_route_decision_to_direct_worker(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -2038,7 +2109,7 @@ def test_execute_candidate_endpoint_passes_analysis_route_decision_to_direct_wor
     )
 
     assert response.status_code == 200
-    assert captured["execution_backend"] == "direct-corridorkey"
+    assert captured["execution_backend"] == "auto"
     route_decision = captured["route_decision"]
     assert isinstance(route_decision, dict)
     assert route_decision["route"] == "corridorkey"
@@ -2208,20 +2279,19 @@ def test_execute_candidate_endpoint_applies_known_b_preprocess_contract(monkeypa
     )
 
     assert response.status_code == 200
-    assert captured["execution_backend"] == "direct-pymatting-known-b"
-    assert captured["pymatting_bg_source"] == "custom"
-    assert captured["pymatting_bg_color"] == (255, 255, 255)
-    assert captured["pymatting_bg_threshold"] == 4.5
-    assert captured["pymatting_fg_threshold"] == 28.0
-    assert captured["pymatting_adapt_bg_threshold"] is False
-    assert captured["pymatting_adapt_fg_threshold"] is False
-    assert captured["pymatting_adapt_boundary_band"] is False
-    assert captured["pymatting_boundary_band_px"] == 3
-    assert captured["pymatting_input_preprocessed"] is True
+    assert captured["execution_backend"] == "auto"
     route_decision = captured["route_decision"]
     assert isinstance(route_decision, dict)
     assert route_decision["route"] == "pymatting_known_b"
-    assert route_decision["params"]["pymatting_bg_color"] == [255, 255, 255]
+    assert route_decision["params"]["pymatting_bg_source"] == "custom"
+    assert tuple(route_decision["params"]["pymatting_bg_color"]) == (255, 255, 255)
+    assert route_decision["params"]["pymatting_bg_threshold"] == 4.5
+    assert route_decision["params"]["pymatting_fg_threshold"] == 28.0
+    assert route_decision["params"]["pymatting_adapt_bg_threshold"] is False
+    assert route_decision["params"]["pymatting_adapt_fg_threshold"] is False
+    assert route_decision["params"]["pymatting_adapt_boundary_band"] is False
+    assert route_decision["params"]["pymatting_boundary_band_px"] == 3
+    assert route_decision["params"]["pymatting_input_preprocessed"] is True
     assert not any(key.startswith("pymatting_") and "normalization" in key for key in captured)
     payload = response.json()
     preprocess_debug = payload["debug"]["input_preprocess"]["known_background_normalization"]
