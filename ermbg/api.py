@@ -1075,6 +1075,7 @@ def _matte_image_pymatting_known_b(
             B_lin=B_lin,
             solve=solve,
             donor_foreground_linear=donor_foreground_linear,
+            enable_physical_fallback=requested_trimap_mode == "same_key_opaque_body_outline",
         )
         foreground_linear = np.clip(foreground_linear, 0.0, 1.0).astype(np.float32)
         foreground_srgb = ermbg_io.linear_to_srgb_u8(foreground_linear)
@@ -1111,7 +1112,14 @@ def _matte_image_pymatting_known_b(
         }
     subject_alpha = alpha
     subject_foreground_srgb = foreground_srgb
-    hard_button_guard_enabled = _hard_button_profile_enabled(auto_route, trimap_mode=requested_trimap_mode)
+    # The hard-button exterior cleanup is a compensating guard for the physical
+    # min-alpha repair: when that repair has not actually lifted pixels, standard
+    # Known-B should keep the PyMatting/ShadowPatch result untouched.
+    hard_button_profile_enabled = _hard_button_profile_enabled(auto_route, trimap_mode=requested_trimap_mode)
+    hard_button_guard_enabled = (
+        hard_button_profile_enabled
+        and int(consistency_repair.get("physical_repaired_pixels") or 0) > 0
+    )
     subject_alpha, subject_foreground_srgb, hard_button_subject_leak_guard_info = (
         _guard_known_b_hard_button_exterior_subject_leaks(
             processing_rgb,
@@ -1123,6 +1131,8 @@ def _matte_image_pymatting_known_b(
             enabled=hard_button_guard_enabled,
         )
     )
+    if hard_button_profile_enabled and not hard_button_guard_enabled:
+        hard_button_subject_leak_guard_info["reason"] = "physical min-alpha repair did not run"
     shadow_patch_rgb = processing_rgb
     shadow_patch_foreground_srgb = subject_foreground_srgb
     shadow_patch_source_info = {
@@ -1236,6 +1246,8 @@ def _matte_image_pymatting_known_b(
         trimap_info=trimap_info,
         enabled=hard_button_guard_enabled,
     )
+    if hard_button_profile_enabled and not hard_button_guard_enabled:
+        known_b_unknown_residue_cleanup_info["reason"] = "physical min-alpha repair did not run"
     timings["known_b_residue_cleanup_sec"] = time.perf_counter() - cleanup_started
     alpha_u8 = (np.clip(alpha, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     rgba = np.dstack([rgba_rgb_srgb, alpha_u8])
@@ -1556,6 +1568,7 @@ def _repair_known_b_unmix_consistency(
     solve: np.ndarray,
     donor_foreground_linear: np.ndarray | None = None,
     donor_exclusion_mask: np.ndarray | None = None,
+    enable_physical_fallback: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Repair edge pixels whose unmix produced an out-of-gamut foreground.
 
@@ -1570,8 +1583,10 @@ def _repair_known_b_unmix_consistency(
     the source color onto the line through (B, F_neighbor) in linear RGB. The
     projection coefficient is the alpha that makes the borrowed F consistent
     with C; F is then re-derived from that alpha so the recovered (F, a) lies
-    inside the gamut. Pixels with no usable healthy neighbor fall back to the
-    minimum per-pixel alpha required to keep F physically in gamut.
+    inside the gamut. The minimum-alpha fallback is only valid for same-key
+    opaque ownership repairs, where the route has already proven that near-B
+    material is subject. Standard Known-B paths keep no-donor pixels unchanged
+    so source-colored antialiasing and shadows are not thickened.
     """
     a = alpha.astype(np.float32)
     F = foreground_linear.astype(np.float32)
@@ -1591,6 +1606,7 @@ def _repair_known_b_unmix_consistency(
         "donor_foreground_override_pixels": 0,
         "donor_exclusion_pixels": 0,
         "healthy_donor_pixels": 0,
+        "physical_fallback_enabled": bool(enable_physical_fallback),
         "alpha_lift_mean": 0.0,
         "alpha_lift_max": 0.0,
     }
@@ -1646,7 +1662,7 @@ def _repair_known_b_unmix_consistency(
 
     remaining_dirty = dirty & ~accept
     physical_accept = np.zeros((h, w), dtype=bool)
-    if bool(remaining_dirty.any()):
+    if bool(enable_physical_fallback) and bool(remaining_dirty.any()):
         b = B_lin.reshape(1, 1, 3)
         c = C_lin
         min_alpha = np.zeros((h, w), dtype=np.float32)

@@ -342,6 +342,41 @@ def test_pymatting_known_b_shadow_patch_extends_source_shadow_to_connected_scree
     assert float(np.median(shadow_alpha[residue])) > 0.15
 
 
+def test_known_b_unmix_physical_fallback_is_same_key_only():
+    import ermbg.api as api
+
+    alpha = np.array([[0.10]], dtype=np.float32)
+    foreground = np.array([[[-0.20, 0.20, 0.20]]], dtype=np.float32)
+    image_linear = np.array([[[0.0, 0.40, 0.0]]], dtype=np.float32)
+    background_linear = np.array([0.0, 0.50, 0.0], dtype=np.float32)
+    solve = np.array([[True]])
+
+    standard_alpha, _standard_fg, standard_info = api._repair_known_b_unmix_consistency(
+        alpha,
+        foreground,
+        C_lin=image_linear,
+        B_lin=background_linear,
+        solve=solve,
+    )
+    same_key_alpha, _same_key_fg, same_key_info = api._repair_known_b_unmix_consistency(
+        alpha,
+        foreground,
+        C_lin=image_linear,
+        B_lin=background_linear,
+        solve=solve,
+        enable_physical_fallback=True,
+    )
+
+    assert standard_info["dirty_pixels"] == 1
+    assert standard_info["physical_fallback_enabled"] is False
+    assert standard_info["physical_repaired_pixels"] == 0
+    assert standard_info["repaired_pixels"] == 0
+    assert standard_alpha[0, 0] == pytest.approx(0.10)
+    assert same_key_info["physical_fallback_enabled"] is True
+    assert same_key_info["physical_repaired_pixels"] == 1
+    assert same_key_alpha[0, 0] > standard_alpha[0, 0]
+
+
 def test_known_b_hard_button_guard_cleans_exterior_subject_leaks_without_erasing_shadow():
     import ermbg.api as api
     from ermbg.types import Trimap
