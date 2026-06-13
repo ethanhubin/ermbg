@@ -20,6 +20,39 @@ def _solid_with_subject(bg_color, fg_color=(220, 30, 30), h=128, w=128):
     return img
 
 
+def _hard_glossy_wide_button_gradient_only() -> np.ndarray:
+    img = np.full((98, 261, 3), (2, 179, 9), dtype=np.uint8)
+    cv2.rectangle(img, (32, 23), (244, 82), (1, 150, 3), -1, cv2.LINE_AA)
+    for y in range(18, 75):
+        t = (y - 18) / (75 - 18 - 1)
+        color = np.array([255, 246, 208]) * (1.0 - t) + np.array([232, 190, 98]) * t
+        img[y, 28:242] = np.clip(color, 0, 255).astype(np.uint8)
+    cv2.rectangle(img, (28, 18), (242, 75), (255, 255, 255), 3, cv2.LINE_AA)
+    cv2.rectangle(img, (31, 21), (239, 72), (150, 90, 0), 2, cv2.LINE_AA)
+
+    center = (47, 49)
+    cv2.circle(img, center, 39, (255, 255, 255), -1, cv2.LINE_AA)
+    for radius, color in [
+        (35, (255, 146, 0)),
+        (29, (255, 213, 19)),
+        (23, (255, 156, 0)),
+        (18, (255, 195, 16)),
+    ]:
+        cv2.circle(img, center, radius, color, -1, cv2.LINE_AA)
+    cv2.circle(img, center, 31, (150, 80, 0), 2, cv2.LINE_AA)
+    cv2.circle(img, center, 20, (180, 90, 0), 2, cv2.LINE_AA)
+
+    right = (224, 49)
+    cv2.circle(img, right, 22, (255, 255, 255), -1, cv2.LINE_AA)
+    cv2.circle(img, right, 18, (95, 206, 26), -1, cv2.LINE_AA)
+    cv2.circle(img, right, 17, (20, 88, 0), 2, cv2.LINE_AA)
+    cv2.line(img, (224, 38), (224, 60), (255, 255, 255), 6, cv2.LINE_AA)
+    cv2.line(img, (213, 49), (235, 49), (255, 255, 255), 6, cv2.LINE_AA)
+    cv2.line(img, (224, 38), (224, 60), (0, 80, 0), 2, cv2.LINE_AA)
+    cv2.line(img, (213, 49), (235, 49), (0, 80, 0), 2, cv2.LINE_AA)
+    return img
+
+
 def _make_clean_rgba(h=128, w=128):
     """RGBA where opaque interior is uniform red, transparent regions are
     premultiplied (RGB=0), and the soft edge is properly mixed."""
@@ -204,10 +237,9 @@ def test_route_translucent_button_uses_corridorkey():
     assert decision.params["execution_profile"] == "corridorkey-transparent-button"
 
 
-def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundary_gate():
+def test_route_translucent_button_uses_corridorkey_semialpha_evidence():
     root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
     for rel in [
-        "button/button_real_glass_blue_bg_yellow/blue.png",
         "button/button_real_glass_blue_bg_green/blue.png",
     ]:
         img = np.asarray(Image.open(root / rel).convert("RGB"), dtype=np.uint8)
@@ -216,12 +248,41 @@ def test_route_blue_glass_and_translucent_button_use_corridorkey_complex_boundar
         assert decision.asset_kind == "button", rel
         assert decision.params["execution_profile"] == "corridorkey-transparent-button", rel
         assert "corridorkey_hard_ui_hint_mode" not in decision.params
-        complex_info = decision.analysis["complex_button_boundary"]
+        button_info = decision.analysis["button_corridorkey_translucency"]
+        assert button_info["accepted"] is True, rel
         assert (
-            complex_info["gradient_gate"]
-            or complex_info["semi_alpha_gate"]
-            or complex_info["combined_glass_gate"]
+            button_info["profile_gate"]
+            or button_info["semi_alpha_gate"]
+            or button_info["combined_glass_gate"]
+            or button_info["interior_material_gate"]
         ), rel
+
+
+def test_route_gradient_only_glossy_button_stays_known_b():
+    decision = classify_route(_hard_glossy_wide_button_gradient_only())
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.params["execution_profile"] == "pymatting-hard-button"
+    assert decision.analysis["complex_button_boundary"]["gradient_gate"] is True
+    button_info = decision.analysis["button_corridorkey_translucency"]
+    assert button_info["accepted"] is False
+    assert button_info["gradient_gate_ignored"] is True
+
+
+def test_route_gradient_only_glass_like_button_stays_known_b():
+    root = Path(__file__).resolve().parents[1] / "samples" / "corridorkey_semantic"
+    img = np.asarray(
+        Image.open(root / "button/button_real_glass_blue_bg_yellow/blue.png").convert("RGB"),
+        dtype=np.uint8,
+    )
+
+    decision = classify_route(img)
+
+    assert decision.route == "pymatting_known_b"
+    assert decision.asset_kind == "button"
+    assert decision.analysis["complex_button_boundary"]["gradient_gate"] is True
+    assert decision.analysis["button_corridorkey_translucency"]["gradient_gate_ignored"] is True
 
 
 def test_route_opaque_hard_ui_profile_is_not_overridden_by_complex_boundary_gate():

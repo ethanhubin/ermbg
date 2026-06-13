@@ -987,6 +987,52 @@ def _fine_detail_composite_evidence(
     }
 
 
+def _button_corridorkey_translucency_evidence(
+    profile: str,
+    complex_boundary_info: dict[str, Any],
+    *,
+    fine_detail_composite: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Return whether a measured button should be upgraded to CorridorKey.
+
+    Buttons default to the deterministic Known-B hard-UI model. CorridorKey is
+    reserved for explicit translucency or soft-detail evidence; a high-gradient
+    hard highlight/outline by itself is not enough to change model family.
+    """
+
+    profile_gate = profile == "translucent_button"
+    screen_tinted_profile = profile == "screen_tinted_translucency"
+    semi_alpha_gate = bool(complex_boundary_info.get("semi_alpha_gate"))
+    combined_glass_gate = bool(complex_boundary_info.get("combined_glass_gate"))
+    interior_material_gate = bool(complex_boundary_info.get("interior_material_gate"))
+    fine_detail_translucent_gate = bool(complex_boundary_info.get("fine_detail_translucent_gate"))
+    accepted = bool(
+        profile_gate
+        or semi_alpha_gate
+        or combined_glass_gate
+        or interior_material_gate
+        or fine_detail_translucent_gate
+        or fine_detail_composite
+    )
+    gradient_gate = bool(complex_boundary_info.get("gradient_gate"))
+    return accepted, {
+        "enabled": True,
+        "accepted": accepted,
+        "profile": profile,
+        "profile_gate": profile_gate,
+        "screen_tinted_profile": screen_tinted_profile,
+        "semi_alpha_gate": semi_alpha_gate,
+        "combined_glass_gate": combined_glass_gate,
+        "interior_material_gate": interior_material_gate,
+        "fine_detail_translucent_gate": fine_detail_translucent_gate,
+        "fine_detail_composite_gate": bool(fine_detail_composite),
+        "gradient_gate_ignored": bool(gradient_gate and not accepted),
+        "reason": ""
+        if accepted
+        else "button has no measured translucency or soft-detail evidence; ignore gradient-only complex boundary",
+    }
+
+
 def build_route_candidates(
     image_srgb: np.ndarray,
     source_alpha: np.ndarray | None = None,
@@ -1124,15 +1170,31 @@ def build_route_candidates(
         opaque_known_b_model=opaque_known_b_model,
     )
     analysis["fine_detail_composite_evidence"] = fine_detail_info
-    complex_translucent_model = (
-        (complex_button_boundary or fine_detail_composite)
-        and not opaque_known_b_model
-    )
     asset_kind = _route_asset_kind(
         image_srgb,
         profile,
         ck.screen_mode if known_corridor_screen else "unknown",
     )
+    button_translucency_model = False
+    button_translucency_info: dict[str, Any] = {
+        "enabled": bool(asset_kind == "button"),
+        "accepted": False,
+        "reason": "not a button route",
+    }
+    if asset_kind == "button":
+        button_translucency_model, button_translucency_info = _button_corridorkey_translucency_evidence(
+            profile,
+            complex_button_info,
+            fine_detail_composite=fine_detail_composite,
+        )
+    analysis["button_corridorkey_translucency"] = button_translucency_info
+    if asset_kind == "button":
+        complex_translucent_model = button_translucency_model and not opaque_known_b_model
+    else:
+        complex_translucent_model = (
+            (complex_button_boundary or fine_detail_composite)
+            and not opaque_known_b_model
+        )
     same_key_opaque_button_outline: dict[str, Any] = {
         "enabled": bool(known_corridor_screen and asset_kind == "button"),
         "accepted": False,
@@ -1288,9 +1350,15 @@ def build_route_candidates(
             ck_reasons = ["fine_detail_composite_foreground_uses_corridorkey"]
         elif character_like:
             ck_reasons = ["fine_detail_complex_foreground_uses_corridorkey"]
+        elif asset_kind == "button" and button_translucency_model:
+            ck_reasons = ["button_translucency_evidence_uses_corridorkey"]
         else:
             ck_reasons = ["complex_translucent_known_screen_uses_corridorkey"]
-        ck_confidence = float(max(0.86, ck.background_confidence)) if (complex_button_boundary or fine_detail_composite) else 0.72
+        ck_confidence = (
+            float(max(0.86, ck.background_confidence))
+            if (complex_button_boundary or fine_detail_composite or button_translucency_model)
+            else 0.72
+        )
         candidates.append(
             RouteCandidate(
                 id="route_corridorkey",
